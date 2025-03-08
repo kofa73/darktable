@@ -109,16 +109,37 @@ float determinant(const mat3f m) {
 }
 
 //AgX implementation
-// These matrices taken from Blender's implementation of AgX, which works with Rec.2020 primaries.
-// https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
-
+        /* https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
+        # inset matrix from Troy's SB2383 script, setting is rotate = [3.0, -1, -2.0], inset = [0.4, 0.22, 0.13]
+        # link to the script: https://github.com/sobotka/SB2383-Configuration-Generation/blob/main/generate_config.py
+        # the relevant part is at line 88 and 89
+        inset_matrix = numpy.array([[0.856627153315983, 0.0951212405381588, 0.0482516061458583],
+                                    [0.137318972929847, 0.761241990602591, 0.101439036467562],
+                                    [0.11189821299995, 0.0767994186031903, 0.811302368396859]])
+         */
 const mat3f AgXInsetMatrix = {
 	{{0.856627153315983f, 0.0951212405381588f, 0.0482516061458583f},
 	{0.137318972929847f, 0.761241990602591f, 0.101439036467562f},
 	{0.11189821299995f, 0.0767994186031903f, 0.811302368396859f}}
 };
 
+
 const mat3f AgXOutsetMatrix = {
+       /*
+        # outset matrix from Troy's SB2383 script, setting is rotate = [0, 0, 0] inset = [0.4, 0.22, 0.04], used on inverse
+        # link to the script: https://github.com/sobotka/SB2383-Configuration-Generation/blob/main/generate_config.py
+        # the relevant part is at line 88 and 89
+        outset_matrix = numpy.linalg.inv(numpy.array([[0.899796955911611, 0.0871996192028351, 0.013003424885555],
+                                                      [0.11142098895748, 0.875575586156966, 0.0130034248855548],
+                                                      [0.11142098895748, 0.0871996192028349, 0.801379391839686]]))
+        inverted:
+            {
+                {1.1271005818144, -0.11060664309660, -0.016493938717835},
+                {-0.14132976349844, 1.1578237022163, -0.016493938717834},
+                {-0.14132976349844, -0.11060664309660, 1.2519364065950}
+            }
+      */
+
 	{{1.1271005818144368f, -0.11060664309660323f, -0.016493938717834573f},
 	{-0.1413297634984383f, 1.157823702216272f, -0.016493938717834257f},
 	{-0.14132976349843826f, -0.11060664309660294f, 1.2519364065950405f}}
