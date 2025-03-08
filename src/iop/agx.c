@@ -21,6 +21,7 @@ DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
 typedef struct dt_iop_agx_params_t {
   float slope;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
   float power;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
+  float offset;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
   float sat;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
 } dt_iop_agx_params_t;
 
@@ -174,10 +175,11 @@ float3 agxLook(float3 val, const dt_iop_agx_params_t *p) {
     // Default
     float slope = p->slope;
     float3 power = {p->power, p->power, p->power};
+    float offset = p->offset;
     float sat = p->sat;
 
     // ASC CDL
-    float3 pow_val = powf3((float3){val.r * slope, val.g * slope, val.b * slope}, power);
+    float3 pow_val = powf3((float3){fmaxf(0.0f, val.r + offset) * slope, fmaxf(0.0f, val.g + offset) * slope, fmaxf(0.0f, val.b + offset) * slope}, power);
 
     float3 result;
     result.r = luma + sat * (pow_val.r - luma);
@@ -300,6 +302,7 @@ void init_presets(dt_iop_module_so_t *self) {
   // None preset
   p.slope = 1.0f;
   p.power = 1.0f;
+  p.offset = 0.0f;
   p.sat = 1.0f;
   dt_gui_presets_add_generic(_("None"), self->op, self->version(), &p,
                              sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
@@ -307,6 +310,7 @@ void init_presets(dt_iop_module_so_t *self) {
   // Punchy preset
   p.slope = 1.0f; // Slope was the same for all channels in Punchy
   p.power = 1.35f; // Power was the same for all channels in Punchy
+  p.offset = 0.0f;
   p.sat = 1.4f;
   dt_gui_presets_add_generic(_("Punchy"), self->op, self->version(), &p,
                              sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
@@ -324,6 +328,8 @@ void gui_init(dt_iop_module_t *self) {
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   slider = dt_bauhaus_slider_from_params(self, "power");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+  slider = dt_bauhaus_slider_from_params(self, "offset");
+  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
   slider = dt_bauhaus_slider_from_params(self, "sat");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
 }
