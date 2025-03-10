@@ -4,10 +4,36 @@
 #include "gui/color_picker_proxy.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
+#include "common/colorspaces_inline_conversions.h"
 
 #include <gtk/gtk.h>
 #include <stdlib.h>
 #include <math.h> // For math functions
+
+/* See
+ * https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
+ * https://iolite-engine.com/blog_posts/minimal_agx_implementation
+ *
+ * Note: filament and GLSL use column-major order for matrices; that is:
+ * {
+ *  {1, 2, 3},
+ *  {4, 5, 6}
+ * }
+ * defines a 3x2 matrix:
+ * +---+---+
+ * | 1 | 4 |
+ * +---+---+
+ * | 2 | 5 |
+ * +---+---+
+ * | 3 | 6 |
+ * +---+---+
+ *
+ * numpy uses a row-major representation:
+ * np.array([[1, 2, 3],
+ *           [4, 5, 6]])
+ * defines a 2x3 matrix.
+ */
+
 
 // Silence the compiler during dev of new module
 #pragma GCC diagnostic ignored "-Wunused-variable"
@@ -41,6 +67,25 @@ typedef struct {
 typedef struct {
     float m[3][3];
 } mat3f;
+
+// Helper function: matrix multiplication
+static float3 _mat3f_mul_float3(const mat3f m, const float3 v) {
+    float3 result;
+    result.r = m.m[0][0] * v.r + m.m[0][1] * v.g + m.m[0][2] * v.b;
+    result.g = m.m[1][0] * v.r + m.m[1][1] * v.g + m.m[1][2] * v.b;
+    result.b = m.m[2][0] * v.r + m.m[2][1] * v.g + m.m[2][2] * v.b;
+    return result;
+}
+
+// Helper function: pow function
+static float3 _powf3(float3 base, float3 exponent) {
+  float3 result;
+  result.r = powf(base.r, exponent.r);
+  result.g = powf(base.g, exponent.g);
+  result.b = powf(base.b, exponent.b);
+  return result;
+}
+
 
 // Modelines (needed, but not that relevant right now)
 
@@ -82,78 +127,25 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1,
   memcpy(piece->data, p1, self->params_size);
 }
 
-// Helper function: matrix multiplication
-float3 mat3f_mul_float3(const mat3f m, const float3 v) {
-    float3 result;
-    result.r = m.m[0][0] * v.r + m.m[0][1] * v.g + m.m[0][2] * v.b;
-    result.g = m.m[1][0] * v.r + m.m[1][1] * v.g + m.m[1][2] * v.b;
-    result.b = m.m[2][0] * v.r + m.m[2][1] * v.g + m.m[2][2] * v.b;
-    return result;
-}
-
-// Helper function: pow function
-float3 powf3(float3 base, float3 exponent) {
-  float3 result;
-  result.r = powf(base.r, exponent.r);
-  result.g = powf(base.g, exponent.g);
-  result.b = powf(base.b, exponent.b);
-  return result;
-}
-
-
-// Helper function: Determinant of a 3x3 matrix
-float determinant(const mat3f m) {
-    return m.m[0][0] * (m.m[1][1] * m.m[2][2] - m.m[1][2] * m.m[2][1])
-           - m.m[0][1] * (m.m[1][0] * m.m[2][2] - m.m[1][2] * m.m[2][0])
-           + m.m[0][2] * (m.m[1][0] * m.m[2][1] - m.m[1][1] * m.m[2][0]);
-}
-
 //AgX implementation
-        /* https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
-        # inset matrix from Troy's SB2383 script, setting is rotate = [3.0, -1, -2.0], inset = [0.4, 0.22, 0.13]
-        # link to the script: https://github.com/sobotka/SB2383-Configuration-Generation/blob/main/generate_config.py
-        # the relevant part is at line 88 and 89
+
+/*
+https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
         inset_matrix = numpy.array([[0.856627153315983, 0.0951212405381588, 0.0482516061458583],
                                     [0.137318972929847, 0.761241990602591, 0.101439036467562],
                                     [0.11189821299995, 0.0767994186031903, 0.811302368396859]])
-         */
-        /*
-original const mat3f AgXInsetMatrix = {
-	{{0.856627153315983f, 0.0951212405381588f, 0.0482516061458583f},
-	{0.137318972929847f, 0.761241990602591f, 0.101439036467562f},
-	{0.11189821299995f, 0.0767994186031903f, 0.811302368396859f}}
-
-    /* Bradford D65 to D50 https://fujiwaratko.sakura.ne.jp/infosci/colorspace/bradford_e.html
-    {{1.047886, 0.022919, -0.050216}, {0.029582, 0.990484,-0.017079}, {-0.009252, 0.015073, 0.751678}}
-    inverse, D50 to D65:
-    {{0.955513, -0.0230732, 0.063309}, {-0.0283249, 1.00994, 0.0210548}, {0.0123289, -0.0205358, 1.33071}}
-
-Inset D65
-	{{0.856627153315983, 0.0951212405381588, 0.0482516061458583},{0.137318972929847, 0.761241990602591, 0.101439036467562},{0.11189821299995, 0.0767994186031903, 0.811302368396859}}
-
-Bradford D50 to D65:
-	{{0.955513, -0.0230732, 0.063309}, {-0.0283249, 1.00994, 0.0210548}, {0.0123289, -0.0205358, 1.33071}}
-
-Inset from D50 = InsetD65 * Bradford_D50_to_D65:
-{{0.816419, 0.0753107, 0.120444}, {0.110899, 0.763557, 0.159707}, {0.114747, 0.0583202, 1.08831}}
 */
 const mat3f AgXInsetMatrix = {
   {
-    {0.816419f, 0.0753107f, 0.120444f},
-    {0.110899f, 0.763557f, 0.159707f},
-    {0.114747f, 0.0583202f, 1.08831f}
+    {0.856627153315983f, 0.0951212405381588f, 0.0482516061458583f},
+    {0.137318972929847f, 0.761241990602591f,  0.101439036467562f},
+    {0.11189821299995f,  0.0767994186031903f, 0.811302368396859f}
   }
 };
 
 
-/* Bradford D65 to D50 https://fujiwaratko.sakura.ne.jp/infosci/colorspace/bradford_e.html
-        {{1.047886, 0.022919, -0.050216}, {0.029582, 0.990484,-0.017079}, {-0.009252, 0.015073, 0.751678}}
-        inverse, D50 to D65:
-        {{0.955513, -0.0230732, 0.063309}, {-0.0283249, 1.00994, 0.0210548}, {0.0123289, -0.0205358, 1.33071}}
-
-        # outset matrix from Troy's SB2383 script, setting is rotate = [0, 0, 0] inset = [0.4, 0.22, 0.04], used on inverse
-        # link to the script: https://github.com/sobotka/SB2383-Configuration-Generation/blob/main/generate_config.py
-        # the relevant part is at line 88 and 89
+/*
+https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
         outset_matrix = numpy.linalg.inv(numpy.array([[0.899796955911611, 0.0871996192028351, 0.013003424885555],
                                                       [0.11142098895748, 0.875575586156966, 0.0130034248855548],
                                                       [0.11142098895748, 0.0871996192028349, 0.801379391839686]]))
@@ -163,19 +155,12 @@ const mat3f AgXInsetMatrix = {
                 {-0.14132976349844, 1.1578237022163, -0.016493938717834},
                 {-0.14132976349844, -0.11060664309660, 1.2519364065950}
             }
-
-Outset D65:
-{{1.1271005818144, -0.11060664309660, -0.016493938717835},{-0.14132976349844, 1.1578237022163, -0.016493938717834},{-0.14132976349844, -0.11060664309660, 1.2519364065950}}
-
-Bradford D65 to D50: {{1.047886, 0.022919, -0.050216}, {0.029582, 0.990484,-0.017079}, {-0.009252, 0.015073, 0.751678}}
-
-Outset to D50 = Bradford D65 to D50 * Outset D65
 */
 const mat3f AgXOutsetMatrix = {
   {
-    {1.18493, -0.0838128, -0.080529},
-    {-0.104229, 1.14542, -0.0382067},
-    {-0.118793, -0.0646654, 0.940957}
+    { 1.1271005818144f,  -0.11060664309660f, -0.016493938717835f},
+    {-0.14132976349844f,  1.1578237022163f,  -0.016493938717834f},
+    {-0.14132976349844f, -0.11060664309660f,  1.2519364065950f}
   }
 };
 
@@ -185,8 +170,8 @@ const mat3f AgXOutsetMatrix = {
 const float AgxMinEv = -12.47393f;      // log2(pow(2, LOG2_MIN) * MIDDLE_GRAY)
 const float AgxMaxEv = 4.026069f;       // log2(pow(2, LOG2_MAX) * MIDDLE_GRAY)
 
-// Adapted from https://iolite-engine.com/blog_posts/minimal_agx_implementation
-float3 agxDefaultContrastApprox(float3 x) {
+// https://iolite-engine.com/blog_posts/minimal_agx_implementation
+static float3 _agxDefaultContrastApprox(float3 x) {
     float3 x2 = {x.r * x.r, x.g * x.g, x.b * x.b};
     float3 x4 = {x2.r * x2.r, x2.g * x2.g, x2.b * x2.b};
     float3 x6 = {x4.r * x2.r, x4.g * x2.g, x4.b * x2.b};
@@ -221,10 +206,12 @@ float3 agxDefaultContrastApprox(float3 x) {
     return result;
 }
 
-// Adapted from https://iolite-engine.com/blog_posts/minimal_agx_implementation
-float3 agxLook(float3 val, const dt_iop_agx_params_t *p) {
-
-    const float lw[] = {0.2126f, 0.7152f, 0.0722f};
+// https://iolite-engine.com/blog_posts/minimal_agx_implementation
+static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p) {
+    // values? {0.2126f, 0.7152f, 0.0722f} are Rec709 Y values
+    //const float lw[] = {0.2126f, 0.7152f, 0.0722f};
+    // Rec 2020 Y:
+    const float lw[] = {0.2626983389565561f, 0.6780087657728164f, 0.05929289527062728f};
     float luma = lw[0] * val.r + lw[1] * val.g + lw[2] * val.b;
 
     // Default
@@ -234,7 +221,7 @@ float3 agxLook(float3 val, const dt_iop_agx_params_t *p) {
     float sat = p->sat;
 
     // ASC CDL
-    float3 pow_val = powf3((float3){fmaxf(0.0f, val.r + offset) * slope, fmaxf(0.0f, val.g + offset) * slope, fmaxf(0.0f, val.b + offset) * slope}, power);
+    float3 pow_val = _powf3((float3){fmaxf(0.0f, val.r + offset) * slope, fmaxf(0.0f, val.g + offset) * slope, fmaxf(0.0f, val.b + offset) * slope}, power);
 
     float3 result;
     result.r = luma + sat * (pow_val.r - luma);
@@ -243,12 +230,12 @@ float3 agxLook(float3 val, const dt_iop_agx_params_t *p) {
     return result;
 }
 
-float3 agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p) {
+static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p) {
     // Ensure no negative values
     float3 v = {fmaxf(0.0f, rgb.r), fmaxf(0.0f, rgb.g), fmaxf(0.0f, rgb.b)};
 
     // Apply Inset Matrix
-    v = mat3f_mul_float3(AgXInsetMatrix, v);
+    v = _mat3f_mul_float3(AgXInsetMatrix, v);
 
     // Log2 encoding
     float small_value = 1E-10f;
@@ -269,13 +256,13 @@ float3 agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p) {
     v.b = fminf(fmaxf(v.b, 0.0f), 1.0f);
 
     // Apply sigmoid
-    v = agxDefaultContrastApprox(v);
+    v = _agxDefaultContrastApprox(v);
 
     // Apply AgX look
-    v = agxLook(v, p);
+    v = _agxLook(v, p);
 
     // Apply Outset Matrix
-    v = mat3f_mul_float3(AgXOutsetMatrix, v);
+    v = _mat3f_mul_float3(AgXOutsetMatrix, v);
 
     // Linearize
     v.r = powf(fmaxf(0.0f, v.r), 2.2f);
@@ -309,7 +296,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       rgb.g = in[1];
       rgb.b = in[2];
 
-      float3 agx_rgb = agx_tone_mapping(rgb, p);
+      float3 agx_rgb = _agx_tone_mapping(rgb, p);
 
       out[0] = agx_rgb.r;
       out[1] = agx_rgb.g;
