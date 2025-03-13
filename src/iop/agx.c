@@ -49,6 +49,8 @@ typedef struct dt_iop_agx_params_t {
   float power;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
   float offset;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
   float sat;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
+  float mix;     // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.4 $DESCRIPTION: "Restore original hue"
+  gboolean useInverseMatrix;
 } dt_iop_agx_params_t;
 
 typedef struct dt_iop_agx_gui_data_t {
@@ -164,6 +166,14 @@ const mat3f AgXOutsetMatrix = {
   }
 };
 
+const mat3f AgXInsetMatrixInverse = {
+  {
+    {1.1974410768877f, -0.14426151269800f, -0.053179564189704f},
+    {-0.19647462632135f, 1.3540951314697f, -0.15762050514838f},
+    {-0.14655741710660f, -0.10828405878847f, 1.2548414758951f}
+  }
+};
+
 // LOG2_MIN      = -10.0
 // LOG2_MAX      =  +6.5
 // MIDDLE_GRAY   =  0.18
@@ -220,8 +230,10 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p) {
     float offset = p->offset;
     float sat = p->sat;
 
+    float scaled_offset = (luma < 1) ? offset * (1 - luma) : 0;
+
     // ASC CDL
-    float3 pow_val = _powf3((float3){fmaxf(0.0f, val.r + offset) * slope, fmaxf(0.0f, val.g + offset) * slope, fmaxf(0.0f, val.b + offset) * slope}, power);
+    float3 pow_val = _powf3((float3){fmaxf(0.0f, val.r + scaled_offset) * slope, fmaxf(0.0f, val.g + scaled_offset) * slope, fmaxf(0.0f, val.b + scaled_offset) * slope}, power);
 
     float3 result;
     result.r = luma + sat * (pow_val.r - luma);
@@ -231,6 +243,13 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p) {
 }
 
 static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p) {
+    dt_aligned_pixel_t rgb_pixel;
+    rgb_pixel[0] = rgb.r;
+    rgb_pixel[1] = rgb.g;
+    rgb_pixel[2] = rgb.b;
+    dt_aligned_pixel_t hsv_before;
+    dt_RGB_2_HSV(rgb_pixel, hsv_before);
+
     // Ensure no negative values
     float3 v = {fmaxf(0.0f, rgb.r), fmaxf(0.0f, rgb.g), fmaxf(0.0f, rgb.b)};
 
@@ -262,12 +281,42 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p) {
     v = _agxLook(v, p);
 
     // Apply Outset Matrix
-    v = _mat3f_mul_float3(AgXOutsetMatrix, v);
+    v = _mat3f_mul_float3(p->useInverseMatrix ? AgXInsetMatrixInverse : AgXOutsetMatrix, v);
 
     // Linearize
-    v.r = powf(fmaxf(0.0f, v.r), 2.2f);
-    v.g = powf(fmaxf(0.0f, v.g), 2.2f);
-    v.b = powf(fmaxf(0.0f, v.b), 2.2f);
+    rgb_pixel[0] = powf(fmaxf(0.0f, v.r), 2.2f);
+    rgb_pixel[1] = powf(fmaxf(0.0f, v.g), 2.2f);
+    rgb_pixel[2] = powf(fmaxf(0.0f, v.b), 2.2f);
+
+    dt_aligned_pixel_t hsv_after;
+    dt_RGB_2_HSV(rgb_pixel, hsv_after);
+
+    float mix = p->mix;
+
+    float h_before = hsv_before[0];
+    float h_after = hsv_after[0];
+
+    float hue_diff = h_after - h_before;
+
+    if (hue_diff > 0.5) {
+      h_after -= 1;
+    } else if (hue_diff < -0.5) {
+      h_after += 1;
+    }
+
+    h_after = h_after + (h_before - h_after) * mix;
+    if (h_after < 0) {
+      h_after += 1;
+    } else if (h_after > 1) {
+      h_after -= 1;
+    }
+
+    hsv_after[0] = h_after;
+    dt_HSV_2_RGB(hsv_after, rgb_pixel);
+
+    v.r = rgb_pixel[0];
+    v.g = rgb_pixel[1];
+    v.b = rgb_pixel[2];
 
     return v;
 }
@@ -366,14 +415,22 @@ void gui_init(dt_iop_module_t *self) {
 
   // Create sliders for slope, power, saturation
   GtkWidget *slider;
-  slider = dt_bauhaus_slider_from_params(self, "slope");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  slider = dt_bauhaus_slider_from_params(self, "power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  slider = dt_bauhaus_slider_from_params(self, "offset");
-  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
   slider = dt_bauhaus_slider_from_params(self, "sat");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+
+  slider = dt_bauhaus_slider_from_params(self, "slope");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+
+  slider = dt_bauhaus_slider_from_params(self, "offset");
+  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
+
+  slider = dt_bauhaus_slider_from_params(self, "power");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+
+  slider = dt_bauhaus_slider_from_params(self, "mix");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+
+  dt_bauhaus_toggle_from_params(self, "useInverseMatrix");
 }
 
 // GUI cleanup
