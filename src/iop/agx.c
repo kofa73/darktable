@@ -60,7 +60,7 @@ typedef struct dt_iop_agx_params_t {
     float power;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
     float offset;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
     float sat;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
-    float mix;     // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.4 $DESCRIPTION: "Restore original hue"
+    float mix;     // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
     gboolean sigmoid_tunable;    // $MIN: FALSE $MAX: TRUE $DEFAULT: TRUE $DESCRIPTION: "Use tunable curve vs fixed polynomial"
     float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -1.0 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure"
@@ -796,13 +796,13 @@ void init_presets(dt_iop_module_so_t *self) {
   p.sigmoid_shoulder_power = 1.5;
   p.sigmoid_toe_intersection_y = 0.0;
   p.sigmoid_shoulder_intersection_y = 1.0;
+  p.mix = 0.0f;
 
   // None preset
   p.slope = 1.0f;
   p.power = 1.0f;
   p.offset = 0.0f;
   p.sat = 1.0f;
-  p.mix = 0.0f;
 
   dt_gui_presets_add_generic(_("None"), self->op, self->version(), &p,
                              sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
