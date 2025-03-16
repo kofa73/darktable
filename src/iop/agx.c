@@ -43,20 +43,117 @@
 // Module introspection version
 DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
 
-// Module parameters struct
-typedef struct dt_iop_agx_params_t {
-  float slope;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
-  float power;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
-  float offset;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
-  float sat;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
-  float mix;     // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.4 $DESCRIPTION: "Restore original hue"
-  gboolean useInverseMatrix;
-} dt_iop_agx_params_t;
+int errors = 0;
+
+const float mid_grey = 0.18f;
+const float mid_out_mapped = 0.45865644686f; //powf(0.18, 1.0f / 2.2f);
 
 typedef struct dt_iop_agx_gui_data_t {
   // No combobox anymore
   // GtkWidget *look; // ComboBox for selecting AgX look
 } dt_iop_agx_gui_data_t;
+
+
+// Module parameters struct
+// Updated struct dt_iop_agx_params_t
+typedef struct dt_iop_agx_params_t {
+    float slope;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
+    float power;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
+    float offset;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
+    float sat;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
+    float mix;     // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.4 $DESCRIPTION: "Restore original hue"
+
+    gboolean sigmoid_tunable;    // $MIN: FALSE $MAX: TRUE $DEFAULT: TRUE $DESCRIPTION: "Use tunable curve vs fixed polynomial"
+    float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -1.0 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure"
+    float sigmoid_normalized_log2_maximum; // $MIN: 1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure"
+    float sigmoid_linear_slope; // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Slope of linear portion"
+    float sigmoid_toe_length;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe Transition Length"
+    float sigmoid_shoulder_length; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder Transition Length"
+    float sigmoid_toe_power;     // $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
+    float sigmoid_shoulder_power;// $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
+    float sigmoid_toe_intersection_y;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Output min"
+    float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Output max"
+} dt_iop_agx_params_t;
+
+void gui_init(dt_iop_module_t *self) {
+    dt_iop_agx_gui_data_t *g = IOP_GUI_ALLOC(agx);
+
+    self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+
+    // look: sat, slope, offset, power, mix
+    GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+    gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
+    GtkWidget *label = gtk_label_new(_("Look"));
+    gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
+    GtkWidget *slider;
+    slider = dt_bauhaus_slider_from_params(self, "sat");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+    gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "slope");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+    gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "offset");
+    dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
+    gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "power");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+    gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "mix");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+    gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+
+    // sigmoid
+    GtkWidget *sigmoid_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+    gtk_box_pack_start(GTK_BOX(self->widget), sigmoid_box, TRUE, TRUE, 0);
+    label = gtk_label_new(_("Sigmoid"));
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), label, FALSE, FALSE, 0);
+
+    dt_bauhaus_toggle_from_params(self, "sigmoid_tunable");
+
+    // black/white relative exposure
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_minimum");
+    dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_maximum");
+    dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    // Linear Section Slope
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_slope");
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 10.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    // Toe
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_length");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_intersection_y");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    // Shoulder
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_length");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+    slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_intersection_y");
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+    gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+}
 
 // Global data struct (not needed for this simple example)
 typedef struct dt_iop_agx_global_data_t {} dt_iop_agx_global_data_t;
@@ -216,6 +313,278 @@ static float3 _agxDefaultContrastApprox(float3 x) {
     return result;
 }
 
+// Emulating numpy's where function with a simple conditional assignment.
+static float _where(int condition, float true_val, float false_val) {
+    return condition ? true_val : false_val;
+}
+
+static float _linear_breakpoint(float numerator, float slope, float coordinate) {
+    float denominator = powf(powf(slope, 2.0f) + 1.0f, 1.0f / 2.0f);
+    if (denominator <= 0.0f || isnan(denominator))
+    {
+      errors++;//printf("denominator is invalid: %f\n", denominator);
+    }
+    if (numerator < 0.0f || isnan(numerator))
+    {
+      errors++;//printf("numerator is invalid: %f\n", numerator);
+    }
+    return numerator / denominator + coordinate;
+}
+
+static float _line(float x_in, float slope, float intercept) {
+    return slope * x_in + intercept;
+}
+
+static float _scale(float limit_x, float limit_y, float transition_x, float transition_y, float power, float slope) {
+  float linear_y_delta = slope * (limit_x - transition_x);
+  float power_curved_y_delta = powf(linear_y_delta, -power); // dampened / steepened
+    if(isnan(power_curved_y_delta) || power_curved_y_delta < 0.0f)
+  {
+    power_curved_y_delta = 0;
+  }
+  float remaining_y_span = limit_y - transition_y;
+  float y_delta_ratio = linear_y_delta / remaining_y_span;
+  float term_b = powf(y_delta_ratio, power) - 1.0f;
+    // if(isnan(term_b) || term_b < 0.0f)
+    // {
+    //   term_b = 0;
+    // }
+
+    float scale_value = powf(power_curved_y_delta * term_b, -1.0f / power);
+    if(isnan(scale_value) || isinf(scale_value))
+    {
+      scale_value = 1;
+    }
+
+  return scale_value;
+}
+
+static float _exponential(float x_in, float power) {
+  float value = x_in / powf(1.0f + powf(x_in, power), 1.0f / power);
+  if (isnan(value))
+  {
+    errors++; //printf("_exponential returns nan\n");
+  }
+  return value;
+}
+
+static float _exponential_curve(float x_in, float scale_, float slope, float power, float transition_x, float transition_y) {
+  float value = scale_ * _exponential((slope * (x_in - transition_x)) / scale_, power) + transition_y;
+  if (isnan(value))
+  {
+    errors++; //printf("_exponential_curve returns nan\n");
+  }
+  return value;
+}
+
+/*
+    gboolean sigmoid_tunable;    // $MIN: FALSE $MAX: TRUE $DEFAULT: TRUE $DESCRIPTION: "Use tunable curve vs fixed polynomial"
+
+    float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -1.0 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure"
+    float sigmoid_normalized_log2_maximum; // $MIN: 1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure"
+    // Python: default_x_pivot = numpy.abs(default_normalized_log2_minimum) / (default_normalized_log2_maximum - default_normalized_log2_minimum)
+    // pivot_x = fabsf(default_normalized_log2_minimum) / (default_normalized_log2_maximum - default_normalized_log2_minimum)
+    // float sigmoid_mid_grey_in; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.5 $DESCRIPTION: "Input mid-grey"
+    // Python: default_y_pivot = 0.18 ** (1.0 / 2.2)
+    // pivot_y = powf(0.18f, 1.0f / 2.2f)
+    float sigmoid_linear_slope; // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Slope of linear portion"
+    float sigmoid_toe_length;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe Transition Length"
+    float sigmoid_shoulder_length; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder Transition Length"
+    float sigmoid_toe_power;     // $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
+    float sigmoid_shoulder_power;// $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
+    float sigmoid_toe_intersection_y;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Output min"
+    float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Output max"
+
+
+
+y_LUT = sigmoid.calculate_sigmoid(
+x_input,
+pivots=[args.fulcrum_input, args.fulcrum_output],
+slope=args.fulcrum_slope,
+powers=[args.exponent_toe, args.exponent_shoulder],
+)
+# Input x
+    x_in, -> provided
+    # Pivot coordinates x and y for the fulcrum.
+    pivots=[0.5, 0.5], -> provided
+    # Slope of linear portion.
+    slope=2.0, -> provided
+    # Length of transition toward the toe and shoulder.
+    lengths=[0.0, 0.0], -> not provided
+    # Exponential power of the toe and shoulder regions.
+    powers=[1.0, 1.0], -> provided
+    # Intersection limit coordinates x and y for the toe and shoulder.
+    limits=[[0.0, 0.0], [1.0, 1.0]],
+*/
+static float _calculate_sigmoid(
+    // Input x
+    float x_in,
+    // Pivot coordinates x and y for the fulcrum.
+    float mid_in, float mid_out,
+    // Slope of linear portion.
+    float linear_slope,
+    // Length of transition toward the toe and shoulder.  Ignored.
+    float toe_length, float shoulder_length,
+    // Exponential power of the toe and shoulder regions.
+    float toe_power, float shoulder_power,
+    // Intersection limit values for the toe and shoulder.
+    float toe_intersection_y, float shoulder_intersection_y
+) {
+    if (isnan(x_in))
+    {
+      errors++; //printf("x_in is NaN\n");
+    }
+
+    if (isnan(mid_in))
+    {
+      errors++; printf("mid_in is NaN\n");
+    }
+
+    if (isnan(mid_out))
+    {
+      errors++; printf("mid_out is NaN\n");
+    }
+
+    if (isnan(linear_slope))
+    {
+      errors++; printf("linear_slope is NaN\n");
+    }
+
+    if (isnan(toe_length))
+    {
+      errors++; printf("toe_length is NaN\n");
+    }
+
+    if (isnan(shoulder_length))
+    {
+      errors++; printf("shoulder_length is NaN\n");
+    }
+
+    if (isnan(toe_power))
+    {
+      errors++; printf("toe_power is NaN\n");
+    }
+
+    if (isnan(shoulder_power))
+    {
+      errors++; printf("shoulder_power is NaN\n");
+    }
+
+    if (isnan(toe_intersection_y))
+    {
+      errors++; printf("toe_intersection_y is NaN\n");
+    }
+
+    if (isnan(shoulder_intersection_y))
+    {
+      errors++; printf("shoulder_intersection_y is NaN\n");
+    }
+
+    float transition_toe_x = _linear_breakpoint(-toe_length, linear_slope, mid_in);
+    if (isnan(transition_toe_x))
+    {
+      errors++; printf("transition_toe_x is NaN\n");
+    }
+
+    float transition_toe_y = _linear_breakpoint(linear_slope * -toe_length, linear_slope, mid_out);
+    if (isnan(transition_toe_y))
+    {
+      errors++; // printf("transition_toe_y is NaN\n");
+    }
+
+    float transition_shoulder_x = _linear_breakpoint(shoulder_length, linear_slope, mid_in);
+    if (isnan(transition_shoulder_x))
+    {
+      errors++; // printf("transition_shoulder_x is NaN\n");
+    }
+
+    float transition_shoulder_y = _linear_breakpoint(linear_slope * shoulder_length, linear_slope, mid_out);
+    if (isnan(transition_shoulder_y))
+    {
+      errors++; // printf("transition_shoulder_y is NaN\n");
+    }
+
+    float inverse_transition_toe_x = 1.0f - transition_toe_x;
+    if (isnan(inverse_transition_toe_x))
+    {
+      errors++; // printf("inverse_transition_toe_x is NaN\n");
+    }
+
+    float inverse_transition_toe_y = 1.0f - transition_toe_y;
+    if (isnan(inverse_transition_toe_y))
+    {
+      errors++; // printf("inverse_transition_toe_y is NaN\n");
+    }
+
+    const float inverse_limit_toe_x = 1.0f; // 1 - 0
+    const float inverse_limit_toe_y = 1.0f - toe_intersection_y;
+    if (isnan(inverse_limit_toe_y))
+    {
+      errors++; // printf("inverse_limit_toe_y is NaN\n");
+    }
+
+    const float shoulder_intersection_x = 1;
+
+    float scale_toe = -_scale(
+        inverse_limit_toe_x,
+        inverse_limit_toe_y,
+        inverse_transition_toe_x,
+        inverse_transition_toe_y,
+        toe_power,
+        linear_slope
+    );
+    if (isnan(scale_toe))
+    {
+      errors++; // printf("scale_toe is NaN\n");
+    }
+
+    float scale_shoulder = _scale(
+        shoulder_intersection_x,
+        shoulder_intersection_y,
+        transition_shoulder_x,
+        transition_shoulder_y,
+        shoulder_power,
+        linear_slope
+    );
+    if (isnan(scale_shoulder))
+    {
+      errors++; // printf("scale_shoulder is NaN\n");
+    }
+
+    // b
+    float intercept = transition_toe_y - linear_slope * transition_toe_x;
+    if (isnan(intercept))
+    {
+      errors++; // printf("intercept is NaN\n");
+    }
+
+  float result; // Variable to store the result
+
+  if (x_in < transition_toe_x) {
+    result = _exponential_curve(
+        x_in,
+        scale_toe,
+        linear_slope,
+        toe_power,
+        transition_toe_x,
+        transition_toe_y
+    );
+  } else if (x_in <= transition_shoulder_x) {
+    result = _line(x_in, linear_slope, intercept);
+  } else {
+    result = _exponential_curve(
+        x_in,
+        scale_shoulder,
+        linear_slope,
+        shoulder_power,
+        transition_shoulder_x,
+        transition_shoulder_y
+    );
+  }
+
+  return result;
+}
+
 // https://iolite-engine.com/blog_posts/minimal_agx_implementation
 static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p) {
     // values? {0.2126f, 0.7152f, 0.0722f} are Rec709 Y values
@@ -230,10 +599,8 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p) {
     float offset = p->offset;
     float sat = p->sat;
 
-    float scaled_offset = (luma < 1) ? offset * (1 - luma) : 0;
-
     // ASC CDL
-    float3 pow_val = _powf3((float3){fmaxf(0.0f, val.r + scaled_offset) * slope, fmaxf(0.0f, val.g + scaled_offset) * slope, fmaxf(0.0f, val.b + scaled_offset) * slope}, power);
+    float3 pow_val = _powf3((float3){fmaxf(0.0f, val.r + offset) * slope, fmaxf(0.0f, val.g + offset) * slope, fmaxf(0.0f, val.b + offset) * slope}, power);
 
     float3 result;
     result.r = luma + sat * (pow_val.r - luma);
@@ -242,51 +609,98 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p) {
     return result;
 }
 
-static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p) {
-    dt_aligned_pixel_t rgb_pixel;
-    rgb_pixel[0] = rgb.r;
-    rgb_pixel[1] = rgb.g;
-    rgb_pixel[2] = rgb.b;
-    dt_aligned_pixel_t hsv_before;
-    dt_RGB_2_HSV(rgb_pixel, hsv_before);
+static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, int debug)
+{
+  dt_aligned_pixel_t rgb_pixel;
+  rgb_pixel[0] = rgb.r;
+  rgb_pixel[1] = rgb.g;
+  rgb_pixel[2] = rgb.b;
+  dt_aligned_pixel_t hsv_before;
+  dt_RGB_2_HSV(rgb_pixel, hsv_before);
 
-    // Ensure no negative values
-    float3 v = {fmaxf(0.0f, rgb.r), fmaxf(0.0f, rgb.g), fmaxf(0.0f, rgb.b)};
+  // Ensure no negative values
+  float3 v = {fmaxf(0.0f, p->sigmoid_tunable ? rgb.r / 0.18f : rgb.r), fmaxf(0.0f, p->sigmoid_tunable ?rgb.g / 0.18f : rgb.g), fmaxf(0.0f, p->sigmoid_tunable ? rgb.b / 0.18f : rgb.b)};
 
-    // Apply Inset Matrix
-    v = _mat3f_mul_float3(AgXInsetMatrix, v);
+  // Apply Inset Matrix
+  v = _mat3f_mul_float3(AgXInsetMatrix, v);
 
-    // Log2 encoding
-    float small_value = 1E-10f;
-    v.r = fmaxf(v.r, small_value);
-    v.g = fmaxf(v.g, small_value);
-    v.b = fmaxf(v.b, small_value);
+  // Log2 encoding
+  float small_value = 1E-10f;
+  v.r = fmaxf(v.r, small_value);
+  v.g = fmaxf(v.g, small_value);
+  v.b = fmaxf(v.b, small_value);
 
-    v.r = log2f(v.r);
-    v.g = log2f(v.g);
-    v.b = log2f(v.b);
+  v.r = log2f(v.r);
+  v.g = log2f(v.g);
+  v.b = log2f(v.b);
 
-    v.r = (v.r - AgxMinEv) / (AgxMaxEv - AgxMinEv);
-    v.g = (v.g - AgxMinEv) / (AgxMaxEv - AgxMinEv);
-    v.b = (v.b - AgxMinEv) / (AgxMaxEv - AgxMinEv);
+  const float maxEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_maximum : AgxMaxEv;
+  const float minEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_minimum : AgxMinEv;
 
-    v.r = fminf(fmaxf(v.r, 0.0f), 1.0f);
-    v.g = fminf(fmaxf(v.g, 0.0f), 1.0f);
-    v.b = fminf(fmaxf(v.b, 0.0f), 1.0f);
+  if (debug) {
+    printf("maxEv: %f\n", maxEv);
+    printf("minEv: %f\n", minEv);
+  }
 
-    // Apply sigmoid
+  v.r = (v.r - minEv) / (maxEv - minEv);
+  v.g = (v.g - minEv) / (maxEv - minEv);
+  v.b = (v.b - minEv) / (maxEv - minEv);
+
+  v.r = fminf(fmaxf(v.r, 0.0f), 1.0f);
+  v.g = fminf(fmaxf(v.g, 0.0f), 1.0f);
+  v.b = fminf(fmaxf(v.b, 0.0f), 1.0f);
+
+  // Apply sigmoid
+  if (p->sigmoid_tunable)
+  {
+    const float mid_in = fabsf(p->sigmoid_normalized_log2_minimum / (p->sigmoid_normalized_log2_maximum - p->sigmoid_normalized_log2_minimum));
+
+    if (debug) {
+      printf("mid_in: %f\n", mid_in);
+    }
+
+    v.r = _calculate_sigmoid(
+      v.r,
+      mid_in, mid_out_mapped,
+      p->sigmoid_linear_slope,
+      p->sigmoid_toe_length, p->sigmoid_shoulder_length,
+      p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+      p->sigmoid_toe_intersection_y,
+      p->sigmoid_shoulder_intersection_y
+    );
+    v.g = _calculate_sigmoid(
+      v.g,
+      mid_in, mid_out_mapped,
+      p->sigmoid_linear_slope,
+      p->sigmoid_toe_length, p->sigmoid_shoulder_length,
+      p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+      p->sigmoid_toe_intersection_y,
+      p->sigmoid_shoulder_intersection_y
+    );
+    v.b = _calculate_sigmoid(
+      v.b,
+      mid_in, mid_out_mapped,
+      p->sigmoid_linear_slope,
+      p->sigmoid_toe_length, p->sigmoid_shoulder_length,
+      p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+      p->sigmoid_toe_intersection_y,
+      p->sigmoid_shoulder_intersection_y
+    );
+  } else
+  {
     v = _agxDefaultContrastApprox(v);
+  }
 
-    // Apply AgX look
-    v = _agxLook(v, p);
+  // Apply AgX look
+  v = _agxLook(v, p);
 
-    // Apply Outset Matrix
-    v = _mat3f_mul_float3(p->useInverseMatrix ? AgXInsetMatrixInverse : AgXOutsetMatrix, v);
+  // Apply Outset Matrix
+  v = _mat3f_mul_float3(AgXInsetMatrixInverse, v);
 
-    // Linearize
-    rgb_pixel[0] = powf(fmaxf(0.0f, v.r), 2.2f);
-    rgb_pixel[1] = powf(fmaxf(0.0f, v.g), 2.2f);
-    rgb_pixel[2] = powf(fmaxf(0.0f, v.b), 2.2f);
+  // Linearize
+  rgb_pixel[0] = powf(fmaxf(0.0f, v.r), 2.2f);
+  rgb_pixel[1] = powf(fmaxf(0.0f, v.g), 2.2f);
+  rgb_pixel[2] = powf(fmaxf(0.0f, v.b), 2.2f);
 
     dt_aligned_pixel_t hsv_after;
     dt_RGB_2_HSV(rgb_pixel, hsv_after);
@@ -345,7 +759,24 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       rgb.g = in[1];
       rgb.b = in[2];
 
-      float3 agx_rgb = _agx_tone_mapping(rgb, p);
+      int debug = (i == 0 && j == 0);
+
+      if (debug)
+      {
+        printf("================== start ==================\n");
+        printf("sigmoid_tunable = %d\n", p->sigmoid_tunable);
+        printf("sigmoid_normalized_log2_minimum = %f\n", p->sigmoid_normalized_log2_minimum);
+        printf("sigmoid_normalized_log2_maximum = %f\n", p->sigmoid_normalized_log2_maximum);
+        printf("sigmoid_linear_slope = %f\n", p->sigmoid_linear_slope);
+        printf("sigmoid_toe_length = %f\n", p->sigmoid_toe_length);
+        printf("sigmoid_shoulder_length = %f\n", p->sigmoid_shoulder_length);
+        printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
+        printf("sigmoid_shoulder_power = %f\n", p->sigmoid_shoulder_power);
+        printf("sigmoid_toe_intersection_y = %f\n", p->sigmoid_toe_intersection_y);
+        printf("sigmoid_shoulder_intersection_y = %f\n", p->sigmoid_shoulder_intersection_y);
+      }
+
+      float3 agx_rgb = _agx_tone_mapping(rgb, p, debug);
 
       out[0] = agx_rgb.r;
       out[1] = agx_rgb.g;
@@ -357,6 +788,10 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 
       in += ch;
       out += ch;
+      if (debug)
+      {
+        printf("================== end ==================\n");
+      }
     }
   }
 }
@@ -405,32 +840,6 @@ void init_presets(dt_iop_module_so_t *self) {
   p.sat = 1.4f;
   dt_gui_presets_add_generic(_("Punchy"), self->op, self->version(), &p,
                              sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
-}
-
-// GUI init
-void gui_init(dt_iop_module_t *self) {
-  dt_iop_agx_gui_data_t *g = IOP_GUI_ALLOC(agx);
-
-  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-
-  // Create sliders for slope, power, saturation
-  GtkWidget *slider;
-  slider = dt_bauhaus_slider_from_params(self, "sat");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-
-  slider = dt_bauhaus_slider_from_params(self, "slope");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-
-  slider = dt_bauhaus_slider_from_params(self, "offset");
-  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
-
-  slider = dt_bauhaus_slider_from_params(self, "power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-
-  slider = dt_bauhaus_slider_from_params(self, "mix");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-
-  dt_bauhaus_toggle_from_params(self, "useInverseMatrix");
 }
 
 // GUI cleanup
