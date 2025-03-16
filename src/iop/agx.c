@@ -43,14 +43,13 @@
 // Module introspection version
 DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
 
+// so we have a breakpoint target in error-handling branches, to be removed after debugging
 int errors = 0;
 
 const float mid_grey = 0.18f;
 const float mid_out_mapped = 0.45865644686f; //powf(0.18, 1.0f / 2.2f);
 
 typedef struct dt_iop_agx_gui_data_t {
-  // No combobox anymore
-  // GtkWidget *look; // ComboBox for selecting AgX look
 } dt_iop_agx_gui_data_t;
 
 
@@ -377,45 +376,6 @@ static float _exponential_curve(float x_in, float scale_, float slope, float pow
   return value;
 }
 
-/*
-    gboolean sigmoid_tunable;    // $MIN: FALSE $MAX: TRUE $DEFAULT: TRUE $DESCRIPTION: "Use tunable curve vs fixed polynomial"
-
-    float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -1.0 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure"
-    float sigmoid_normalized_log2_maximum; // $MIN: 1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure"
-    // Python: default_x_pivot = numpy.abs(default_normalized_log2_minimum) / (default_normalized_log2_maximum - default_normalized_log2_minimum)
-    // pivot_x = fabsf(default_normalized_log2_minimum) / (default_normalized_log2_maximum - default_normalized_log2_minimum)
-    // float sigmoid_mid_grey_in; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.5 $DESCRIPTION: "Input mid-grey"
-    // Python: default_y_pivot = 0.18 ** (1.0 / 2.2)
-    // pivot_y = powf(0.18f, 1.0f / 2.2f)
-    float sigmoid_linear_slope; // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Slope of linear portion"
-    float sigmoid_toe_length;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe Transition Length"
-    float sigmoid_shoulder_length; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder Transition Length"
-    float sigmoid_toe_power;     // $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
-    float sigmoid_shoulder_power;// $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
-    float sigmoid_toe_intersection_y;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Output min"
-    float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Output max"
-
-
-
-y_LUT = sigmoid.calculate_sigmoid(
-x_input,
-pivots=[args.fulcrum_input, args.fulcrum_output],
-slope=args.fulcrum_slope,
-powers=[args.exponent_toe, args.exponent_shoulder],
-)
-# Input x
-    x_in, -> provided
-    # Pivot coordinates x and y for the fulcrum.
-    pivots=[0.5, 0.5], -> provided
-    # Slope of linear portion.
-    slope=2.0, -> provided
-    # Length of transition toward the toe and shoulder.
-    lengths=[0.0, 0.0], -> not provided
-    # Exponential power of the toe and shoulder regions.
-    powers=[1.0, 1.0], -> provided
-    # Intersection limit coordinates x and y for the toe and shoulder.
-    limits=[[0.0, 0.0], [1.0, 1.0]],
-*/
 static float _calculate_sigmoid(
     // Input x
     float x_in,
@@ -825,11 +785,25 @@ void gui_update(dt_iop_module_t *self) {
 void init_presets(dt_iop_module_so_t *self) {
   dt_iop_agx_params_t p = {0};
 
+  // common
+  p.sigmoid_tunable = TRUE;
+  p.sigmoid_normalized_log2_minimum = -10;
+  p.sigmoid_normalized_log2_maximum = 6.5;
+  p.sigmoid_linear_slope = 2.4;
+  p.sigmoid_toe_length = 0.0;
+  p.sigmoid_shoulder_length = 0.0;
+  p.sigmoid_toe_power = 1.5;
+  p.sigmoid_shoulder_power = 1.5;
+  p.sigmoid_toe_intersection_y = 0.0;
+  p.sigmoid_shoulder_intersection_y = 1.0;
+
   // None preset
   p.slope = 1.0f;
   p.power = 1.0f;
   p.offset = 0.0f;
   p.sat = 1.0f;
+  p.mix = 0.0f;
+
   dt_gui_presets_add_generic(_("None"), self->op, self->version(), &p,
                              sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
