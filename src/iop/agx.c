@@ -46,8 +46,7 @@ DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
 // so we have a breakpoint target in error-handling branches, to be removed after debugging
 int errors = 0;
 
-const float mid_grey = 0.18f;
-const float mid_out_mapped = 0.45865644686f; //powf(0.18, 1.0f / 2.2f);
+const float mid_out_mapped = 0.45865644686f; //powf(mid_grey = 0.18, 1.0f / 2.2f);
 
 typedef struct dt_iop_agx_gui_data_t {
 } dt_iop_agx_gui_data_t;
@@ -58,20 +57,20 @@ typedef struct dt_iop_agx_gui_data_t {
 typedef struct dt_iop_agx_params_t {
     float slope;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
     float power;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
-    float offset;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
+    float offset;  // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
     float sat;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
     float mix;     // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
     gboolean sigmoid_tunable;    // $MIN: FALSE $MAX: TRUE $DEFAULT: TRUE $DESCRIPTION: "Use tunable curve vs fixed polynomial"
-    float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -1.0 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure"
-    float sigmoid_normalized_log2_maximum; // $MIN: 1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure"
+    float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure (below mid-grey)"
+    float sigmoid_normalized_log2_maximum; // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-grey)"
     float sigmoid_linear_slope; // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Slope of linear portion"
-    float sigmoid_toe_length;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe Transition Length"
-    float sigmoid_shoulder_length; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder Transition Length"
+    float sigmoid_toe_length;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below mid-grey"
+    float sigmoid_shoulder_distance_from_mid_grey; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above mid-grey"
     float sigmoid_toe_power;     // $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
     float sigmoid_shoulder_power;// $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
-    float sigmoid_toe_intersection_y;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Output min"
-    float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Output max"
+    float sigmoid_toe_intersection_y;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
+    float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
 } dt_iop_agx_params_t;
 
 void gui_init(dt_iop_module_t *self) {
@@ -86,19 +85,19 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
     GtkWidget *slider;
     slider = dt_bauhaus_slider_from_params(self, "sat");
-    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 10.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "slope");
-    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 10.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "offset");
-    dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
+    dt_bauhaus_slider_set_soft_range(slider, -5.0f, 5.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "power");
-    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 10.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "mix");
@@ -270,11 +269,11 @@ const mat3f AgXInsetMatrixInverse = {
   }
 };
 
-// LOG2_MIN      = -10.0
-// LOG2_MAX      =  +6.5
-// MIDDLE_GRAY   =  0.18
-const float AgxMinEv = -12.47393f;      // log2(pow(2, LOG2_MIN) * MIDDLE_GRAY)
-const float AgxMaxEv = 4.026069f;       // log2(pow(2, LOG2_MAX) * MIDDLE_GRAY)
+// LOG2_MIN       = -10.0 (EV below mid-grey)
+// LOG2_MAX       =  +6.5 (EV above mid-grey)
+// log2(mid-grey) = -2.47 (EV below diffuse white)
+const float AgxMinEv = -12.47393f;      // log2(pow(2, LOG2_MIN) * MIDDLE_GRAY) -> mid-grey + black relative exposure = black limit, relative to (below) diffuse white
+const float AgxMaxEv = 4.026069f;       // log2(pow(2, LOG2_MAX) * MIDDLE_GRAY) -> mid-grey + white relative exposure = white limit, relative to (above) diffuse white
 
 // https://iolite-engine.com/blog_posts/minimal_agx_implementation
 static float3 _agxDefaultContrastApprox(float3 x) {
@@ -312,21 +311,22 @@ static float3 _agxDefaultContrastApprox(float3 x) {
     return result;
 }
 
-// Emulating numpy's where function with a simple conditional assignment.
-static float _where(int condition, float true_val, float false_val) {
-    return condition ? true_val : false_val;
+static float _dx_from_hypotenuse_and_slope(float hypotenuse, float slope)
+{
+    // Pythagorean: if dx were 1, dy would be dx * slope = 1 * slope = slope
+    // The hypotenuse would be sqrt(dx^2 + dy^2) = sqrt(1^2 + (1 * slope)^2) = sqrt(1 + slope^2)
+    float hypotenuse_if_leg_were_1 = sqrtf(slope * slope + 1.0f);
+    // similar triangles: the to-be-determined dx : 1 = hypotenuse : hypotenuse_if_leg_were_1
+    return hypotenuse / hypotenuse_if_leg_were_1;
 }
 
 static float _linear_breakpoint(float numerator, float slope, float coordinate) {
-    float denominator = powf(powf(slope, 2.0f) + 1.0f, 1.0f / 2.0f);
-    if (denominator <= 0.0f || isnan(denominator))
-    {
-      errors++;//printf("denominator is invalid: %f\n", denominator);
-    }
-    if (numerator < 0.0f || isnan(numerator))
-    {
-      errors++;//printf("numerator is invalid: %f\n", numerator);
-    }
+    // Pythagorean: if dx were 1, dy would be 1 * slope = slope
+    // The hypotenuse would be sqrt(dx^2 + dy^2) = sqrt(1^2 + (1 * slope)^2) = sqrt(1 + slope^2)
+    float denominator = sqrtf(slope * slope + 1.0f);
+    // we are given the length of a hypotenuse as 'numerator'; the length of that hypotenuse and the one
+    // we calculated is the same as the length of the corresponding leg and dx = 1, so calculate proportionally;
+    // the line segments start coordinate is 'coordinate', so 'start the segment' at that point
     return numerator / denominator + coordinate;
 }
 
@@ -334,25 +334,26 @@ static float _line(float x_in, float slope, float intercept) {
     return slope * x_in + intercept;
 }
 
-static float _scale(float limit_x, float limit_y, float transition_x, float transition_y, float power, float slope) {
-  float linear_y_delta = slope * (limit_x - transition_x);
-  float power_curved_y_delta = powf(linear_y_delta, -power); // dampened / steepened
+static float _scale(float limit_x_lx, float limit_y_ly, float transition_x_tx, float transition_y_ty, float power_p, float slope_m) {
+  float linear_y_delta = slope_m * (limit_x_lx - transition_x_tx);
+  float power_curved_y_delta = powf(linear_y_delta, -power_p); // dampened / steepened
     if(isnan(power_curved_y_delta) || power_curved_y_delta < 0.0f)
   {
     power_curved_y_delta = 0;
   }
-  float remaining_y_span = limit_y - transition_y;
+  float remaining_y_span = limit_y_ly - transition_y_ty;
   float y_delta_ratio = linear_y_delta / remaining_y_span;
-  float term_b = powf(y_delta_ratio, power) - 1.0f;
+  float term_b = powf(y_delta_ratio, power_p) - 1.0f;
     // if(isnan(term_b) || term_b < 0.0f)
     // {
     //   term_b = 0;
     // }
 
-    float scale_value = powf(power_curved_y_delta * term_b, -1.0f / power);
+    float scale_value = powf(power_curved_y_delta * term_b, -1.0f / power_p);
     if(isnan(scale_value) || isinf(scale_value))
     {
-      scale_value = 1;
+      // with extreme settings, the scale value explodes, let's limit that
+      scale_value = 1000;
     }
 
   return scale_value;
@@ -368,7 +369,7 @@ static float _exponential(float x_in, float power) {
 }
 
 static float _exponential_curve(float x_in, float scale_, float slope, float power, float transition_x, float transition_y) {
-  float value = scale_ * _exponential((slope * (x_in - transition_x)) / scale_, power) + transition_y;
+  float value = scale_ * _exponential(slope * (x_in - transition_x) / scale_, power) + transition_y;
   if (isnan(value))
   {
     errors++; //printf("_exponential_curve returns nan\n");
@@ -376,169 +377,113 @@ static float _exponential_curve(float x_in, float scale_, float slope, float pow
   return value;
 }
 
+// the commented values (t_tx, etc) are references to https://www.desmos.com/calculator/yrysofmx8h
 static float _calculate_sigmoid(
-    // Input x
-    float x_in,
-    // Pivot coordinates x and y for the fulcrum.
-    float mid_in, float mid_out,
+    float x,
+    // Pivot coordinates x and y for the fulcrum; p_x and p_y
+    float pivot_x_p_x, float pivot_y_p_y,
     // Slope of linear portion.
-    float linear_slope,
-    // Length of transition toward the toe and shoulder.  Ignored.
-    float toe_length, float shoulder_length,
+    float linear_slope_P_slope,
+    // Length of transition toward the toe and shoulder;
+    float toe_length_P_tlength, float shoulder_length_P_slength,
     // Exponential power of the toe and shoulder regions.
-    float toe_power, float shoulder_power,
+    float toe_power_t_p, float shoulder_power_s_p,
     // Intersection limit values for the toe and shoulder.
-    float toe_intersection_y, float shoulder_intersection_y
+    float toe_intersection_y_ly, float shoulder_intersection_y_s_ly,
+    int debug
 ) {
-    if (isnan(x_in))
+
+    // toe transition
+    float original_transition_toe_x_t_tx = _linear_breakpoint(-toe_length_P_tlength, linear_slope_P_slope, pivot_x_p_x);
+    float original_transition_toe_y_t_ty = _linear_breakpoint(-linear_slope_P_slope * toe_length_P_tlength, linear_slope_P_slope, pivot_y_p_y);
+
+    float toe_x_from_pivot_x = _dx_from_hypotenuse_and_slope(toe_length_P_tlength, linear_slope_P_slope);
+    float transition_toe_x_t_tx = pivot_x_p_x - toe_x_from_pivot_x;
+    float toe_y_from_pivot_y = linear_slope_P_slope * toe_x_from_pivot_x;
+    float transition_toe_y_t_ty = pivot_y_p_y - toe_y_from_pivot_y;
+
+    if (fabs(original_transition_toe_x_t_tx - transition_toe_x_t_tx) > 1.0e-5)
     {
-      errors++; //printf("x_in is NaN\n");
+        printf("Warning, original_transition_toe_x_t_tx=%f, transition_toe_x_t_tx=%f, toe_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_x_p_x=%f\n",
+                                original_transition_toe_x_t_tx, transition_toe_x_t_tx, toe_length_P_tlength, linear_slope_P_slope, pivot_x_p_x);
+    }
+    if (fabs(original_transition_toe_y_t_ty - transition_toe_y_t_ty) > 1.0e-5)
+    {
+        printf("Warning, original_transition_toe_y_t_ty=%f, transition_toe_y_t_ty=%f, toe_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_y_p_y=%f\n",
+                                original_transition_toe_y_t_ty, transition_toe_y_t_ty, toe_length_P_tlength, linear_slope_P_slope, pivot_y_p_y);
     }
 
-    if (isnan(mid_in))
-    {
-      errors++; printf("mid_in is NaN\n");
-    }
+    // shoulder transition
+    float transition_shoulder_x_s_tx = _linear_breakpoint(shoulder_length_P_slength, linear_slope_P_slope, pivot_x_p_x);
+    float transition_shoulder_y_s_ty = _linear_breakpoint(linear_slope_P_slope * shoulder_length_P_slength, linear_slope_P_slope, pivot_y_p_y);
 
-    if (isnan(mid_out))
-    {
-      errors++; printf("mid_out is NaN\n");
-    }
+    float inverse_transition_toe_x = 1.0f - transition_toe_x_t_tx;
+    float inverse_transition_toe_y = 1.0f - transition_toe_y_t_ty;
 
-    if (isnan(linear_slope))
-    {
-      errors++; printf("linear_slope is NaN\n");
-    }
+    const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx
+    const float inverse_limit_toe_y_t_ily = 1.0f - toe_intersection_y_ly;
 
-    if (isnan(toe_length))
-    {
-      errors++; printf("toe_length is NaN\n");
-    }
+    const float shoulder_intersection_x_s_lx = 1;
 
-    if (isnan(shoulder_length))
-    {
-      errors++; printf("shoulder_length is NaN\n");
-    }
-
-    if (isnan(toe_power))
-    {
-      errors++; printf("toe_power is NaN\n");
-    }
-
-    if (isnan(shoulder_power))
-    {
-      errors++; printf("shoulder_power is NaN\n");
-    }
-
-    if (isnan(toe_intersection_y))
-    {
-      errors++; printf("toe_intersection_y is NaN\n");
-    }
-
-    if (isnan(shoulder_intersection_y))
-    {
-      errors++; printf("shoulder_intersection_y is NaN\n");
-    }
-
-    float transition_toe_x = _linear_breakpoint(-toe_length, linear_slope, mid_in);
-    if (isnan(transition_toe_x))
-    {
-      errors++; printf("transition_toe_x is NaN\n");
-    }
-
-    float transition_toe_y = _linear_breakpoint(linear_slope * -toe_length, linear_slope, mid_out);
-    if (isnan(transition_toe_y))
-    {
-      errors++; // printf("transition_toe_y is NaN\n");
-    }
-
-    float transition_shoulder_x = _linear_breakpoint(shoulder_length, linear_slope, mid_in);
-    if (isnan(transition_shoulder_x))
-    {
-      errors++; // printf("transition_shoulder_x is NaN\n");
-    }
-
-    float transition_shoulder_y = _linear_breakpoint(linear_slope * shoulder_length, linear_slope, mid_out);
-    if (isnan(transition_shoulder_y))
-    {
-      errors++; // printf("transition_shoulder_y is NaN\n");
-    }
-
-    float inverse_transition_toe_x = 1.0f - transition_toe_x;
-    if (isnan(inverse_transition_toe_x))
-    {
-      errors++; // printf("inverse_transition_toe_x is NaN\n");
-    }
-
-    float inverse_transition_toe_y = 1.0f - transition_toe_y;
-    if (isnan(inverse_transition_toe_y))
-    {
-      errors++; // printf("inverse_transition_toe_y is NaN\n");
-    }
-
-    const float inverse_limit_toe_x = 1.0f; // 1 - 0
-    const float inverse_limit_toe_y = 1.0f - toe_intersection_y;
-    if (isnan(inverse_limit_toe_y))
-    {
-      errors++; // printf("inverse_limit_toe_y is NaN\n");
-    }
-
-    const float shoulder_intersection_x = 1;
-
-    float scale_toe = -_scale(
-        inverse_limit_toe_x,
-        inverse_limit_toe_y,
+    float scale_toe_s_t = -_scale(
+        inverse_limit_toe_x_i_ilx,
+        inverse_limit_toe_y_t_ily,
         inverse_transition_toe_x,
         inverse_transition_toe_y,
-        toe_power,
-        linear_slope
+        toe_power_t_p,
+        linear_slope_P_slope
     );
-    if (isnan(scale_toe))
+    if (isnan(scale_toe_s_t))
     {
       errors++; // printf("scale_toe is NaN\n");
     }
 
     float scale_shoulder = _scale(
-        shoulder_intersection_x,
-        shoulder_intersection_y,
-        transition_shoulder_x,
-        transition_shoulder_y,
-        shoulder_power,
-        linear_slope
+        shoulder_intersection_x_s_lx,
+        shoulder_intersection_y_s_ly,
+        transition_shoulder_x_s_tx,
+        transition_shoulder_y_s_ty,
+        shoulder_power_s_p,
+        linear_slope_P_slope
     );
     if (isnan(scale_shoulder))
     {
       errors++; // printf("scale_shoulder is NaN\n");
     }
 
+    if (debug)
+    {
+      printf("scale_toe: %f, scale_shoulder: %f\n", scale_toe_s_t, scale_shoulder);
+    }
+
     // b
-    float intercept = transition_toe_y - linear_slope * transition_toe_x;
+    float intercept = transition_toe_y_t_ty - linear_slope_P_slope * transition_toe_x_t_tx;
     if (isnan(intercept))
     {
       errors++; // printf("intercept is NaN\n");
     }
 
-  float result; // Variable to store the result
+  float result;
 
-  if (x_in < transition_toe_x) {
+  if (x < transition_toe_x_t_tx) {
     result = _exponential_curve(
-        x_in,
-        scale_toe,
-        linear_slope,
-        toe_power,
-        transition_toe_x,
-        transition_toe_y
+        x,
+        scale_toe_s_t,
+        linear_slope_P_slope,
+        toe_power_t_p,
+        transition_toe_x_t_tx,
+        transition_toe_y_t_ty
     );
-  } else if (x_in <= transition_shoulder_x) {
-    result = _line(x_in, linear_slope, intercept);
+  } else if (x <= transition_shoulder_x_s_tx) {
+    result = _line(x, linear_slope_P_slope, intercept);
   } else {
     result = _exponential_curve(
-        x_in,
+        x,
         scale_shoulder,
-        linear_slope,
-        shoulder_power,
-        transition_shoulder_x,
-        transition_shoulder_y
+        linear_slope_P_slope,
+        shoulder_power_s_p,
+        transition_shoulder_x_s_tx,
+        transition_shoulder_y_s_ty
     );
   }
 
@@ -597,11 +542,6 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, int de
   const float maxEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_maximum : AgxMaxEv;
   const float minEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_minimum : AgxMinEv;
 
-  if (debug) {
-    printf("maxEv: %f\n", maxEv);
-    printf("minEv: %f\n", minEv);
-  }
-
   v.r = (v.r - minEv) / (maxEv - minEv);
   v.g = (v.g - minEv) / (maxEv - minEv);
   v.b = (v.b - minEv) / (maxEv - minEv);
@@ -623,28 +563,31 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, int de
       v.r,
       mid_in, mid_out_mapped,
       p->sigmoid_linear_slope,
-      p->sigmoid_toe_length, p->sigmoid_shoulder_length,
+      p->sigmoid_toe_length, p->sigmoid_shoulder_distance_from_mid_grey,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
       p->sigmoid_toe_intersection_y,
-      p->sigmoid_shoulder_intersection_y
+      p->sigmoid_shoulder_intersection_y,
+      debug
     );
     v.g = _calculate_sigmoid(
       v.g,
       mid_in, mid_out_mapped,
       p->sigmoid_linear_slope,
-      p->sigmoid_toe_length, p->sigmoid_shoulder_length,
+      p->sigmoid_toe_length, p->sigmoid_shoulder_distance_from_mid_grey,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
       p->sigmoid_toe_intersection_y,
-      p->sigmoid_shoulder_intersection_y
+      p->sigmoid_shoulder_intersection_y,
+      debug
     );
     v.b = _calculate_sigmoid(
       v.b,
       mid_in, mid_out_mapped,
       p->sigmoid_linear_slope,
-      p->sigmoid_toe_length, p->sigmoid_shoulder_length,
+      p->sigmoid_toe_length, p->sigmoid_shoulder_distance_from_mid_grey,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
       p->sigmoid_toe_intersection_y,
-      p->sigmoid_shoulder_intersection_y
+      p->sigmoid_shoulder_intersection_y,
+      debug
     );
   } else
   {
@@ -654,13 +597,14 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, int de
   // Apply AgX look
   v = _agxLook(v, p);
 
-  // Apply Outset Matrix
-  v = _mat3f_mul_float3(AgXInsetMatrixInverse, v);
 
   // Linearize
   rgb_pixel[0] = powf(fmaxf(0.0f, v.r), 2.2f);
   rgb_pixel[1] = powf(fmaxf(0.0f, v.g), 2.2f);
   rgb_pixel[2] = powf(fmaxf(0.0f, v.b), 2.2f);
+
+  // Apply Outset Matrix
+  v = _mat3f_mul_float3(AgXInsetMatrixInverse, v);
 
     dt_aligned_pixel_t hsv_after;
     dt_RGB_2_HSV(rgb_pixel, hsv_after);
@@ -729,7 +673,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
         printf("sigmoid_normalized_log2_maximum = %f\n", p->sigmoid_normalized_log2_maximum);
         printf("sigmoid_linear_slope = %f\n", p->sigmoid_linear_slope);
         printf("sigmoid_toe_length = %f\n", p->sigmoid_toe_length);
-        printf("sigmoid_shoulder_length = %f\n", p->sigmoid_shoulder_length);
+        printf("sigmoid_shoulder_length = %f\n", p->sigmoid_shoulder_distance_from_mid_grey);
         printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
         printf("sigmoid_shoulder_power = %f\n", p->sigmoid_shoulder_power);
         printf("sigmoid_toe_intersection_y = %f\n", p->sigmoid_toe_intersection_y);
@@ -791,7 +735,7 @@ void init_presets(dt_iop_module_so_t *self) {
   p.sigmoid_normalized_log2_maximum = 6.5;
   p.sigmoid_linear_slope = 2.4;
   p.sigmoid_toe_length = 0.0;
-  p.sigmoid_shoulder_length = 0.0;
+  p.sigmoid_shoulder_distance_from_mid_grey = 0.0;
   p.sigmoid_toe_power = 1.5;
   p.sigmoid_shoulder_power = 1.5;
   p.sigmoid_toe_intersection_y = 0.0;
