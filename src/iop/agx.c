@@ -46,7 +46,7 @@ DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
 // so we have a breakpoint target in error-handling branches, to be removed after debugging
 int errors = 0;
 
-const float mid_out_mapped = 0.45865644686f; //powf(mid_grey = 0.18, 1.0f / 2.2f);
+const float pivot_y_p_y = 0.45865644686f; //powf(mid_grey = 0.18, 1.0f / 2.2f);
 
 typedef struct dt_iop_agx_gui_data_t {
 } dt_iop_agx_gui_data_t;
@@ -57,7 +57,7 @@ typedef struct dt_iop_agx_gui_data_t {
 typedef struct dt_iop_agx_params_t {
     float slope;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
     float power;   // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
-    float offset;  // $MIN: -5.0 $MAX: 5.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
+    float offset;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
     float sat;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
     float mix;     // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
@@ -66,9 +66,9 @@ typedef struct dt_iop_agx_params_t {
     float sigmoid_normalized_log2_maximum; // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-grey)"
     float sigmoid_linear_slope; // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Slope of linear portion"
     float sigmoid_toe_length;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below mid-grey"
-    float sigmoid_shoulder_distance_from_mid_grey; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above mid-grey"
-    float sigmoid_toe_power;     // $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
-    float sigmoid_shoulder_power;// $MIN: 0.1 $MAX: 5.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
+    float sigmoid_shoulder_length; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above mid-grey"
+    float sigmoid_toe_power;     // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
+    float sigmoid_shoulder_power;// $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
     float sigmoid_toe_intersection_y;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
     float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
 } dt_iop_agx_params_t;
@@ -93,7 +93,7 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "offset");
-    dt_bauhaus_slider_set_soft_range(slider, -5.0f, 5.0f);
+    dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "power");
@@ -132,7 +132,7 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
-    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 10.0f);
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_intersection_y");
@@ -145,7 +145,7 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
-    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 10.0f);
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_intersection_y");
@@ -380,43 +380,17 @@ static float _exponential_curve(float x_in, float scale_, float slope, float pow
 // the commented values (t_tx, etc) are references to https://www.desmos.com/calculator/yrysofmx8h
 static float _calculate_sigmoid(
     float x,
-    // Pivot coordinates x and y for the fulcrum; p_x and p_y
-    float pivot_x_p_x, float pivot_y_p_y,
     // Slope of linear portion.
     float linear_slope_P_slope,
-    // Length of transition toward the toe and shoulder;
-    float toe_length_P_tlength, float shoulder_length_P_slength,
     // Exponential power of the toe and shoulder regions.
     float toe_power_t_p, float shoulder_power_s_p,
     // Intersection limit values for the toe and shoulder.
     float toe_intersection_y_ly, float shoulder_intersection_y_s_ly,
-    int debug
+    float transition_toe_x_t_tx, float transition_toe_y_t_ty,
+    float transition_shoulder_x_s_tx, float transition_shoulder_y_s_ty,
+  int debug
 ) {
-
-    // toe transition
-    float original_transition_toe_x_t_tx = _linear_breakpoint(-toe_length_P_tlength, linear_slope_P_slope, pivot_x_p_x);
-    float original_transition_toe_y_t_ty = _linear_breakpoint(-linear_slope_P_slope * toe_length_P_tlength, linear_slope_P_slope, pivot_y_p_y);
-
-    float toe_x_from_pivot_x = _dx_from_hypotenuse_and_slope(toe_length_P_tlength, linear_slope_P_slope);
-    float transition_toe_x_t_tx = pivot_x_p_x - toe_x_from_pivot_x;
-    float toe_y_from_pivot_y = linear_slope_P_slope * toe_x_from_pivot_x;
-    float transition_toe_y_t_ty = pivot_y_p_y - toe_y_from_pivot_y;
-
-    if (fabs(original_transition_toe_x_t_tx - transition_toe_x_t_tx) > 1.0e-5)
-    {
-        printf("Warning, original_transition_toe_x_t_tx=%f, transition_toe_x_t_tx=%f, toe_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_x_p_x=%f\n",
-                                original_transition_toe_x_t_tx, transition_toe_x_t_tx, toe_length_P_tlength, linear_slope_P_slope, pivot_x_p_x);
-    }
-    if (fabs(original_transition_toe_y_t_ty - transition_toe_y_t_ty) > 1.0e-5)
-    {
-        printf("Warning, original_transition_toe_y_t_ty=%f, transition_toe_y_t_ty=%f, toe_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_y_p_y=%f\n",
-                                original_transition_toe_y_t_ty, transition_toe_y_t_ty, toe_length_P_tlength, linear_slope_P_slope, pivot_y_p_y);
-    }
-
     // shoulder transition
-    float transition_shoulder_x_s_tx = _linear_breakpoint(shoulder_length_P_slength, linear_slope_P_slope, pivot_x_p_x);
-    float transition_shoulder_y_s_ty = _linear_breakpoint(linear_slope_P_slope * shoulder_length_P_slength, linear_slope_P_slope, pivot_y_p_y);
-
     float inverse_transition_toe_x = 1.0f - transition_toe_x_t_tx;
     float inverse_transition_toe_y = 1.0f - transition_toe_y_t_ty;
 
@@ -514,7 +488,15 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p) {
     return result;
 }
 
-static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, int debug)
+static float3 _agx_tone_mapping(
+  float3 rgb,
+  const dt_iop_agx_params_t *p,
+  float linear_slope_P_slope,
+  float transition_toe_x_t_tx, float transition_toe_y_t_ty,
+  float transition_shoulder_x_s_tx, float transition_shoulder_y_s_ty,
+  float range_in_ev,
+  float minEv,
+  int debug)
 {
   dt_aligned_pixel_t rgb_pixel;
   rgb_pixel[0] = rgb.r;
@@ -539,12 +521,9 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, int de
   v.g = log2f(v.g);
   v.b = log2f(v.b);
 
-  const float maxEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_maximum : AgxMaxEv;
-  const float minEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_minimum : AgxMinEv;
-
-  v.r = (v.r - minEv) / (maxEv - minEv);
-  v.g = (v.g - minEv) / (maxEv - minEv);
-  v.b = (v.b - minEv) / (maxEv - minEv);
+  v.r = (v.r - minEv) / range_in_ev;
+  v.g = (v.g - minEv) / range_in_ev;
+  v.b = (v.b - minEv) / range_in_ev;
 
   v.r = fminf(fmaxf(v.r, 0.0f), 1.0f);
   v.g = fminf(fmaxf(v.g, 0.0f), 1.0f);
@@ -553,40 +532,34 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, int de
   // Apply sigmoid
   if (p->sigmoid_tunable)
   {
-    const float mid_in = fabsf(p->sigmoid_normalized_log2_minimum / (p->sigmoid_normalized_log2_maximum - p->sigmoid_normalized_log2_minimum));
-
-    if (debug) {
-      printf("mid_in: %f\n", mid_in);
-    }
-
     v.r = _calculate_sigmoid(
       v.r,
-      mid_in, mid_out_mapped,
-      p->sigmoid_linear_slope,
-      p->sigmoid_toe_length, p->sigmoid_shoulder_distance_from_mid_grey,
+      linear_slope_P_slope,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
       p->sigmoid_toe_intersection_y,
       p->sigmoid_shoulder_intersection_y,
+      transition_toe_x_t_tx, transition_toe_y_t_ty,
+      transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
       debug
     );
     v.g = _calculate_sigmoid(
       v.g,
-      mid_in, mid_out_mapped,
-      p->sigmoid_linear_slope,
-      p->sigmoid_toe_length, p->sigmoid_shoulder_distance_from_mid_grey,
+      linear_slope_P_slope,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
       p->sigmoid_toe_intersection_y,
       p->sigmoid_shoulder_intersection_y,
+      transition_toe_x_t_tx, transition_toe_y_t_ty,
+      transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
       debug
     );
     v.b = _calculate_sigmoid(
       v.b,
-      mid_in, mid_out_mapped,
-      p->sigmoid_linear_slope,
-      p->sigmoid_toe_length, p->sigmoid_shoulder_distance_from_mid_grey,
+      linear_slope_P_slope,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
       p->sigmoid_toe_intersection_y,
       p->sigmoid_shoulder_intersection_y,
+      transition_toe_x_t_tx, transition_toe_y_t_ty,
+      transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
       debug
     );
   } else
@@ -652,6 +625,69 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
                                           roi_in, roi_out))
     return;
 
+  printf("================== start ==================\n");
+  printf("sigmoid_tunable = %d\n", p->sigmoid_tunable);
+  printf("sigmoid_normalized_log2_minimum = %f\n", p->sigmoid_normalized_log2_minimum);
+  printf("sigmoid_normalized_log2_maximum = %f\n", p->sigmoid_normalized_log2_maximum);
+  printf("sigmoid_linear_slope = %f\n", p->sigmoid_linear_slope);
+  printf("sigmoid_toe_length = %f\n", p->sigmoid_toe_length);
+  printf("sigmoid_shoulder_length = %f\n", p->sigmoid_shoulder_length);
+  printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
+  printf("sigmoid_shoulder_power = %f\n", p->sigmoid_shoulder_power);
+  printf("sigmoid_toe_intersection_y = %f\n", p->sigmoid_toe_intersection_y);
+  printf("sigmoid_shoulder_intersection_y = %f\n", p->sigmoid_shoulder_intersection_y);
+
+  const float maxEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_maximum : AgxMaxEv;
+  const float minEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_minimum : AgxMinEv;
+  const float pivot_x_p_x = fabsf(p->sigmoid_normalized_log2_minimum / (p->sigmoid_normalized_log2_maximum - p->sigmoid_normalized_log2_minimum));
+
+  float range_in_ev = maxEv - minEv;
+
+      float linear_slope_P_slope = p->sigmoid_linear_slope * (range_in_ev / 16.5);
+
+    // toe
+    float toe_length_P_tlength = p->sigmoid_toe_length;
+    float toe_x_from_pivot_x = _dx_from_hypotenuse_and_slope(toe_length_P_tlength, linear_slope_P_slope);
+    float transition_toe_x_t_tx = pivot_x_p_x - toe_x_from_pivot_x;
+    float toe_y_from_pivot_y = linear_slope_P_slope * toe_x_from_pivot_x;
+    float transition_toe_y_t_ty = pivot_y_p_y - toe_y_from_pivot_y;
+
+    float original_transition_toe_x_t_tx = _linear_breakpoint(-toe_length_P_tlength, linear_slope_P_slope, pivot_x_p_x);
+    float original_transition_toe_y_t_ty = _linear_breakpoint(-linear_slope_P_slope * toe_length_P_tlength, linear_slope_P_slope, pivot_y_p_y);
+
+    if (fabs(original_transition_toe_x_t_tx - transition_toe_x_t_tx) > 1.0e-5)
+    {
+      printf("Warning, original_transition_toe_x_t_tx=%f, transition_toe_x_t_tx=%f, toe_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_x_p_x=%f\n",
+                              original_transition_toe_x_t_tx, transition_toe_x_t_tx, toe_length_P_tlength, linear_slope_P_slope, pivot_x_p_x);
+    }
+    if (fabs(original_transition_toe_y_t_ty - transition_toe_y_t_ty) > 1.0e-5)
+    {
+      printf("Warning, original_transition_toe_y_t_ty=%f, transition_toe_y_t_ty=%f, toe_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_y_p_y=%f\n",
+                              original_transition_toe_y_t_ty, transition_toe_y_t_ty, toe_length_P_tlength, linear_slope_P_slope, pivot_y_p_y);
+    }
+
+    // shoulder
+    float shoulder_length_P_slength = p->sigmoid_shoulder_length;
+    float shoulder_x_from_pivot_x = _dx_from_hypotenuse_and_slope(shoulder_length_P_slength, linear_slope_P_slope);
+    float transition_shoulder_x_s_tx = pivot_x_p_x - shoulder_x_from_pivot_x;
+    float shoulder_y_from_pivot_y = linear_slope_P_slope * shoulder_x_from_pivot_x;
+    float transition_shoulder_y_s_ty = pivot_y_p_y - shoulder_y_from_pivot_y;
+
+    float original_transition_shoulder_x_s_tx = _linear_breakpoint(-shoulder_length_P_slength, linear_slope_P_slope, pivot_x_p_x);
+    float original_transition_shoulder_y_s_ty = _linear_breakpoint(-linear_slope_P_slope * shoulder_length_P_slength, linear_slope_P_slope, pivot_y_p_y);
+
+    if (fabs(original_transition_shoulder_x_s_tx - transition_shoulder_x_s_tx) > 1.0e-5)
+    {
+      printf("Warning, original_transition_shoulder_x_s_tx=%f, transition_shoulder_x_s_tx=%f, shoulder_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_x_p_x=%f\n",
+                              original_transition_shoulder_x_s_tx, transition_shoulder_x_s_tx, shoulder_length_P_slength, linear_slope_P_slope, pivot_x_p_x);
+    }
+    if (fabs(original_transition_shoulder_y_s_ty - transition_shoulder_y_s_ty) > 1.0e-5)
+    {
+      printf("Warning, original_transition_shoulder_y_s_ty=%f, transition_shoulder_y_s_ty=%f, shoulder_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_y_p_y=%f\n",
+                              original_transition_shoulder_y_s_ty, transition_shoulder_y_s_ty, shoulder_length_P_slength, linear_slope_P_slope, pivot_y_p_y);
+    }
+
+
   DT_OMP_FOR()
   for (int j = 0; j < roi_out->height; j++) {
     float *in = ((float *)ivoid) + (size_t)ch * roi_in->width * j;
@@ -665,22 +701,15 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 
       int debug = (i == 0 && j == 0);
 
-      if (debug)
-      {
-        printf("================== start ==================\n");
-        printf("sigmoid_tunable = %d\n", p->sigmoid_tunable);
-        printf("sigmoid_normalized_log2_minimum = %f\n", p->sigmoid_normalized_log2_minimum);
-        printf("sigmoid_normalized_log2_maximum = %f\n", p->sigmoid_normalized_log2_maximum);
-        printf("sigmoid_linear_slope = %f\n", p->sigmoid_linear_slope);
-        printf("sigmoid_toe_length = %f\n", p->sigmoid_toe_length);
-        printf("sigmoid_shoulder_length = %f\n", p->sigmoid_shoulder_distance_from_mid_grey);
-        printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
-        printf("sigmoid_shoulder_power = %f\n", p->sigmoid_shoulder_power);
-        printf("sigmoid_toe_intersection_y = %f\n", p->sigmoid_toe_intersection_y);
-        printf("sigmoid_shoulder_intersection_y = %f\n", p->sigmoid_shoulder_intersection_y);
-      }
-
-      float3 agx_rgb = _agx_tone_mapping(rgb, p, debug);
+      float3 agx_rgb = _agx_tone_mapping(
+        rgb,
+        p,
+        linear_slope_P_slope,
+        transition_toe_x_t_tx, transition_toe_y_t_ty,
+        transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
+        range_in_ev,
+        minEv,
+        debug);
 
       out[0] = agx_rgb.r;
       out[1] = agx_rgb.g;
@@ -735,7 +764,7 @@ void init_presets(dt_iop_module_so_t *self) {
   p.sigmoid_normalized_log2_maximum = 6.5;
   p.sigmoid_linear_slope = 2.4;
   p.sigmoid_toe_length = 0.0;
-  p.sigmoid_shoulder_distance_from_mid_grey = 0.0;
+  p.sigmoid_shoulder_length = 0.0;
   p.sigmoid_toe_power = 1.5;
   p.sigmoid_shoulder_power = 1.5;
   p.sigmoid_toe_intersection_y = 0.0;
