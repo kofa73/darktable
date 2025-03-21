@@ -85,11 +85,11 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
     GtkWidget *slider;
     slider = dt_bauhaus_slider_from_params(self, "sat");
-    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 10.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "slope");
-    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 10.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "offset");
@@ -97,7 +97,7 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "power");
-    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 10.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
     gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "mix");
@@ -123,7 +123,7 @@ void gui_init(dt_iop_module_t *self) {
 
     // Linear Section Slope
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_slope");
-    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 10.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     // Toe
@@ -132,7 +132,7 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
-    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 10.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_intersection_y");
@@ -145,7 +145,7 @@ void gui_init(dt_iop_module_t *self) {
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
-    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 10.0f);
+    dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
     gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
     slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_intersection_y");
@@ -187,27 +187,30 @@ static float3 _powf3(float3 base, float3 exponent) {
 // Modelines (needed, but not that relevant right now)
 
 // Translatable name
-const char *name() { return _("AgX Tone Mapper"); }
+const char *name() { return _("agx"); }
 
-// Module description
 const char **description(dt_iop_module_t *self) {
-  return dt_iop_set_description(self, _("Applies AgX tone mapping curve."),
-                                _("Creative look and tone adjustment"),
-                                _("linear, RGB, scene-referred"),
-                                _("linear, RGB"), _("linear, RGB, scene-referred"));
+  return dt_iop_set_description(self,
+                                _("Applies a tone mapping curve.\n"
+                                          "Inspired by Blender's AgX tone mapper"),
+                                _("corrective and creative"), _("linear, RGB, scene-referred"),
+                                _("non-linear, RGB"),
+                                _("linear, RGB, display-referred"));
 }
 
-// Flags
 int flags() {
   return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING;
 }
 
-// Default group
-int default_group() { return IOP_GROUP_COLOR; }
+int default_group()
+{
+  return IOP_GROUP_TONE | IOP_GROUP_TECHNICAL;
+}
 
 dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self,
                                             dt_dev_pixelpipe_t *pipe,
-                                            dt_dev_pixelpipe_iop_t *piece) {
+                                            dt_dev_pixelpipe_iop_t *piece)
+{
   return IOP_CS_RGB;
 }
 
@@ -756,6 +759,22 @@ void gui_update(dt_iop_module_t *self) {
 }
 
 void init_presets(dt_iop_module_so_t *self) {
+  const char *workflow = dt_conf_get_string_const("plugins/darkroom/workflow");
+  const gboolean auto_apply_agx = strcmp(workflow, "scene-referred (agx)") == 0;
+
+  if(auto_apply_agx)
+  {
+    dt_gui_presets_add_generic(_("scene-referred default"),
+                               self->op, self->version(), NULL, 0, 1,
+                               DEVELOP_BLEND_CS_RGB_SCENE);
+
+    dt_gui_presets_update_format(_("scene-referred default"),
+                                 self->op, self->version(), FOR_RAW | FOR_MATRIX);
+
+    dt_gui_presets_update_autoapply(_("scene-referred default"),
+                                    self->op, self->version(), TRUE);
+  }
+
   dt_iop_agx_params_t p = {0};
 
   // common
