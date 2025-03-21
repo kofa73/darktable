@@ -344,7 +344,11 @@ static float _scale(float limit_x_lx, float limit_y_ly, float transition_x_tx, f
   {
     power_curved_y_delta = 0;
   }
-  float remaining_y_span = limit_y_ly - transition_y_ty;
+  float remaining_y_span = fmaxf(0, limit_y_ly - transition_y_ty);
+  if (remaining_y_span < 1e-5f)
+  {
+    return 1000;
+  }
   float y_delta_ratio = linear_y_delta / remaining_y_span;
   float term_b = powf(y_delta_ratio, power_p) - 1.0f;
     // if(isnan(term_b) || term_b < 0.0f)
@@ -387,59 +391,12 @@ static float _calculate_sigmoid(
     float linear_slope_P_slope,
     // Exponential power of the toe and shoulder regions.
     float toe_power_t_p, float shoulder_power_s_p,
-    // Intersection limit values for the toe and shoulder.
-    float toe_intersection_y_ly, float shoulder_intersection_y_s_ly,
     float transition_toe_x_t_tx, float transition_toe_y_t_ty,
     float transition_shoulder_x_s_tx, float transition_shoulder_y_s_ty,
-  int debug
+    float scale_toe_s_t,
+    float intercept,
+    float scale_shoulder
 ) {
-    // shoulder transition
-    float inverse_transition_toe_x = 1.0f - transition_toe_x_t_tx;
-    float inverse_transition_toe_y = 1.0f - transition_toe_y_t_ty;
-
-    const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx
-    const float inverse_limit_toe_y_t_ily = 1.0f - toe_intersection_y_ly;
-
-    const float shoulder_intersection_x_s_lx = 1;
-
-    float scale_toe_s_t = -_scale(
-        inverse_limit_toe_x_i_ilx,
-        inverse_limit_toe_y_t_ily,
-        inverse_transition_toe_x,
-        inverse_transition_toe_y,
-        toe_power_t_p,
-        linear_slope_P_slope
-    );
-    if (isnan(scale_toe_s_t))
-    {
-      errors++; // printf("scale_toe is NaN\n");
-    }
-
-    float scale_shoulder = _scale(
-        shoulder_intersection_x_s_lx,
-        shoulder_intersection_y_s_ly,
-        transition_shoulder_x_s_tx,
-        transition_shoulder_y_s_ty,
-        shoulder_power_s_p,
-        linear_slope_P_slope
-    );
-    if (isnan(scale_shoulder))
-    {
-      errors++; // printf("scale_shoulder is NaN\n");
-    }
-
-    if (debug)
-    {
-      printf("scale_toe: %f, scale_shoulder: %f\n", scale_toe_s_t, scale_shoulder);
-    }
-
-    // b
-    float intercept = transition_toe_y_t_ty - linear_slope_P_slope * transition_toe_x_t_tx;
-    if (isnan(intercept))
-    {
-      errors++; // printf("intercept is NaN\n");
-    }
-
   float result;
 
   if (x < transition_toe_x_t_tx) {
@@ -535,35 +492,82 @@ static float3 _agx_tone_mapping(
   // Apply sigmoid
   if (p->sigmoid_tunable)
   {
+    // shoulder transition
+    float inverse_transition_toe_x = 1.0f - transition_toe_x_t_tx;
+    float inverse_transition_toe_y = 1.0f - transition_toe_y_t_ty;
+
+    const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx
+    const float inverse_limit_toe_y_t_ily = 1.0f - p->sigmoid_toe_intersection_y;
+
+    const float shoulder_intersection_x_s_lx = 1;
+
+    float scale_toe_s_t = -_scale(
+        inverse_limit_toe_x_i_ilx,
+        inverse_limit_toe_y_t_ily,
+        inverse_transition_toe_x,
+        inverse_transition_toe_y,
+        p->sigmoid_toe_power,
+        linear_slope_P_slope
+    );
+    if (isnan(scale_toe_s_t))
+    {
+      errors++; // printf("scale_toe is NaN\n");
+    }
+
+    float scale_shoulder = _scale(
+        shoulder_intersection_x_s_lx,
+        p->sigmoid_shoulder_intersection_y,
+        transition_shoulder_x_s_tx,
+        transition_shoulder_y_s_ty,
+        p->sigmoid_shoulder_power,
+        linear_slope_P_slope
+    );
+    if (isnan(scale_shoulder))
+    {
+      errors++; // printf("scale_shoulder is NaN\n");
+    }
+
+    if (debug)
+    {
+      printf("scale_toe: %f, scale_shoulder: %f\n", scale_toe_s_t, scale_shoulder);
+    }
+
+    // b
+    float intercept = transition_toe_y_t_ty - linear_slope_P_slope * transition_toe_x_t_tx;
+    if (isnan(intercept))
+    {
+      errors++; // printf("intercept is NaN\n");
+    }
+
     v.r = _calculate_sigmoid(
       v.r,
       linear_slope_P_slope,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-      p->sigmoid_toe_intersection_y,
-      p->sigmoid_shoulder_intersection_y,
       transition_toe_x_t_tx, transition_toe_y_t_ty,
       transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
-      debug
+      scale_toe_s_t,
+      intercept,
+      scale_shoulder
     );
     v.g = _calculate_sigmoid(
       v.g,
       linear_slope_P_slope,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-      p->sigmoid_toe_intersection_y,
-      p->sigmoid_shoulder_intersection_y,
       transition_toe_x_t_tx, transition_toe_y_t_ty,
       transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
-      debug
+      scale_toe_s_t,
+      intercept,
+      scale_shoulder
     );
     v.b = _calculate_sigmoid(
       v.b,
       linear_slope_P_slope,
       p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-      p->sigmoid_toe_intersection_y,
-      p->sigmoid_shoulder_intersection_y,
       transition_toe_x_t_tx, transition_toe_y_t_ty,
       transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
-      debug
+      scale_toe_s_t,
+      intercept,
+      scale_shoulder
     );
   } else
   {
