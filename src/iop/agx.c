@@ -356,7 +356,12 @@ static float _scale(float limit_x_lx, float limit_y_ly, float transition_x_tx, f
     //   term_b = 0;
     // }
 
-    float scale_value = powf(power_curved_y_delta * term_b, -1.0f / power_p);
+  float base = power_curved_y_delta * term_b;
+  if (base < 0.0f)
+  {
+    return 1;
+  }
+  float scale_value = powf(base, -1.0f / power_p);
     if(isnan(scale_value) || isinf(scale_value))
     {
       // with extreme settings, the scale value explodes, let's limit that
@@ -456,7 +461,9 @@ static float3 _agx_tone_mapping(
   float transition_shoulder_x_s_tx, float transition_shoulder_y_s_ty,
   float range_in_ev,
   float minEv,
-  int debug)
+  float scale_toe_s_t,
+  float intercept,
+  float scale_shoulder)
 {
   dt_aligned_pixel_t rgb_pixel;
   rgb_pixel[0] = rgb.r;
@@ -492,53 +499,6 @@ static float3 _agx_tone_mapping(
   // Apply sigmoid
   if (p->sigmoid_tunable)
   {
-    // shoulder transition
-    float inverse_transition_toe_x = 1.0f - transition_toe_x_t_tx;
-    float inverse_transition_toe_y = 1.0f - transition_toe_y_t_ty;
-
-    const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx
-    const float inverse_limit_toe_y_t_ily = 1.0f - p->sigmoid_toe_intersection_y;
-
-    const float shoulder_intersection_x_s_lx = 1;
-
-    float scale_toe_s_t = -_scale(
-        inverse_limit_toe_x_i_ilx,
-        inverse_limit_toe_y_t_ily,
-        inverse_transition_toe_x,
-        inverse_transition_toe_y,
-        p->sigmoid_toe_power,
-        linear_slope_P_slope
-    );
-    if (isnan(scale_toe_s_t))
-    {
-      errors++; // printf("scale_toe is NaN\n");
-    }
-
-    float scale_shoulder = _scale(
-        shoulder_intersection_x_s_lx,
-        p->sigmoid_shoulder_intersection_y,
-        transition_shoulder_x_s_tx,
-        transition_shoulder_y_s_ty,
-        p->sigmoid_shoulder_power,
-        linear_slope_P_slope
-    );
-    if (isnan(scale_shoulder))
-    {
-      errors++; // printf("scale_shoulder is NaN\n");
-    }
-
-    if (debug)
-    {
-      printf("scale_toe: %f, scale_shoulder: %f\n", scale_toe_s_t, scale_shoulder);
-    }
-
-    // b
-    float intercept = transition_toe_y_t_ty - linear_slope_P_slope * transition_toe_x_t_tx;
-    if (isnan(intercept))
-    {
-      errors++; // printf("intercept is NaN\n");
-    }
-
     v.r = _calculate_sigmoid(
       v.r,
       linear_slope_P_slope,
@@ -693,7 +653,49 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       printf("Warning, original_transition_shoulder_y_s_ty=%f, transition_shoulder_y_s_ty=%f, shoulder_length_P_tlength=%f, linear_slope_P_slope=%f, pivot_y_p_y=%f\n",
                               original_transition_shoulder_y_s_ty, transition_shoulder_y_s_ty, shoulder_length_P_slength, linear_slope_P_slope, pivot_y_p_y);
     }
+  // shoulder transition
+  float inverse_transition_toe_x = 1.0f - transition_toe_x_t_tx;
+  float inverse_transition_toe_y = 1.0f - transition_toe_y_t_ty;
 
+  const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx
+  const float inverse_limit_toe_y_t_ily = 1.0f - p->sigmoid_toe_intersection_y;
+
+  const float shoulder_intersection_x_s_lx = 1;
+
+  float scale_toe_s_t = -_scale(
+      inverse_limit_toe_x_i_ilx,
+      inverse_limit_toe_y_t_ily,
+      inverse_transition_toe_x,
+      inverse_transition_toe_y,
+      p->sigmoid_toe_power,
+      linear_slope_P_slope
+  );
+  if (isnan(scale_toe_s_t))
+  {
+    errors++; // printf("scale_toe is NaN\n");
+  }
+
+  float scale_shoulder = _scale(
+      shoulder_intersection_x_s_lx,
+      p->sigmoid_shoulder_intersection_y,
+      transition_shoulder_x_s_tx,
+      transition_shoulder_y_s_ty,
+      p->sigmoid_shoulder_power,
+      linear_slope_P_slope
+  );
+  if (isnan(scale_shoulder))
+  {
+    errors++; // printf("scale_shoulder is NaN\n");
+  }
+
+  printf("scale_toe: %f, scale_shoulder: %f\n", scale_toe_s_t, scale_shoulder);
+
+  // b
+  float intercept = transition_toe_y_t_ty - linear_slope_P_slope * transition_toe_x_t_tx;
+  if (isnan(intercept))
+  {
+    errors++; // printf("intercept is NaN\n");
+  }
 
   DT_OMP_FOR()
   for (int j = 0; j < roi_out->height; j++) {
@@ -716,7 +718,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
         transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
         range_in_ev,
         minEv,
-        debug);
+        scale_toe_s_t,
+        intercept,
+        scale_shoulder);
 
       out[0] = agx_rgb.r;
       out[1] = agx_rgb.g;
