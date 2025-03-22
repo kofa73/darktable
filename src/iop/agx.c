@@ -693,7 +693,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     errors++; // printf("intercept is NaN\n");
   }
 
-  //DT_OMP_FOR()
+  DT_OMP_FOR()
   for (int j = 0; j < roi_out->height; j++) {
     float *in = ((float *)ivoid) + (size_t)ch * roi_in->width * j;
     float *out = ((float *)ovoid) + (size_t)ch * roi_out->width * j;
