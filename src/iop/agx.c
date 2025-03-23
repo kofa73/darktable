@@ -355,7 +355,7 @@ static float _scale(float limit_x_lx, float limit_y_ly, float transition_x_tx, f
 
 static float _exponential(float x_in, float power)
 {
-  float value = x_in / powf(1.0f + powf(x_in, power), 1.0f / power);
+  const float value = x_in / powf(1.0f + powf(x_in, power), 1.0f / power);
   if(isnan(value))
   {
     errors++; // printf("_exponential returns nan\n");
@@ -554,6 +554,25 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
   return out;
 }
 
+void _print_sigmoid(float linear_slope_P_slope,
+                                float toe_power_t_p, float shoulder_power_s_p, float transition_toe_x_t_tx,
+                                float transition_toe_y_t_ty, float transition_shoulder_x_s_tx,
+                                float transition_shoulder_y_s_ty, float scale_toe_s_t, float intercept,
+                                float scale_shoulder)
+{
+  printf("\nSigmoid\n");
+  for (float x = 0 ; x <= 1.001f; x+=0.05f)
+  {
+    float y = _calculate_sigmoid(x, linear_slope_P_slope,
+      toe_power_t_p, shoulder_power_s_p,
+      transition_toe_x_t_tx, transition_toe_y_t_ty,
+      transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
+      scale_toe_s_t, intercept, scale_shoulder);
+    printf("%f\t%f\n", x, y);
+  }
+  printf("\n");
+}
+
 // Process
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
@@ -584,14 +603,32 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   float range_in_ev = maxEv - minEv;
 
   float linear_slope_P_slope = p->sigmoid_linear_slope * (range_in_ev / 16.5);
+  float dy_toe = pivot_y_p_y - p->sigmoid_toe_intersection_y;
+  float dx_toe = pivot_x_p_x - 0.0f;
+  float toe_min_slope =  dy_toe/ dx_toe;
 
-  // toe
+  float dy_shoulder = p->sigmoid_shoulder_intersection_y - pivot_y_p_y;
+  float dx_shoulder = 1 - pivot_x_p_x;
+  float shoulder_min_slope =  dy_shoulder/ dx_shoulder;
+  printf("toe_min_slope: %f, shoulder_min_slope: %f, linear_slope_P_slope: %f\n", toe_min_slope, shoulder_min_slope, linear_slope_P_slope);
+  linear_slope_P_slope = fmaxf(linear_slope_P_slope, fmaxf(shoulder_min_slope, toe_min_slope));
+
   float toe_length_P_tlength = p->sigmoid_toe_length;
   float toe_x_from_pivot_x = _dx_from_hypotenuse_and_slope(toe_length_P_tlength, linear_slope_P_slope);
   float transition_toe_x_t_tx = pivot_x_p_x - toe_x_from_pivot_x;
   float toe_y_from_pivot_y = linear_slope_P_slope * toe_x_from_pivot_x;
   float transition_toe_y_t_ty = pivot_y_p_y - toe_y_from_pivot_y;
+  float shoulder_length_P_slength = p->sigmoid_shoulder_length;
+  float shoulder_x_from_pivot_x = _dx_from_hypotenuse_and_slope(shoulder_length_P_slength, linear_slope_P_slope);
+  printf("shoulder_x_from_pivot_x = %f\n", shoulder_x_from_pivot_x);
+  float transition_shoulder_x_s_tx = pivot_x_p_x - shoulder_x_from_pivot_x;
+  printf("transition_shoulder_x_s_tx = %f\n", transition_shoulder_x_s_tx);
+  float shoulder_y_from_pivot_y = linear_slope_P_slope * shoulder_x_from_pivot_x;
+  printf("shoulder_y_from_pivot_y = %f\n", shoulder_y_from_pivot_y);
+  float transition_shoulder_y_s_ty = pivot_y_p_y - shoulder_y_from_pivot_y;
+  printf("transition_shoulder_y_s_ty = %f\n", transition_shoulder_y_s_ty);
 
+  // toe
   float original_transition_toe_x_t_tx
       = _linear_breakpoint(-toe_length_P_tlength, linear_slope_P_slope, pivot_x_p_x);
   float original_transition_toe_y_t_ty
@@ -613,15 +650,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   }
 
   // shoulder
-  float shoulder_length_P_slength = p->sigmoid_shoulder_length;
-  float shoulder_x_from_pivot_x = _dx_from_hypotenuse_and_slope(shoulder_length_P_slength, linear_slope_P_slope);
-  printf("shoulder_x_from_pivot_x = %f\n", shoulder_x_from_pivot_x);
-  float transition_shoulder_x_s_tx = pivot_x_p_x - shoulder_x_from_pivot_x;
-  printf("transition_shoulder_x_s_tx = %f\n", transition_shoulder_x_s_tx);
-  float shoulder_y_from_pivot_y = linear_slope_P_slope * shoulder_x_from_pivot_x;
-  printf("shoulder_y_from_pivot_y = %f\n", shoulder_y_from_pivot_y);
-  float transition_shoulder_y_s_ty = pivot_y_p_y - shoulder_y_from_pivot_y;
-  printf("transition_shoulder_y_s_ty = %f\n", transition_shoulder_y_s_ty);
 
   float original_transition_shoulder_x_s_tx
       = _linear_breakpoint(-shoulder_length_P_slength, linear_slope_P_slope, pivot_x_p_x);
@@ -674,6 +702,12 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   {
     errors++; // printf("intercept is NaN\n");
   }
+
+  _print_sigmoid(linear_slope_P_slope,
+                                p->sigmoid_toe_power, p->sigmoid_shoulder_power, transition_toe_x_t_tx,
+                                transition_toe_y_t_ty, transition_shoulder_x_s_tx,
+                                transition_shoulder_y_s_ty, scale_toe_s_t, intercept,
+                                scale_shoulder);
 
   DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
