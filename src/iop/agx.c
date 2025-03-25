@@ -821,6 +821,7 @@ void init_presets(dt_iop_module_so_t *self)
   p.sigmoid_shoulder_power = 1.5;
   p.sigmoid_toe_intersection_y = 0.0;
   p.sigmoid_shoulder_intersection_y = 1.0;
+  p.sigmoid_curve_gamma = 2.2;
   p.mix = 0.0f;
 
   // None preset
