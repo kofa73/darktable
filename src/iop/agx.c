@@ -44,8 +44,6 @@ DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
 // so we have a breakpoint target in error-handling branches, to be removed after debugging
 int errors = 0;
 
-const float pivot_y_p_y = 0.45865644686f; // powf(mid_grey = 0.18, 1.0f / 2.2f);
-
 typedef struct dt_iop_agx_gui_data_t
 {
 } dt_iop_agx_gui_data_t;
@@ -71,6 +69,7 @@ typedef struct dt_iop_agx_params_t
   float sigmoid_shoulder_power;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
   float sigmoid_toe_intersection_y;      // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
   float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
+  float sigmoid_curve_gamma; // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Sigmoid curve 'gamma'"
 } dt_iop_agx_params_t;
 
 void gui_init(dt_iop_module_t *self)
@@ -120,6 +119,11 @@ void gui_init(dt_iop_module_t *self)
 
   slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_maximum");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
+  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+
+  // Internal 'gamma'
+  slider = dt_bauhaus_slider_from_params(self, "sigmoid_curve_gamma");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
   gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
   // Linear Section Slope
@@ -499,7 +503,8 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
                                 float range_in_ev, float minEv, float scale_toe_s_t, float intercept,
                                 float scale_shoulder,
                                 gboolean need_convex_toe, float toe_a, float toe_b,
-                                gboolean need_concave_shoulder, float shoulder_a, float shoulder_b)
+                                gboolean need_concave_shoulder, float shoulder_a, float shoulder_b,
+                                float sigmoid_curve_gamma)
 {
   // Apply Inset Matrix
   rgb = _mat3f_mul_float3(AgXInsetMatrix, rgb);
@@ -544,9 +549,9 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
   log_pixel = _agxLook(log_pixel, p);
 
   // Linearize
-  rgb_pixel[0] = powf(fmaxf(0.0f, log_pixel.r), 2.2f);
-  rgb_pixel[1] = powf(fmaxf(0.0f, log_pixel.g), 2.2f);
-  rgb_pixel[2] = powf(fmaxf(0.0f, log_pixel.b), 2.2f);
+  rgb_pixel[0] = powf(fmaxf(0.0f, log_pixel.r), sigmoid_curve_gamma);
+  rgb_pixel[1] = powf(fmaxf(0.0f, log_pixel.g), sigmoid_curve_gamma);
+  rgb_pixel[2] = powf(fmaxf(0.0f, log_pixel.b), sigmoid_curve_gamma);
 
   // record post-sigmoid chroma angle
   dt_RGB_2_HSV(rgb_pixel, hsv_pixel);
@@ -578,7 +583,7 @@ void _print_sigmoid(float linear_slope_P_slope,
                                 gboolean need_concave_shoulder, float shoulder_a, float shoulder_b)
 {
   printf("\nSigmoid\n");
-  for (float x = 0 ; x <= 1.001f; x+=0.05f)
+  for (float x = 0 ; x <= 1.001f; x+=0.01f)
   {
     float y = _calculate_sigmoid(x, linear_slope_P_slope,
       toe_power_t_p, shoulder_power_s_p,
@@ -634,6 +639,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   // avoid range altering slope
   float linear_slope_P_slope = p->sigmoid_linear_slope * (range_in_ev / 16.5);
+
+  const float pivot_y_p_y = powf(0.18, 1.0 / p->sigmoid_curve_gamma);
 
   float toe_length_P_tlength = p->sigmoid_toe_length;
   float toe_x_from_pivot_x = _dx_from_hypotenuse_and_slope(toe_length_P_tlength, linear_slope_P_slope);
@@ -733,7 +740,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
           rgb, p, linear_slope_P_slope, transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
           transition_shoulder_y_s_ty, range_in_ev, minEv, scale_toe_s_t, intercept, scale_shoulder,
           need_convex_toe, toe_a, toe_b,
-          need_concave_shoulder, shoulder_a, shoulder_b);
+          need_concave_shoulder, shoulder_a, shoulder_b,
+          p->sigmoid_curve_gamma);
 
       out[0] = agx_rgb.r;
       out[1] = agx_rgb.g;
