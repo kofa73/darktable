@@ -46,8 +46,9 @@ int errors = 0;
 
 typedef struct dt_iop_agx_gui_data_t
 {
+  dt_gui_collapsible_section_t sigmoid_section;
+  dt_gui_collapsible_section_t sigmoid_additional_section;
 } dt_iop_agx_gui_data_t;
-
 
 // Module parameters struct
 // Updated struct dt_iop_agx_params_t
@@ -59,7 +60,6 @@ typedef struct dt_iop_agx_params_t
   float sat;    // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
   float mix;    // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
-  gboolean sigmoid_tunable; // $MIN: FALSE $MAX: TRUE $DEFAULT: TRUE $DESCRIPTION: "Use tunable curve vs fixed polynomial"
   float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure (below mid-grey)"
   float sigmoid_normalized_log2_maximum; // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-grey)"
   float sigmoid_linear_slope;    // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Slope of linear portion"
@@ -74,88 +74,99 @@ typedef struct dt_iop_agx_params_t
 
 void gui_init(dt_iop_module_t *self)
 {
-  dt_iop_agx_gui_data_t *g = IOP_GUI_ALLOC(agx);
+ dt_iop_agx_gui_data_t *g = IOP_GUI_ALLOC(agx);
 
-  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+ self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
-  // look: sat, slope, offset, power, mix
-  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
-  GtkWidget *label = gtk_label_new(_("Look"));
-  gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
-  GtkWidget *slider;
-  slider = dt_bauhaus_slider_from_params(self, "sat");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+ // look: sat, slope, offset, power, mix
+ GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+ gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
+ GtkWidget *label = gtk_label_new(_("Look"));
+ gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
+ GtkWidget *slider;
+ slider = dt_bauhaus_slider_from_params(self, "sat");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+ gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
-  slider = dt_bauhaus_slider_from_params(self, "slope");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "slope");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+ gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
-  slider = dt_bauhaus_slider_from_params(self, "offset");
-  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "offset");
+ dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
+ gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
-  slider = dt_bauhaus_slider_from_params(self, "power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "power");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+ gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
-  slider = dt_bauhaus_slider_from_params(self, "mix");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "mix");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+ gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
-  // sigmoid
-  GtkWidget *sigmoid_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), sigmoid_box, TRUE, TRUE, 0);
-  label = gtk_label_new(_("Sigmoid"));
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), label, FALSE, FALSE, 0);
+ // Sigmoid section with collapsible container
+ GtkWidget *main_box = self->widget;
+ dt_gui_new_collapsible_section(&g->sigmoid_section, "plugins/darkroom/agx/expand_sigmoid",
+     _("Sigmoid"), GTK_BOX(main_box), DT_ACTION(self));
 
-  dt_bauhaus_toggle_from_params(self, "sigmoid_tunable");
+ self->widget = GTK_WIDGET(g->sigmoid_section.container);
 
-  // black/white relative exposure
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_minimum");
-  dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+ // black/white relative exposure
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_minimum");
+ dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
+ gtk_widget_set_tooltip_text(slider, _("minimum relative exposure (black point)"));
 
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_maximum");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_maximum");
+ dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
+ gtk_widget_set_tooltip_text(slider, _("maximum relative exposure (white point)"));
 
-  // Internal 'gamma'
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_curve_gamma");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+ // Internal 'gamma'
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_curve_gamma");
+ dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
+ gtk_widget_set_tooltip_text(slider, _("curve gamma adjustment"));
 
-  // Linear Section Slope
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_slope");
-  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+ // Linear Section Slope
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_slope");
+ dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+ gtk_widget_set_tooltip_text(slider, _("linear section slope"));
 
-  // Toe
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_length");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
+ dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+ gtk_widget_set_tooltip_text(slider, _("toe power"));
 
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_intersection_y");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
+ dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+ gtk_widget_set_tooltip_text(slider, _("shoulder power"));
 
-  // Shoulder
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_length");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
 
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+ // Create a nested collapsible section for additional parameters
+GtkWidget *parent_box = self->widget;
+dt_gui_new_collapsible_section(&g->sigmoid_additional_section, "plugins/darkroom/agx/expand_sigmoid_additional",
+  _("advanced"), GTK_BOX(parent_box), DT_ACTION(self));
 
-  slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_intersection_y");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  gtk_box_pack_start(GTK_BOX(sigmoid_box), slider, TRUE, TRUE, 0);
+  self->widget = GTK_WIDGET(g->sigmoid_additional_section.container);
+
+ // Toe
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_length");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+ gtk_widget_set_tooltip_text(slider, _("toe length"));
+
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_intersection_y");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+ gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
+
+ // Shoulder
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_length");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+ gtk_widget_set_tooltip_text(slider, _("shoulder length"));
+
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_intersection_y");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+ gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
+
+ // Restore main widget
+ self->widget = main_box;
 }
 
 // Global data struct (not needed for this simple example)
@@ -274,14 +285,6 @@ const mat3f AgXOutsetMatrix = { { { 1.1271005818144368f, -0.11060664309660323f, 
 const mat3f AgXInsetMatrixInverse = { { { 1.1974410768877f, -0.14426151269800f, -0.053179564189704f },
                                         { -0.19647462632135f, 1.3540951314697f, -0.15762050514838f },
                                         { -0.14655741710660f, -0.10828405878847f, 1.2548414758951f } } };
-
-// LOG2_MIN       = -10.0 (EV below mid-grey)
-// LOG2_MAX       =  +6.5 (EV above mid-grey)
-// log2(mid-grey) = -2.47 (EV below diffuse white)
-const float AgxMinEv = -12.47393f; // log2(pow(2, LOG2_MIN) * MIDDLE_GRAY) -> mid-grey + black relative exposure =
-                                   // black limit, relative to (below) diffuse white
-const float AgxMaxEv = 4.026069f;  // log2(pow(2, LOG2_MAX) * MIDDLE_GRAY) -> mid-grey + white relative exposure =
-                                   // white limit, relative to (above) diffuse white
 
 // https://iolite-engine.com/blog_posts/minimal_agx_implementation
 static float3 _agxDefaultContrastApprox(float3 x)
@@ -441,6 +444,12 @@ static float _lerp_hue(float hue1, float hue2, float mix)
   return hue_out;
 }
 
+static float apply_offset(float x, float offset)
+{
+  // y = mx + b, b is the offset, m = (1 - offset), so the line runs from (0, offset) to (1, 1)
+  return (1 - offset) * x + offset;
+}
+
 // https://iolite-engine.com/blog_posts/minimal_agx_implementation
 static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
 {
@@ -457,8 +466,11 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
   float sat = p->sat;
 
   // ASC CDL
-  float3 pow_val = _powf3((float3){ fmaxf(0.0f, val.r + offset) * slope, fmaxf(0.0f, val.g + offset) * slope,
-                                    fmaxf(0.0f, val.b + offset) * slope },
+  float offset_r = apply_offset(val.r, offset);
+  float offset_g = apply_offset(val.g, offset);
+  float offset_b = apply_offset(val.b, offset);
+  float3 pow_val = _powf3((float3){ fmaxf(0.0f, offset_r) * slope, fmaxf(0.0f, offset_g) * slope,
+                                    fmaxf(0.0f, offset_b) * slope },
                           power);
 
   float3 result;
@@ -468,12 +480,13 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
   return result;
 }
 
-static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, gboolean sigmoid_tunable, float range_in_ev, float minEv)
+static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, float minEv)
 {
   // Ensure no negative values
-  float3 v = { fmaxf(0.0f, sigmoid_tunable ? pixel[0] / 0.18f : pixel[0]),
-               fmaxf(0.0f, sigmoid_tunable ? pixel[1] / 0.18f : pixel[1]),
-               fmaxf(0.0f, sigmoid_tunable ? pixel[2] / 0.18f : pixel[2]) };
+  float3 v = { fmaxf(0.0f, pixel[0] / 0.18f),
+               fmaxf(0.0f, pixel[1] / 0.18f),
+               fmaxf(0.0f, pixel[2] / 0.18f)
+  };
 
   // Log2 encoding
   float small_value = 1E-10f;
@@ -519,31 +532,24 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
   dt_RGB_2_HSV(rgb_pixel, hsv_pixel);
   float h_before = hsv_pixel[0];
 
-  float3 log_pixel = _apply_log_encoding(rgb_pixel, p->sigmoid_tunable, range_in_ev, minEv);
+  float3 log_pixel = _apply_log_encoding(rgb_pixel, range_in_ev, minEv);
 
   // Apply sigmoid
-  if(p->sigmoid_tunable)
-  {
-    log_pixel.r = _calculate_sigmoid(log_pixel.r, linear_slope_P_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-                             transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
-                             transition_shoulder_y_s_ty, scale_toe_s_t, intercept, scale_shoulder,
-                             need_convex_toe, toe_a, toe_b,
-                             need_concave_shoulder, shoulder_a, shoulder_b);
-    log_pixel.g = _calculate_sigmoid(log_pixel.g, linear_slope_P_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-                             transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
-                             transition_shoulder_y_s_ty, scale_toe_s_t, intercept, scale_shoulder,
-                             need_convex_toe, toe_a, toe_b,
-                             need_concave_shoulder, shoulder_a, shoulder_b);
-    log_pixel.b = _calculate_sigmoid(log_pixel.b, linear_slope_P_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-                             transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
-                             transition_shoulder_y_s_ty, scale_toe_s_t, intercept, scale_shoulder,
-                             need_convex_toe, toe_a, toe_b,
-                             need_concave_shoulder, shoulder_a, shoulder_b);
-  }
-  else
-  {
-    log_pixel = _agxDefaultContrastApprox(log_pixel);
-  }
+  log_pixel.r = _calculate_sigmoid(log_pixel.r, linear_slope_P_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+                           transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
+                           transition_shoulder_y_s_ty, scale_toe_s_t, intercept, scale_shoulder,
+                           need_convex_toe, toe_a, toe_b,
+                           need_concave_shoulder, shoulder_a, shoulder_b);
+  log_pixel.g = _calculate_sigmoid(log_pixel.g, linear_slope_P_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+                           transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
+                           transition_shoulder_y_s_ty, scale_toe_s_t, intercept, scale_shoulder,
+                           need_convex_toe, toe_a, toe_b,
+                           need_concave_shoulder, shoulder_a, shoulder_b);
+  log_pixel.b = _calculate_sigmoid(log_pixel.b, linear_slope_P_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+                           transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
+                           transition_shoulder_y_s_ty, scale_toe_s_t, intercept, scale_shoulder,
+                           need_convex_toe, toe_a, toe_b,
+                           need_concave_shoulder, shoulder_a, shoulder_b);
 
   // Apply AgX look
   log_pixel = _agxLook(log_pixel, p);
@@ -619,7 +625,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out)) return;
 
   printf("================== start ==================\n");
-  printf("sigmoid_tunable = %d\n", p->sigmoid_tunable);
   printf("sigmoid_normalized_log2_minimum = %f\n", p->sigmoid_normalized_log2_minimum);
   printf("sigmoid_normalized_log2_maximum = %f\n", p->sigmoid_normalized_log2_maximum);
   printf("sigmoid_linear_slope = %f\n", p->sigmoid_linear_slope);
@@ -630,8 +635,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("sigmoid_toe_intersection_y = %f\n", p->sigmoid_toe_intersection_y);
   printf("sigmoid_shoulder_intersection_y = %f\n", p->sigmoid_shoulder_intersection_y);
 
-  const float maxEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_maximum : AgxMaxEv;
-  const float minEv = p->sigmoid_tunable ? p->sigmoid_normalized_log2_minimum : AgxMinEv;
+  const float maxEv = p->sigmoid_normalized_log2_maximum;
+  const float minEv = p->sigmoid_normalized_log2_minimum;
   const float pivot_x_p_x = fabsf(p->sigmoid_normalized_log2_minimum
                                   / (p->sigmoid_normalized_log2_maximum - p->sigmoid_normalized_log2_minimum));
 
@@ -811,7 +816,6 @@ void init_presets(dt_iop_module_so_t *self)
   dt_iop_agx_params_t p = { 0 };
 
   // common
-  p.sigmoid_tunable = TRUE;
   p.sigmoid_normalized_log2_minimum = -10;
   p.sigmoid_normalized_log2_maximum = 6.5;
   p.sigmoid_linear_slope = 2.4;
