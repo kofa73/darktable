@@ -44,6 +44,9 @@ DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
 // so we have a breakpoint target in error-handling branches, to be removed after debugging
 int errors = 0;
 
+const float _epsilon = 1E-6f;
+
+
 typedef struct dt_iop_agx_gui_data_t
 {
   dt_gui_collapsible_section_t sigmoid_section;
@@ -328,14 +331,15 @@ static float _scale(float limit_x_lx, float limit_y_ly, float transition_x_tx, f
   float power_curved_y_delta = powf(linear_y_delta, -power_p); // dampened / steepened
   printf("power_curved_y_delta = %f\n", power_curved_y_delta);
 
-  float remaining_y_span = limit_y_ly - transition_y_ty;
+  // in case the linear section extends too far; avoid division by 0
+  float remaining_y_span = fmaxf(_epsilon, limit_y_ly - transition_y_ty);
   printf("remaining_y_span = %f\n", remaining_y_span);
 
   float y_delta_ratio = linear_y_delta / remaining_y_span;
   printf("y_delta_ratio = %f\n", y_delta_ratio);
 
   float term_b = powf(y_delta_ratio, power_p) - 1.0f;
-  term_b = fmaxf(term_b, 1e-3);
+  term_b = fmaxf(term_b, _epsilon);
   printf("term_b = %f\n", term_b);
 
   float base = power_curved_y_delta * term_b;
@@ -376,13 +380,14 @@ static float _exponential_curve(float x_in, float scale_, float slope, float pow
 // See https://www.desmos.com/calculator/gijzff3wlv
 static float _fallback_toe(float x, float toe_a, float toe_b)
 {
-  return x <= 0 ? 0 : toe_a * powf(x, toe_b);
+  // FIXME target black
+  return x <= 0 ? 0 : fmaxf(0, toe_a * powf(x, toe_b));
 }
 
 static float _fallback_shoulder(float x, float shoulder_a, float shoulder_b)
 {
   // FIXME: target white
-  return (x >= 1) ? 1 : 1 - shoulder_a * powf(1 - x, shoulder_b);
+  return (x >= 1) ? 1 : fminf(1, 1 - shoulder_a * powf(1 - x, shoulder_b));
 }
 
 
@@ -415,7 +420,8 @@ static float _calculate_sigmoid(float x,
                                 transition_shoulder_x_s_tx, transition_shoulder_y_s_ty);
   }
 
-  return result;
+  // TODO: white, black
+  return fmaxf(0, fminf(1, result));
 }
 
 // 'lerp', but take care of the boundary: hue wraps around 1 -> 0
@@ -489,10 +495,9 @@ static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, f
   };
 
   // Log2 encoding
-  float small_value = 1E-10f;
-  v.r = fmaxf(v.r, small_value);
-  v.g = fmaxf(v.g, small_value);
-  v.b = fmaxf(v.b, small_value);
+  v.r = fmaxf(v.r, _epsilon);
+  v.g = fmaxf(v.g, _epsilon);
+  v.b = fmaxf(v.b, _epsilon);
 
   v.r = log2f(v.r);
   v.g = log2f(v.g);
@@ -588,9 +593,11 @@ void _print_sigmoid(float linear_slope_P_slope,
                                 gboolean need_convex_toe, float toe_a, float toe_b,
                                 gboolean need_concave_shoulder, float shoulder_a, float shoulder_b)
 {
+  const int steps = 100;
   printf("\nSigmoid\n");
-  for (float x = 0 ; x <= 1.001f; x+=0.01f)
+  for (int i = 0; i <= steps; i++)
   {
+    float x = i / (float) steps;
     float y = _calculate_sigmoid(x, linear_slope_P_slope,
       toe_power_t_p, shoulder_power_s_p,
       transition_toe_x_t_tx, transition_toe_y_t_ty,
@@ -627,6 +634,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("================== start ==================\n");
   printf("sigmoid_normalized_log2_minimum = %f\n", p->sigmoid_normalized_log2_minimum);
   printf("sigmoid_normalized_log2_maximum = %f\n", p->sigmoid_normalized_log2_maximum);
+  printf("sigmoid_curve_gamma = %f\n", p->sigmoid_curve_gamma);
   printf("sigmoid_linear_slope = %f\n", p->sigmoid_linear_slope);
   printf("sigmoid_toe_length = %f\n", p->sigmoid_toe_length);
   printf("sigmoid_shoulder_length = %f\n", p->sigmoid_shoulder_length);
@@ -637,40 +645,42 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   const float maxEv = p->sigmoid_normalized_log2_maximum;
   const float minEv = p->sigmoid_normalized_log2_minimum;
-  const float pivot_x_p_x = fabsf(p->sigmoid_normalized_log2_minimum
+  const float pivot_x = fabsf(p->sigmoid_normalized_log2_minimum
                                   / (p->sigmoid_normalized_log2_maximum - p->sigmoid_normalized_log2_minimum));
 
   float range_in_ev = maxEv - minEv;
 
   // avoid range altering slope
-  float linear_slope_P_slope = p->sigmoid_linear_slope * (range_in_ev / 16.5);
+  float scaled_slope = p->sigmoid_linear_slope * (range_in_ev / 16.5);
+  printf("scaled slope = %f\n", scaled_slope);
 
-  const float pivot_y_p_y = powf(0.18, 1.0 / p->sigmoid_curve_gamma);
+  const float pivot_y = powf(0.18, 1.0 / p->sigmoid_curve_gamma);
 
-  float toe_length_P_tlength = p->sigmoid_toe_length;
-  float toe_x_from_pivot_x = _dx_from_hypotenuse_and_slope(toe_length_P_tlength, linear_slope_P_slope);
-  float transition_toe_x_t_tx = pivot_x_p_x - toe_x_from_pivot_x;
-  float toe_y_from_pivot_y = linear_slope_P_slope * toe_x_from_pivot_x;
-  float transition_toe_y_t_ty = pivot_y_p_y - toe_y_from_pivot_y;
+  float linear_below_pivot = p->sigmoid_toe_length;
+  float toe_start_x_from_pivot_x = _dx_from_hypotenuse_and_slope(linear_below_pivot, scaled_slope);
+  float toe_start_x = pivot_x - toe_start_x_from_pivot_x;
+  float toe_y_below_pivot_y = scaled_slope * toe_start_x_from_pivot_x;
+  float toe_start_y = pivot_y - toe_y_below_pivot_y;
 
   // toe
-  float toe_b = _calculate_B(linear_slope_P_slope, transition_toe_x_t_tx, transition_toe_y_t_ty);
-  float toe_a = _calculate_A(transition_toe_x_t_tx, transition_toe_y_t_ty, toe_b);
+  float toe_b = _calculate_B(scaled_slope, toe_start_x, toe_start_y);
+  float toe_a = _calculate_A(toe_start_x, toe_start_y, toe_b);
 
-  float linear_y_at_pivot_x_from_origin_at_slope = linear_slope_P_slope * transition_toe_x_t_tx;
+  // starting with a line of gradient scaled_slope from (0, 0 // FIXME: target_black) would take us to (pivot_x, linear_y_at_pivot_x_at_slope)
+  float linear_y_at_pivot_x_at_slope = scaled_slope * toe_start_x;
   // Normally, the toe is concave: its gradient is gradually increasing, up to the slope of the linear
   // section. If the slope of the linear section is not enough to go from (0, 0) to
   // (transition_toe_x_t_tx, transition_toe_y_t_ty), we'll need a convex 'toe'
-  gboolean need_convex_toe = linear_y_at_pivot_x_from_origin_at_slope < transition_toe_y_t_ty; // FIXME: target black
+  gboolean need_convex_toe = linear_y_at_pivot_x_at_slope < toe_start_y; // FIXME: target black
 
   const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx
   const float inverse_limit_toe_y_t_ily = 1.0f - p->sigmoid_toe_intersection_y;
 
-  float inverse_transition_toe_x = 1.0f - transition_toe_x_t_tx;
-  float inverse_transition_toe_y = 1.0f - transition_toe_y_t_ty;
+  float inverse_transition_toe_x = 1.0f - toe_start_x;
+  float inverse_transition_toe_y = 1.0f - toe_start_y;
 
   float scale_toe_s_t = -_scale(inverse_limit_toe_x_i_ilx, inverse_limit_toe_y_t_ily, inverse_transition_toe_x,
-                                inverse_transition_toe_y, p->sigmoid_toe_power, linear_slope_P_slope);
+                                inverse_transition_toe_y, p->sigmoid_toe_power, scaled_slope);
   if(isnan(scale_toe_s_t))
   {
     errors++; // printf("scale_toe is NaN\n");
@@ -678,16 +688,16 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   // shoulder
   float shoulder_length_P_slength = p->sigmoid_shoulder_length;
-  float shoulder_x_from_pivot_x = _dx_from_hypotenuse_and_slope(shoulder_length_P_slength, linear_slope_P_slope);
+  float shoulder_x_from_pivot_x = _dx_from_hypotenuse_and_slope(shoulder_length_P_slength, scaled_slope);
   printf("shoulder_x_from_pivot_x = %f\n", shoulder_x_from_pivot_x);
-  float transition_shoulder_x_s_tx = pivot_x_p_x + shoulder_x_from_pivot_x;
+  float transition_shoulder_x_s_tx = pivot_x + shoulder_x_from_pivot_x;
   printf("transition_shoulder_x_s_tx = %f\n", transition_shoulder_x_s_tx);
-  float shoulder_y_from_pivot_y = linear_slope_P_slope * shoulder_x_from_pivot_x;
+  float shoulder_y_from_pivot_y = scaled_slope * shoulder_x_from_pivot_x;
   printf("shoulder_y_from_pivot_y = %f\n", shoulder_y_from_pivot_y);
-  float transition_shoulder_y_s_ty = pivot_y_p_y + shoulder_y_from_pivot_y;
+  float transition_shoulder_y_s_ty = pivot_y + shoulder_y_from_pivot_y;
   printf("transition_shoulder_y_s_ty = %f\n", transition_shoulder_y_s_ty);
 
-  float linear_y_at_1 = transition_shoulder_y_s_ty + linear_slope_P_slope * inverse_transition_toe_x;
+  float linear_y_at_1 = transition_shoulder_y_s_ty + scaled_slope * inverse_transition_toe_x;
   // Normally, the toe is convex: its gradient is gradually decreasing from slope of the linear
   // section. If the slope of the linear section is not enough to go from (transition_toe_x_t_tx, transition_toe_y_t_ty) to
   // (1, 1), we'll need a concave 'shoulder'
@@ -695,13 +705,13 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   const float shoulder_intersection_x_s_lx = 1;
 
-  float shoulder_b = _calculate_B(linear_slope_P_slope, 1 - transition_shoulder_x_s_tx, 1 - transition_shoulder_y_s_ty);
+  float shoulder_b = _calculate_B(scaled_slope, 1 - transition_shoulder_x_s_tx, 1 - transition_shoulder_y_s_ty);
   float shoulder_a = _calculate_A(1 - transition_shoulder_x_s_tx, 1 - transition_shoulder_y_s_ty, shoulder_b);
 
   float scale_shoulder
       = _scale(shoulder_intersection_x_s_lx, p->sigmoid_shoulder_intersection_y,
               transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
-              p->sigmoid_shoulder_power, linear_slope_P_slope);
+              p->sigmoid_shoulder_power, scaled_slope);
   if(isnan(scale_shoulder))
   {
     errors++; // printf("scale_shoulder is NaN\n");
@@ -710,7 +720,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("scale_toe: %f, scale_shoulder: %f\n", scale_toe_s_t, scale_shoulder);
 
   // b
-  float intercept = transition_toe_y_t_ty - linear_slope_P_slope * transition_toe_x_t_tx;
+  float intercept = toe_start_y - scaled_slope * toe_start_x;
   if(isnan(intercept))
   {
     errors++; // printf("intercept is NaN\n");
@@ -718,9 +728,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   printf("need_convex_toe: %d, need_concave_shoulder: %d\n", need_convex_toe, need_concave_shoulder);
 
-  _print_sigmoid(linear_slope_P_slope,
+  _print_sigmoid(scaled_slope,
                                 p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-                                transition_toe_x_t_tx, transition_toe_y_t_ty,
+                                toe_start_x, toe_start_y,
                                 transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
                                 scale_toe_s_t, intercept, scale_shoulder,
                                 need_convex_toe, toe_a, toe_b,
@@ -742,7 +752,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       int debug = (i == 0 && j == 0);
 
       float3 agx_rgb = _agx_tone_mapping(
-          rgb, p, linear_slope_P_slope, transition_toe_x_t_tx, transition_toe_y_t_ty, transition_shoulder_x_s_tx,
+          rgb, p, scaled_slope, toe_start_x, toe_start_y, transition_shoulder_x_s_tx,
           transition_shoulder_y_s_ty, range_in_ev, minEv, scale_toe_s_t, intercept, scale_shoulder,
           need_convex_toe, toe_a, toe_b,
           need_concave_shoulder, shoulder_a, shoulder_b,
