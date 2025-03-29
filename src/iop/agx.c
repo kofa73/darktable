@@ -57,22 +57,22 @@ typedef struct dt_iop_agx_gui_data_t
 // Updated struct dt_iop_agx_params_t
 typedef struct dt_iop_agx_params_t
 {
-  float slope;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
+  float look_slope;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
   float power;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
   float offset; // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
-  float sat;    // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
+  float look_saturation;    // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
   float mix;    // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
-  float sigmoid_normalized_log2_minimum; // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure (below mid-grey)"
-  float sigmoid_normalized_log2_maximum; // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-grey)"
-  float sigmoid_linear_slope;    // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Slope of linear portion"
-  float sigmoid_toe_length;      // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below mid-grey"
-  float sigmoid_shoulder_length; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above mid-grey"
-  float sigmoid_toe_power;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
-  float sigmoid_shoulder_power;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
-  float sigmoid_toe_intersection_y;      // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
-  float sigmoid_shoulder_intersection_y; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
-  float sigmoid_curve_gamma; // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Sigmoid curve 'gamma'"
+  float black_relative_exposure;            // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure (below mid-grey)"
+  float white_relative_exposure;            // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-grey)"
+  float sigmoid_linear_contrast;            // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast of the linear portion"
+  float sigmoid_linear_length_below_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below mid-grey"
+  float sigmoid_linear_length_above_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above mid-grey"
+  float sigmoid_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
+  float sigmoid_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
+  float sigmoid_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
+  float sigmoid_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
+  float sigmoid_curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Sigmoid curve 'gamma'"
 } dt_iop_agx_params_t;
 
 void gui_init(dt_iop_module_t *self)
@@ -81,17 +81,17 @@ void gui_init(dt_iop_module_t *self)
 
  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
- // look: sat, slope, offset, power, mix
+ // look: saturation, slope, offset, power, mix
  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
  gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
  GtkWidget *label = gtk_label_new(_("Look"));
  gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
  GtkWidget *slider;
- slider = dt_bauhaus_slider_from_params(self, "sat");
+ slider = dt_bauhaus_slider_from_params(self, "look_saturation");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- slider = dt_bauhaus_slider_from_params(self, "slope");
+ slider = dt_bauhaus_slider_from_params(self, "look_slope");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
@@ -115,11 +115,11 @@ void gui_init(dt_iop_module_t *self)
  self->widget = GTK_WIDGET(g->sigmoid_section.container);
 
  // black/white relative exposure
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_minimum");
+ slider = dt_bauhaus_slider_from_params(self, "black_relative_exposure");
  dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
  gtk_widget_set_tooltip_text(slider, _("minimum relative exposure (black point)"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_normalized_log2_maximum");
+ slider = dt_bauhaus_slider_from_params(self, "white_relative_exposure");
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
  gtk_widget_set_tooltip_text(slider, _("maximum relative exposure (white point)"));
 
@@ -129,7 +129,7 @@ void gui_init(dt_iop_module_t *self)
  gtk_widget_set_tooltip_text(slider, _("curve gamma adjustment"));
 
  // Linear Section Slope
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_slope");
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_contrast");
  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
 
@@ -151,20 +151,20 @@ dt_gui_new_collapsible_section(&g->sigmoid_additional_section, "plugins/darkroom
   self->widget = GTK_WIDGET(g->sigmoid_additional_section.container);
 
  // Toe
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_length");
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_length_below_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
  gtk_widget_set_tooltip_text(slider, _("toe length"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_intersection_y");
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_black_y");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
  gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
 
  // Shoulder
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_length");
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_length_above_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder length"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_intersection_y");
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_white_y");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
 
@@ -466,10 +466,10 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
   float luma = lw[0] * val.r + lw[1] * val.g + lw[2] * val.b;
 
   // Default
-  float slope = p->slope;
+  float slope = p->look_slope;
   float3 power = { p->power, p->power, p->power };
   float offset = p->offset;
-  float sat = p->sat;
+  float sat = p->look_saturation;
 
   // ASC CDL
   float offset_r = apply_offset(val.r, offset);
@@ -632,31 +632,31 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out)) return;
 
   printf("================== start ==================\n");
-  printf("sigmoid_normalized_log2_minimum = %f\n", p->sigmoid_normalized_log2_minimum);
-  printf("sigmoid_normalized_log2_maximum = %f\n", p->sigmoid_normalized_log2_maximum);
+  printf("black_relative_exposure = %f\n", p->black_relative_exposure);
+  printf("white_relative_exposure = %f\n", p->white_relative_exposure);
   printf("sigmoid_curve_gamma = %f\n", p->sigmoid_curve_gamma);
-  printf("sigmoid_linear_slope = %f\n", p->sigmoid_linear_slope);
-  printf("sigmoid_toe_length = %f\n", p->sigmoid_toe_length);
-  printf("sigmoid_shoulder_length = %f\n", p->sigmoid_shoulder_length);
+  printf("sigmoid_linear_contrast = %f\n", p->sigmoid_linear_contrast);
+  printf("sigmoid_linear_length_below_pivot = %f\n", p->sigmoid_linear_length_below_pivot);
+  printf("sigmoid_linear_length_above_pivot = %f\n", p->sigmoid_linear_length_above_pivot);
   printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
   printf("sigmoid_shoulder_power = %f\n", p->sigmoid_shoulder_power);
-  printf("sigmoid_toe_intersection_y = %f\n", p->sigmoid_toe_intersection_y);
-  printf("sigmoid_shoulder_intersection_y = %f\n", p->sigmoid_shoulder_intersection_y);
+  printf("sigmoid_target_display_black_y = %f\n", p->sigmoid_target_display_black_y);
+  printf("sigmoid_target_display_white_y = %f\n", p->sigmoid_target_display_white_y);
 
-  const float maxEv = p->sigmoid_normalized_log2_maximum;
-  const float minEv = p->sigmoid_normalized_log2_minimum;
-  const float pivot_x = fabsf(p->sigmoid_normalized_log2_minimum
-                                  / (p->sigmoid_normalized_log2_maximum - p->sigmoid_normalized_log2_minimum));
+  const float maxEv = p->white_relative_exposure;
+  const float minEv = p->black_relative_exposure;
+  const float pivot_x = fabsf(p->black_relative_exposure
+                                  / (p->white_relative_exposure - p->black_relative_exposure));
 
   float range_in_ev = maxEv - minEv;
 
   // avoid range altering slope
-  float scaled_slope = p->sigmoid_linear_slope * (range_in_ev / 16.5);
+  float scaled_slope = p->sigmoid_linear_contrast * (range_in_ev / 16.5);
   printf("scaled slope = %f\n", scaled_slope);
 
   const float pivot_y = powf(0.18, 1.0 / p->sigmoid_curve_gamma);
 
-  float linear_below_pivot = p->sigmoid_toe_length;
+  float linear_below_pivot = p->sigmoid_linear_length_below_pivot;
   float toe_start_x_from_pivot_x = _dx_from_hypotenuse_and_slope(linear_below_pivot, scaled_slope);
   float toe_start_x = pivot_x - toe_start_x_from_pivot_x;
   float toe_y_below_pivot_y = scaled_slope * toe_start_x_from_pivot_x;
@@ -674,7 +674,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   gboolean need_convex_toe = linear_y_at_pivot_x_at_slope < toe_start_y; // FIXME: target black
 
   const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx
-  const float inverse_limit_toe_y_t_ily = 1.0f - p->sigmoid_toe_intersection_y;
+  const float inverse_limit_toe_y_t_ily = 1.0f - p->sigmoid_target_display_black_y;
 
   float inverse_transition_toe_x = 1.0f - toe_start_x;
   float inverse_transition_toe_y = 1.0f - toe_start_y;
@@ -687,7 +687,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   }
 
   // shoulder
-  float shoulder_length_P_slength = p->sigmoid_shoulder_length;
+  float shoulder_length_P_slength = p->sigmoid_linear_length_above_pivot;
   float shoulder_x_from_pivot_x = _dx_from_hypotenuse_and_slope(shoulder_length_P_slength, scaled_slope);
   printf("shoulder_x_from_pivot_x = %f\n", shoulder_x_from_pivot_x);
   float transition_shoulder_x_s_tx = pivot_x + shoulder_x_from_pivot_x;
@@ -698,7 +698,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("transition_shoulder_y_s_ty = %f\n", transition_shoulder_y_s_ty);
 
   float linear_y_at_1 = transition_shoulder_y_s_ty + scaled_slope * inverse_transition_toe_x;
-  // Normally, the toe is convex: its gradient is gradually decreasing from slope of the linear
+  // Normally, the shoulder is convex: its gradient is gradually decreasing from slope of the linear
   // section. If the slope of the linear section is not enough to go from (transition_toe_x_t_tx, transition_toe_y_t_ty) to
   // (1, 1), we'll need a concave 'shoulder'
   gboolean need_concave_shoulder = linear_y_at_1 < 1; // FIXME: target white
@@ -709,7 +709,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   float shoulder_a = _calculate_A(1 - transition_shoulder_x_s_tx, 1 - transition_shoulder_y_s_ty, shoulder_b);
 
   float scale_shoulder
-      = _scale(shoulder_intersection_x_s_lx, p->sigmoid_shoulder_intersection_y,
+      = _scale(shoulder_intersection_x_s_lx, p->sigmoid_target_display_white_y,
               transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
               p->sigmoid_shoulder_power, scaled_slope);
   if(isnan(scale_shoulder))
@@ -826,31 +826,31 @@ void init_presets(dt_iop_module_so_t *self)
   dt_iop_agx_params_t p = { 0 };
 
   // common
-  p.sigmoid_normalized_log2_minimum = -10;
-  p.sigmoid_normalized_log2_maximum = 6.5;
-  p.sigmoid_linear_slope = 2.4;
-  p.sigmoid_toe_length = 0.0;
-  p.sigmoid_shoulder_length = 0.0;
+  p.black_relative_exposure = -10;
+  p.white_relative_exposure = 6.5;
+  p.sigmoid_linear_contrast = 2.4;
+  p.sigmoid_linear_length_below_pivot = 0.0;
+  p.sigmoid_linear_length_above_pivot = 0.0;
   p.sigmoid_toe_power = 1.5;
   p.sigmoid_shoulder_power = 1.5;
-  p.sigmoid_toe_intersection_y = 0.0;
-  p.sigmoid_shoulder_intersection_y = 1.0;
+  p.sigmoid_target_display_black_y = 0.0;
+  p.sigmoid_target_display_white_y = 1.0;
   p.sigmoid_curve_gamma = 2.2;
   p.mix = 0.0f;
 
   // None preset
-  p.slope = 1.0f;
+  p.look_slope = 1.0f;
   p.power = 1.0f;
   p.offset = 0.0f;
-  p.sat = 1.0f;
+  p.look_saturation = 1.0f;
 
   dt_gui_presets_add_generic(_("None"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   // Punchy preset
-  p.slope = 1.0f;  // Slope was the same for all channels in Punchy
+  p.look_slope = 1.0f;  // Slope was the same for all channels in Punchy
   p.power = 1.35f; // Power was the same for all channels in Punchy
   p.offset = 0.0f;
-  p.sat = 1.4f;
+  p.look_saturation = 1.4f;
   dt_gui_presets_add_generic(_("Punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
