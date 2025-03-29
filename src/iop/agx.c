@@ -49,8 +49,8 @@ const float _epsilon = 1E-6f;
 
 typedef struct dt_iop_agx_gui_data_t
 {
-  dt_gui_collapsible_section_t sigmoid_section;
-  dt_gui_collapsible_section_t sigmoid_additional_section;
+  dt_gui_collapsible_section_t tone_mapping_section;
+  dt_gui_collapsible_section_t advanced_section;
 } dt_iop_agx_gui_data_t;
 
 // Module parameters struct
@@ -70,7 +70,7 @@ typedef struct dt_iop_agx_params_t
 
   // curve params - comments indicate the original variables from https://www.desmos.com/calculator/yrysofmx8h
   // P_slope
-  float sigmoid_linear_contrast;            // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast around the pivot"
+  float sigmoid_contrast_around_pivot;      // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast around the pivot"
   // P_tlength
   float sigmoid_linear_length_below_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below the pivot"
   // P_slength
@@ -123,10 +123,10 @@ void gui_init(dt_iop_module_t *self)
 
  // Sigmoid section with collapsible container
  GtkWidget *main_box = self->widget;
- dt_gui_new_collapsible_section(&g->sigmoid_section, "plugins/darkroom/agx/expand_tonemapping_params",
+ dt_gui_new_collapsible_section(&g->tone_mapping_section, "plugins/darkroom/agx/expand_tonemapping_params",
      _("Tone mapping"), GTK_BOX(main_box), DT_ACTION(self));
 
- self->widget = GTK_WIDGET(g->sigmoid_section.container);
+ self->widget = GTK_WIDGET(g->tone_mapping_section.container);
 
  // black/white relative exposure
  label = gtk_label_new(_("Input exposure range"));
@@ -147,8 +147,7 @@ void gui_init(dt_iop_module_t *self)
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("Fine-tune contrast, shifts pivot along the y axis"));
 
- // Linear Section Slope
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_contrast");
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_contrast_around_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
 
@@ -162,11 +161,11 @@ void gui_init(dt_iop_module_t *self)
 
 
  // Create a nested collapsible section for additional parameters
-GtkWidget *parent_box = self->widget;
-dt_gui_new_collapsible_section(&g->sigmoid_additional_section, "plugins/darkroom/agx/expand_sigmoid_additional",
-  _("advanced"), GTK_BOX(parent_box), DT_ACTION(self));
+ GtkWidget *parent_box = self->widget;
+ dt_gui_new_collapsible_section(&g->advanced_section, "plugins/darkroom/agx/expand_sigmoid_advanced",
+ _("advanced"), GTK_BOX(parent_box), DT_ACTION(self));
 
-  self->widget = GTK_WIDGET(g->sigmoid_additional_section.container);
+  self->widget = GTK_WIDGET(g->advanced_section.container);
 
  // Toe
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_length_below_pivot");
@@ -287,44 +286,9 @@ const mat3f AgXInsetMatrix = { { { 0.856627153315983f, 0.0951212405381588f, 0.04
                                  { 0.11189821299995f, 0.0767994186031903f, 0.811302368396859f } } };
 
 
-/*
-https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
-        outset_matrix = numpy.linalg.inv(numpy.array([[0.899796955911611, 0.0871996192028351, 0.013003424885555],
-                                                      [0.11142098895748, 0.875575586156966, 0.0130034248855548],
-                                                      [0.11142098895748, 0.0871996192028349, 0.801379391839686]]))
-        inverted:
-            {
-                {1.1271005818144, -0.11060664309660, -0.016493938717835},
-                {-0.14132976349844, 1.1578237022163, -0.016493938717834},
-                {-0.14132976349844, -0.11060664309660, 1.2519364065950}
-            }
-*/
-const mat3f AgXOutsetMatrix = { { { 1.1271005818144368f, -0.11060664309660323f, -0.016493938717834573f },
-                                  { -0.1413297634984383f, 1.157823702216272f, -0.016493938717834257f },
-                                  { -0.14132976349843826f, -0.11060664309660294f, 1.2519364065950405f } } };
-
 const mat3f AgXInsetMatrixInverse = { { { 1.1974410768877f, -0.14426151269800f, -0.053179564189704f },
                                         { -0.19647462632135f, 1.3540951314697f, -0.15762050514838f },
                                         { -0.14655741710660f, -0.10828405878847f, 1.2548414758951f } } };
-
-// https://iolite-engine.com/blog_posts/minimal_agx_implementation
-static float3 _agxDefaultContrastApprox(float3 x)
-{
-  float3 x2 = { x.r * x.r, x.g * x.g, x.b * x.b };
-  float3 x4 = { x2.r * x2.r, x2.g * x2.g, x2.b * x2.b };
-  float3 x6 = { x4.r * x2.r, x4.g * x2.g, x4.b * x2.b };
-
-  float3 result;
-  result.r = -17.86f * x6.r * x.r + 78.01f * x6.r - 126.7f * x4.r * x.r + 92.06f * x4.r - 28.72f * x2.r * x.r
-             + 4.361f * x2.r - 0.1718f * x.r + 0.002857f;
-
-  result.g = -17.86f * x6.g * x.g + 78.01f * x6.g - 126.7f * x4.g * x.g + 92.06f * x4.g - 28.72f * x2.g * x.g
-             + 4.361f * x2.g - 0.1718f * x.g + 0.002857f;
-
-  result.b = -17.86f * x6.b * x.b + 78.01f * x6.b - 126.7f * x4.b * x.b + 92.06f * x4.b - 28.72f * x2.b * x.b
-             + 4.361f * x2.b - 0.1718f * x.b + 0.002857f;
-  return result;
-}
 
 static float _dx_from_hypotenuse_and_slope(float hypotenuse, float slope)
 {
@@ -653,7 +617,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("range_black_relative_exposure = %f\n", p->range_black_relative_exposure);
   printf("range_white_relative_exposure = %f\n", p->range_white_relative_exposure);
   printf("sigmoid_curve_gamma = %f\n", p->sigmoid_curve_gamma);
-  printf("sigmoid_linear_contrast = %f\n", p->sigmoid_linear_contrast);
+  printf("sigmoid_contrast_around_pivot = %f\n", p->sigmoid_contrast_around_pivot);
   printf("sigmoid_linear_length_below_pivot = %f\n", p->sigmoid_linear_length_below_pivot);
   printf("sigmoid_linear_length_above_pivot = %f\n", p->sigmoid_linear_length_above_pivot);
   printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
@@ -668,8 +632,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   float range_in_ev = maxEv - minEv;
 
-  // avoid range altering slope
-  float scaled_slope = p->sigmoid_linear_contrast * (range_in_ev / 16.5);
+  // avoid range altering slope - 16.5 EV is the default AgX range; keep scaling pro
+  float scaled_slope = p->sigmoid_contrast_around_pivot * (range_in_ev / 16.5);
   printf("scaled slope = %f\n", scaled_slope);
 
   const float pivot_y = powf(0.18, 1.0 / p->sigmoid_curve_gamma);
@@ -846,7 +810,7 @@ void init_presets(dt_iop_module_so_t *self)
   // common
   p.range_black_relative_exposure = -10;
   p.range_white_relative_exposure = 6.5;
-  p.sigmoid_linear_contrast = 2.4;
+  p.sigmoid_contrast_around_pivot = 2.4;
   p.sigmoid_linear_length_below_pivot = 0.0;
   p.sigmoid_linear_length_above_pivot = 0.0;
   p.sigmoid_toe_power = 1.5;
