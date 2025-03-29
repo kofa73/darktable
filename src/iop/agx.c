@@ -57,22 +57,36 @@ typedef struct dt_iop_agx_gui_data_t
 // Updated struct dt_iop_agx_params_t
 typedef struct dt_iop_agx_params_t
 {
-  float look_slope;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
-  float power;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
-  float offset; // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
-  float look_saturation;    // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
-  float mix;    // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
+  // look params
+  float look_slope;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope (decrease or increase brightness)"
+  float look_power;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power (brighten or darken midtones)"
+  float look_offset;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset (deepen or lift shadows)"
+  float look_saturation;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
+  float look_original_hue_mix_ratio;    // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
-  float black_relative_exposure;            // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure (below mid-grey)"
-  float white_relative_exposure;            // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-grey)"
-  float sigmoid_linear_contrast;            // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast of the linear portion"
-  float sigmoid_linear_length_below_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below mid-grey"
-  float sigmoid_linear_length_above_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above mid-grey"
-  float sigmoid_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe Power"
-  float sigmoid_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder Power"
+  // log mapping params
+  float range_black_relative_exposure;  // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure (below mid-grey)"
+  float range_white_relative_exposure;  // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-grey)"
+
+  // curve params - comments indicate the original variables from https://www.desmos.com/calculator/yrysofmx8h
+  // P_slope
+  float sigmoid_linear_contrast;            // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast around the pivot"
+  // P_tlength
+  float sigmoid_linear_length_below_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below the pivot"
+  // P_slength
+  float sigmoid_linear_length_above_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above the pivot"
+  // t_p
+  float sigmoid_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe power; contrast in shadows"
+  // t_s
+  float sigmoid_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder power; contrast in highlights"
+  // we don't have a parameter for pivot_x, it's set to the x value representing mid-grey, splitting [0..1] in the ratio
+  // range_black_relative_exposure : range_white_relative_exposure
+  // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
+  float sigmoid_curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Curve y gamma"
+  // t_ly
   float sigmoid_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
+  // s_ly
   float sigmoid_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
-  float sigmoid_curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Sigmoid curve 'gamma'"
 } dt_iop_agx_params_t;
 
 void gui_init(dt_iop_module_t *self)
@@ -81,7 +95,7 @@ void gui_init(dt_iop_module_t *self)
 
  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
- // look: saturation, slope, offset, power, mix
+ // look: saturation, slope, offset, power, original hue mix ratio (hue restoration)
  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
  gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
  GtkWidget *label = gtk_label_new(_("Look"));
@@ -95,51 +109,55 @@ void gui_init(dt_iop_module_t *self)
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- slider = dt_bauhaus_slider_from_params(self, "offset");
+ slider = dt_bauhaus_slider_from_params(self, "look_offset");
  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- slider = dt_bauhaus_slider_from_params(self, "power");
+ slider = dt_bauhaus_slider_from_params(self, "look_power");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- slider = dt_bauhaus_slider_from_params(self, "mix");
+ slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
  // Sigmoid section with collapsible container
  GtkWidget *main_box = self->widget;
- dt_gui_new_collapsible_section(&g->sigmoid_section, "plugins/darkroom/agx/expand_sigmoid",
-     _("Sigmoid"), GTK_BOX(main_box), DT_ACTION(self));
+ dt_gui_new_collapsible_section(&g->sigmoid_section, "plugins/darkroom/agx/expand_tonemapping_params",
+     _("Tone mapping"), GTK_BOX(main_box), DT_ACTION(self));
 
  self->widget = GTK_WIDGET(g->sigmoid_section.container);
 
  // black/white relative exposure
- slider = dt_bauhaus_slider_from_params(self, "black_relative_exposure");
+ label = gtk_label_new(_("Input exposure range"));
+ gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
+ slider = dt_bauhaus_slider_from_params(self, "range_black_relative_exposure");
  dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
  gtk_widget_set_tooltip_text(slider, _("minimum relative exposure (black point)"));
 
- slider = dt_bauhaus_slider_from_params(self, "white_relative_exposure");
+ slider = dt_bauhaus_slider_from_params(self, "range_white_relative_exposure");
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
  gtk_widget_set_tooltip_text(slider, _("maximum relative exposure (white point)"));
+
+ label = gtk_label_new(_("Sigmoid curve parameters"));
+ gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
 
  // Internal 'gamma'
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_curve_gamma");
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
- gtk_widget_set_tooltip_text(slider, _("curve gamma adjustment"));
+ gtk_widget_set_tooltip_text(slider, _("Fine-tune contrast, shifts pivot along the y axis"));
 
  // Linear Section Slope
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_contrast");
  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
 
-
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
- dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+ dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("toe power"));
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
- dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+ dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder power"));
 
 
@@ -467,8 +485,8 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
 
   // Default
   float slope = p->look_slope;
-  float3 power = { p->power, p->power, p->power };
-  float offset = p->offset;
+  float3 power = { p->look_power, p->look_power, p->look_power };
+  float offset = p->look_offset;
   float sat = p->look_saturation;
 
   // ASC CDL
@@ -569,7 +587,7 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
 
   float h_after = hsv_pixel[0];
 
-  h_after = _lerp_hue(h_before, h_after, p->mix);
+  h_after = _lerp_hue(h_before, h_after, p->look_original_hue_mix_ratio);
 
   hsv_pixel[0] = h_after;
   dt_HSV_2_RGB(hsv_pixel, rgb_pixel);
@@ -632,8 +650,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out)) return;
 
   printf("================== start ==================\n");
-  printf("black_relative_exposure = %f\n", p->black_relative_exposure);
-  printf("white_relative_exposure = %f\n", p->white_relative_exposure);
+  printf("range_black_relative_exposure = %f\n", p->range_black_relative_exposure);
+  printf("range_white_relative_exposure = %f\n", p->range_white_relative_exposure);
   printf("sigmoid_curve_gamma = %f\n", p->sigmoid_curve_gamma);
   printf("sigmoid_linear_contrast = %f\n", p->sigmoid_linear_contrast);
   printf("sigmoid_linear_length_below_pivot = %f\n", p->sigmoid_linear_length_below_pivot);
@@ -643,10 +661,10 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("sigmoid_target_display_black_y = %f\n", p->sigmoid_target_display_black_y);
   printf("sigmoid_target_display_white_y = %f\n", p->sigmoid_target_display_white_y);
 
-  const float maxEv = p->white_relative_exposure;
-  const float minEv = p->black_relative_exposure;
-  const float pivot_x = fabsf(p->black_relative_exposure
-                                  / (p->white_relative_exposure - p->black_relative_exposure));
+  const float maxEv = p->range_white_relative_exposure;
+  const float minEv = p->range_black_relative_exposure;
+  const float pivot_x = fabsf(p->range_black_relative_exposure
+                                  / (p->range_white_relative_exposure - p->range_black_relative_exposure));
 
   float range_in_ev = maxEv - minEv;
 
@@ -697,11 +715,11 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   float transition_shoulder_y_s_ty = pivot_y + shoulder_y_from_pivot_y;
   printf("transition_shoulder_y_s_ty = %f\n", transition_shoulder_y_s_ty);
 
-  float linear_y_at_1 = transition_shoulder_y_s_ty + scaled_slope * inverse_transition_toe_x;
+  float linear_y_when_x_is_1 = transition_shoulder_y_s_ty + scaled_slope * inverse_transition_toe_x;
   // Normally, the shoulder is convex: its gradient is gradually decreasing from slope of the linear
   // section. If the slope of the linear section is not enough to go from (transition_toe_x_t_tx, transition_toe_y_t_ty) to
   // (1, 1), we'll need a concave 'shoulder'
-  gboolean need_concave_shoulder = linear_y_at_1 < 1; // FIXME: target white
+  gboolean need_concave_shoulder = linear_y_when_x_is_1 < 1; // FIXME: target white
 
   const float shoulder_intersection_x_s_lx = 1;
 
@@ -826,8 +844,8 @@ void init_presets(dt_iop_module_so_t *self)
   dt_iop_agx_params_t p = { 0 };
 
   // common
-  p.black_relative_exposure = -10;
-  p.white_relative_exposure = 6.5;
+  p.range_black_relative_exposure = -10;
+  p.range_white_relative_exposure = 6.5;
   p.sigmoid_linear_contrast = 2.4;
   p.sigmoid_linear_length_below_pivot = 0.0;
   p.sigmoid_linear_length_above_pivot = 0.0;
@@ -836,20 +854,20 @@ void init_presets(dt_iop_module_so_t *self)
   p.sigmoid_target_display_black_y = 0.0;
   p.sigmoid_target_display_white_y = 1.0;
   p.sigmoid_curve_gamma = 2.2;
-  p.mix = 0.0f;
+  p.look_original_hue_mix_ratio = 0.0f;
 
   // None preset
   p.look_slope = 1.0f;
-  p.power = 1.0f;
-  p.offset = 0.0f;
+  p.look_power = 1.0f;
+  p.look_offset = 0.0f;
   p.look_saturation = 1.0f;
 
   dt_gui_presets_add_generic(_("None"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   // Punchy preset
   p.look_slope = 1.0f;  // Slope was the same for all channels in Punchy
-  p.power = 1.35f; // Power was the same for all channels in Punchy
-  p.offset = 0.0f;
+  p.look_power = 1.35f; // Power was the same for all channels in Punchy
+  p.look_offset = 0.0f;
   p.look_saturation = 1.4f;
   dt_gui_presets_add_generic(_("Punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
