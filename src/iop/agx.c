@@ -879,154 +879,137 @@ void gui_update(dt_iop_module_t *self)
   }
 }
 
-
-void gui_init(dt_iop_module_t *self)
+static void _add_look_box(dt_iop_module_t *self)
 {
- dt_iop_agx_gui_data_t *g = IOP_GUI_ALLOC(agx);
+  // look: saturation, slope, offset, power, original hue mix ratio (hue restoration)
+  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
+  GtkWidget *label = gtk_label_new(_("Look"));
+  gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
+  GtkWidget *slider;
+  slider = dt_bauhaus_slider_from_params(self, "look_saturation");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- // Initialize drawing cache fields
- g->line_height = 0;
- g->sign_width = 0;
- g->zero_width = 0;
- g->graph_width = 0;
- g->graph_height = 0;
- g->inset = 0;
- g->inner_padding = 0;
- g->context = NULL;
+  slider = dt_bauhaus_slider_from_params(self, "look_slope");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  slider = dt_bauhaus_slider_from_params(self, "look_offset");
+  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
+  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- // --- Add Drawing Area ---
- g->area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
-                                              0, // Initial height factor
-                                              "plugins/darkroom/agx/graphheight")); // Conf key
- g_object_set_data(G_OBJECT(g->area), "iop-instance", self);
- dt_action_define_iop(self, NULL, N_("graph"), GTK_WIDGET(g->area), NULL);
- gtk_widget_set_can_focus(GTK_WIDGET(g->area), TRUE);
- g_signal_connect(G_OBJECT(g->area), "draw", G_CALLBACK(agx_draw_curve), self);
- gtk_widget_set_tooltip_text(GTK_WIDGET(g->area), _("Sigmoid tone mapping curve (log input, linear output)"));
+  slider = dt_bauhaus_slider_from_params(self, "look_power");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
- // Pack drawing area at the top
- gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(g->area), TRUE, TRUE, 0);
+  slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+}
+
+static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget *label;
+  GtkWidget *slider;
+  GtkWidget *main_box = self->widget;
+dt_gui_new_collapsible_section(&gui_data->tone_mapping_section, "plugins/darkroom/agx/expand_tonemapping_params",
+     _("Tone mapping"), GTK_BOX(main_box), DT_ACTION(self));
+
+ self->widget = GTK_WIDGET(gui_data->tone_mapping_section.container);
 
 
- // --- Look Parameters ---
- GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
- gtk_box_pack_start(GTK_BOX(self->widget), look_box, FALSE, FALSE, DT_BAUHAUS_SPACE); // Add space after graph
- GtkWidget *label = gtk_label_new(_("Look"));
- gtk_style_context_add_class(gtk_widget_get_style_context(label), "dt_module_section_label");
- gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
- GtkWidget *slider;
- slider = dt_bauhaus_slider_from_params(self, "look_saturation");
- dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
- gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+  gui_data->area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
+                                               0,                                    // Initial height factor
+                                               "plugins/darkroom/agx/graphheight")); // Conf key
+  g_object_set_data(G_OBJECT(gui_data->area), "iop-instance", self);
+  dt_action_define_iop(self, NULL, N_("graph"), GTK_WIDGET(gui_data->area), NULL);
+  gtk_widget_set_can_focus(GTK_WIDGET(gui_data->area), TRUE);
+  g_signal_connect(G_OBJECT(gui_data->area), "draw", G_CALLBACK(agx_draw_curve), self);
+  gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->area), _("Sigmoid tone mapping curve (log input, linear output)"));
 
- slider = dt_bauhaus_slider_from_params(self, "look_slope");
- dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
- gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+  // Pack drawing area at the top
+  gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(gui_data->area), TRUE, TRUE, 0);
 
- slider = dt_bauhaus_slider_from_params(self, "look_offset");
- dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
- gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
- slider = dt_bauhaus_slider_from_params(self, "look_power");
- dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
- gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
- slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
- dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
- gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
- // --- Tone Mapping Section ---
- GtkWidget *main_box_for_collapsible = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
- gtk_box_pack_start(GTK_BOX(self->widget), main_box_for_collapsible, FALSE, FALSE, 0);
- dt_gui_new_collapsible_section(&g->tone_mapping_section, "plugins/darkroom/agx/expand_tonemapping_params",
-     _("Tone mapping"), GTK_BOX(main_box_for_collapsible), DT_ACTION(self));
-
- GtkWidget *tone_mapping_container = GTK_WIDGET(g->tone_mapping_section.container);
 
  // black/white relative exposure
  label = gtk_label_new(_("Input exposure range"));
- gtk_style_context_add_class(gtk_widget_get_style_context(label), "dt_module_subsection_label");
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), label, FALSE, FALSE, 0);
+ gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
  slider = dt_bauhaus_slider_from_params(self, "range_black_relative_exposure");
  dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
  gtk_widget_set_tooltip_text(slider, _("minimum relative exposure (black point)"));
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), slider, TRUE, TRUE, 0);
 
  slider = dt_bauhaus_slider_from_params(self, "range_white_relative_exposure");
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
  gtk_widget_set_tooltip_text(slider, _("maximum relative exposure (white point)"));
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), slider, TRUE, TRUE, 0);
-
 
  label = gtk_label_new(_("Sigmoid curve parameters"));
- gtk_style_context_add_class(gtk_widget_get_style_context(label), "dt_module_subsection_label");
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), label, FALSE, FALSE, 0);
+ gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
 
  // Internal 'gamma'
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_curve_gamma");
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("Fine-tune contrast, shifts pivot along the y axis"));
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), slider, TRUE, TRUE, 0);
-
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_contrast_around_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), slider, TRUE, TRUE, 0);
-
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("toe power"));
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), slider, TRUE, TRUE, 0);
-
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder power"));
- gtk_box_pack_start(GTK_BOX(tone_mapping_container), slider, TRUE, TRUE, 0);
 
+ // Create a nested collapsible section for additional parameters
+ GtkWidget *parent_box = self->widget;
+ dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_sigmoid_advanced",
+ _("advanced"), GTK_BOX(parent_box), DT_ACTION(self));
 
-
- // --- Advanced Sigmoid Section (Nested) ---
- GtkWidget *advanced_parent_box = tone_mapping_container; // Nest inside tone mapping section
- dt_gui_new_collapsible_section(&g->advanced_section, "plugins/darkroom/agx/expand_sigmoid_advanced",
- _("advanced"), GTK_BOX(advanced_parent_box), DT_ACTION(self));
-
- GtkWidget *advanced_container = GTK_WIDGET(g->advanced_section.container);
+  self->widget = GTK_WIDGET(gui_data->advanced_section.container);
 
  // Toe
- label = gtk_label_new(_("Toe"));
- gtk_style_context_add_class(gtk_widget_get_style_context(label), "dt_module_subsection_label");
- gtk_box_pack_start(GTK_BOX(advanced_container), label, FALSE, FALSE, 0);
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_length_below_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
  gtk_widget_set_tooltip_text(slider, _("toe length"));
- gtk_box_pack_start(GTK_BOX(advanced_container), slider, TRUE, TRUE, 0);
-
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_black_y");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
- gtk_widget_set_tooltip_text(slider, _("toe intersection point Y"));
- gtk_box_pack_start(GTK_BOX(advanced_container), slider, TRUE, TRUE, 0);
-
+ gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
 
  // Shoulder
- label = gtk_label_new(_("Shoulder"));
- gtk_style_context_add_class(gtk_widget_get_style_context(label), "dt_module_subsection_label");
- gtk_box_pack_start(GTK_BOX(advanced_container), label, FALSE, FALSE, 0);
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_length_above_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder length"));
- gtk_box_pack_start(GTK_BOX(advanced_container), slider, TRUE, TRUE, 0);
-
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_white_y");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
- gtk_widget_set_tooltip_text(slider, _("shoulder intersection point Y"));
- gtk_box_pack_start(GTK_BOX(advanced_container), slider, TRUE, TRUE, 0);
+ gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
+}
+
+void gui_init(dt_iop_module_t *self)
+{
+  dt_iop_agx_gui_data_t *gui_data = IOP_GUI_ALLOC(agx);
+
+  // Initialize drawing cache fields
+  gui_data->line_height = 0;
+  gui_data->sign_width = 0;
+  gui_data->zero_width = 0;
+  gui_data->graph_width = 0;
+  gui_data->graph_height = 0;
+  gui_data->inset = 0;
+  gui_data->inner_padding = 0;
+  gui_data->context = NULL;
+
+  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  // so we can restore it later
+  GtkWidget *self_widget = self->widget;
+
+  _add_look_box(self);
+  _add_tone_mapping_box(self, gui_data);
+  self->widget = self_widget;
 
 }
 
