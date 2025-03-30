@@ -95,11 +95,11 @@ typedef struct
 
 // --- Forward declarations ---
 static float _calculate_sigmoid(float x,
-                                float linear_slope_P_slope,
-                                float toe_power_t_p, float shoulder_power_s_p, float transition_toe_x_t_tx,
-                                float transition_toe_y_t_ty, float transition_shoulder_x_s_tx,
-                                float transition_shoulder_y_s_ty, float scale_toe_s_t, float intercept,
-                                float scale_shoulder,
+                                float slope_around_pivot,
+                                float toe_power, float shoulder_power, float toe_end_x,
+                                float toe_end_y, float shoulder_start_x,
+                                float shoulder_start_y, float toe_scale, float intercept,
+                                float shoulder_scale,
                                 gboolean need_convex_toe, float toe_a, float toe_b,
                                 gboolean need_concave_shoulder, float shoulder_a, float shoulder_b);
 
@@ -174,15 +174,6 @@ const mat3f AgXInsetMatrix = { { { 0.856627153315983f, 0.0951212405381588f, 0.04
 const mat3f AgXInsetMatrixInverse = { { { 1.1974410768877f, -0.14426151269800f, -0.053179564189704f },
                                         { -0.19647462632135f, 1.3540951314697f, -0.15762050514838f },
                                         { -0.14655741710660f, -0.10828405878847f, 1.2548414758951f } } };
-
-static float _dx_from_hypotenuse_and_slope(float hypotenuse, float slope)
-{
-  // Pythagorean: if dx were 1, dy would be dx * slope = 1 * slope = slope
-  // The hypotenuse would be sqrt(dx^2 + dy^2) = sqrt(1^2 + (1 * slope)^2) = sqrt(1 + slope^2)
-  float hypotenuse_if_leg_were_1 = sqrtf(slope * slope + 1.0f);
-  // similar triangles: the to-be-determined dx : 1 = hypotenuse : hypotenuse_if_leg_were_1
-  return hypotenuse / hypotenuse_if_leg_were_1;
-}
 
 static float _line(float x_in, float slope, float intercept)
 {
@@ -261,30 +252,31 @@ static float _fallback_shoulder(float x, float shoulder_a, float shoulder_b)
 // the commented values (t_tx, etc) are references to https://www.desmos.com/calculator/yrysofmx8h
 static float _calculate_sigmoid(float x,
                                 // Slope of linear portion.
-                                float linear_slope_P_slope,
+                                float slope_around_pivot,
                                 // Exponential power of the toe and shoulder regions.
-                                float toe_power_t_p, float shoulder_power_s_p, float transition_toe_x_t_tx,
-                                float transition_toe_y_t_ty, float transition_shoulder_x_s_tx,
-                                float transition_shoulder_y_s_ty, float scale_toe_s_t, float intercept,
-                                float scale_shoulder,
+                                float toe_power, float shoulder_power,
+                                float toe_end_x, float toe_end_y,
+                                float shoulder_start_x, float shoulder_start_y,
+                                float toe_scale, float intercept,
+                                float shoulder_scale,
                                 gboolean need_convex_toe, float toe_a, float toe_b,
                                 gboolean need_concave_shoulder, float shoulder_a, float shoulder_b)
 {
   float result;
 
-  if(x < transition_toe_x_t_tx)
+  if(x < toe_end_x)
   {
-    result = need_convex_toe ? _fallback_toe(x, toe_a, toe_b) : _exponential_curve(x, scale_toe_s_t, linear_slope_P_slope, toe_power_t_p, transition_toe_x_t_tx,
-                                transition_toe_y_t_ty);
+    result = need_convex_toe ? _fallback_toe(x, toe_a, toe_b) : _exponential_curve(x, toe_scale, slope_around_pivot, toe_power, toe_end_x,
+                                toe_end_y);
   }
-  else if(x <= transition_shoulder_x_s_tx)
+  else if(x <= shoulder_start_x)
   {
-    result = _line(x, linear_slope_P_slope, intercept);
+    result = _line(x, slope_around_pivot, intercept);
   }
   else
   {
-    result = need_concave_shoulder ? _fallback_shoulder(x, shoulder_a, shoulder_b) : _exponential_curve(x, scale_shoulder, linear_slope_P_slope, shoulder_power_s_p,
-                                transition_shoulder_x_s_tx, transition_shoulder_y_s_ty);
+    result = need_concave_shoulder ? _fallback_shoulder(x, shoulder_a, shoulder_b) : _exponential_curve(x, shoulder_scale, slope_around_pivot, shoulder_power,
+                                shoulder_start_x, shoulder_start_y);
   }
 
   // TODO: white, black
@@ -317,10 +309,16 @@ static float _lerp_hue(float hue1, float hue2, float mix)
   return hue_out;
 }
 
-static float apply_offset(float x, float offset)
+static float apply_slope_offset(float x, float slope, float offset)
 {
+  // negative offset should darken the image; positive brighten it
+  // without the scale: m = 1 / (1 + offset)
+  // offset = 1, slope = 1, x = 0 -> m = 1 / (1+1) = 1/2, b = 1 * 1/2 = 1/2, y = 1/2*0 + 1/2 = 1/2
+  float m = slope / (1 + offset);
+  float b = offset * m;
+  return fmaxf(0.0f, m * x + b);
   // ASC CDL:
-  return x + offset;
+  // return x * slope + offset;
   // alternative:
   // y = mx + b, b is the offset, m = (1 - offset), so the line runs from (0, offset) to (1, 1)
   //return (1 - offset) * x + offset;
@@ -335,9 +333,9 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
   float sat = p->look_saturation;
 
   // ASC CDL
-  float slope_and_offset_r = apply_offset(val.r * slope, offset);
-  float slope_and_offset_g = apply_offset(val.g * slope, offset);
-  float slope_and_offset_b = apply_offset(val.b * slope, offset);
+  float slope_and_offset_r = apply_slope_offset(val.r, slope, offset);
+  float slope_and_offset_g = apply_slope_offset(val.g, slope, offset);
+  float slope_and_offset_b = apply_slope_offset(val.b, slope, offset);
 
   float out_r = slope_and_offset_r > 0 ? powf(slope_and_offset_r, p->look_power) : slope_and_offset_r;
   float out_g = slope_and_offset_r > 0 ? powf(slope_and_offset_g, p->look_power) : slope_and_offset_g;
@@ -385,13 +383,13 @@ static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, f
 // Struct to hold calculated sigmoid parameters
 typedef struct dt_agx_sigmoid_params_cache_t
 {
-  float scaled_slope;
+  float effective_slope;
   float toe_start_x;
   float toe_start_y;
   float shoulder_start_x;
   float shoulder_start_y;
   float scale_toe;
-  float scale_shoulder;
+  float shoulder_scale;
   float intercept;
   gboolean need_convex_toe;
   float toe_a;
@@ -418,42 +416,44 @@ static void _calculate_agx_sigmoid_params(const dt_iop_agx_params_t *p, dt_agx_s
 {
   const float maxEv = p->range_white_relative_exposure;
   const float minEv = p->range_black_relative_exposure;
-  const float pivot_x = fabsf(minEv / (maxEv - minEv));
-
   float range_in_ev = maxEv - minEv;
 
-  // avoid range altering slope - 16.5 EV is the default AgX range; keep scaling pro
-  cache->scaled_slope = p->sigmoid_contrast_around_pivot * (range_in_ev / 16.5f);
-  //printf("scaled slope = %f\n", cache->scaled_slope);
-
+  // TODO: expose the pivot; for now: 18% mid-grey
+  const float pivot_x = fabsf(minEv / range_in_ev);
   const float pivot_y = powf(0.18f, 1.0f / p->sigmoid_curve_gamma);
+
+  // avoid range altering slope - 16.5 EV is the default AgX range; keep scaling pro
+  cache->effective_slope = p->sigmoid_contrast_around_pivot * (range_in_ev / 16.5f);
+  //printf("scaled slope = %f\n", cache->effective_slope);
 
   // x distance between x = 0 and pivot_x is just pivot_x, times portion of linear section
   float toe_start_x_from_pivot_x = pivot_x * p->sigmoid_linear_percent_below_pivot / 100.0f;
   cache->toe_start_x = pivot_x - toe_start_x_from_pivot_x;
-  float toe_y_below_pivot_y = cache->scaled_slope * toe_start_x_from_pivot_x;
+  float toe_y_below_pivot_y = cache->effective_slope * toe_start_x_from_pivot_x;
   cache->toe_start_y = pivot_y - toe_y_below_pivot_y;
 
   // toe fallback curve params
-  cache->toe_b = _calculate_B(cache->scaled_slope, cache->toe_start_x, cache->toe_start_y);
+  cache->toe_b = _calculate_B(cache->effective_slope, cache->toe_start_x, cache->toe_start_y);
   cache->toe_a = _calculate_A(cache->toe_start_x, cache->toe_start_y, cache->toe_b);
 
 
-  // starting with a line of gradient scaled_slope from (0, 0 // FIXME: target_black) would take us to (pivot_x, linear_y_at_pivot_x_at_slope)
-  float linear_y_at_toe_start_x_at_slope = cache->scaled_slope * cache->toe_start_x;
+  // starting with a line of gradient effective_slope from (0, 0 -> FIXME: target_black) would take us to (pivot_x, linear_y_at_pivot_x_at_slope)
+  float linear_y_at_toe_start_x_at_slope = cache->effective_slope * cache->toe_start_x;
   // Normally, the toe is concave: its gradient is gradually increasing, up to the slope of the linear
   // section. If the slope of the linear section is not enough to go from (0, target_black) to
-  // (transition_toe_x_t_tx, transition_toe_y_t_ty), we'll need a convex 'toe'
+  // (toe_end_x, toe_end_y), we'll need a convex 'toe'
   cache->need_convex_toe = linear_y_at_toe_start_x_at_slope < cache->toe_start_y; // FIXME: use target black y param
 
-  const float inverse_limit_toe_x_i_ilx = 1.0f; // 1 - t_lx (limit is 0, so inverse is 1)
-  const float inverse_limit_toe_y_t_ily = 1.0f - p->sigmoid_target_display_black_y; // Inverse limit y
+  const float inverse_toe_limit_x = 1.0f; // 1 - t_lx (limit is 0, so inverse is 1)
+  const float inverse_toe_limit_y = 1.0f - p->sigmoid_target_display_black_y; // Inverse limit y
 
-  float inverse_transition_toe_x = 1.0f - cache->toe_start_x;
-  float inverse_transition_toe_y = 1.0f - cache->toe_start_y;
+  // we use the same calculation as for the shoulder, so we flip the toe left <-> right, up <-> down
+  float inverse_toe_transition_x = 1.0f - cache->toe_start_x;
+  float inverse_toe_transition_y = 1.0f - cache->toe_start_y;
 
-  cache->scale_toe = -_scale(inverse_limit_toe_x_i_ilx, inverse_limit_toe_y_t_ily, inverse_transition_toe_x,
-                                inverse_transition_toe_y, p->sigmoid_toe_power, cache->scaled_slope);
+  // and then flip the scale
+  cache->scale_toe = -_scale(inverse_toe_limit_x, inverse_toe_limit_y, inverse_toe_transition_x,
+                                inverse_toe_transition_y, p->sigmoid_toe_power, cache->effective_slope);
   //if(isnan(cache->scale_toe))
   //{
   //  errors++; // printf("scale_toe is NaN\n");
@@ -464,38 +464,38 @@ static void _calculate_agx_sigmoid_params(const dt_iop_agx_params_t *p, dt_agx_s
   float shoulder_x_from_pivot_x = (1 - pivot_x) * p->sigmoid_linear_percent_above_pivot / 100.0f;
   //printf("shoulder_x_from_pivot_x = %f\n", shoulder_x_from_pivot_x);
   cache->shoulder_start_x = pivot_x + shoulder_x_from_pivot_x;
-  //printf("transition_shoulder_x_s_tx = %f\n", cache->shoulder_start_x);
-  float shoulder_y_from_pivot_y = cache->scaled_slope * shoulder_x_from_pivot_x;
+  //printf("shoulder_start_x = %f\n", cache->shoulder_start_x);
+  float shoulder_y_from_pivot_y = cache->effective_slope * shoulder_x_from_pivot_x;
   //printf("shoulder_y_from_pivot_y = %f\n", shoulder_y_from_pivot_y);
   cache->shoulder_start_y = pivot_y + shoulder_y_from_pivot_y;
-  //printf("transition_shoulder_y_s_ty = %f\n", cache->shoulder_start_y);
+  //printf("shoulder_start_y = %f\n", cache->shoulder_start_y);
 
   // shoulder fallback curve params
-  cache->shoulder_b = _calculate_B(cache->scaled_slope, 1.0f - cache->shoulder_start_x, p->sigmoid_target_display_white_y - cache->shoulder_start_y);
+  cache->shoulder_b = _calculate_B(cache->effective_slope, 1.0f - cache->shoulder_start_x, p->sigmoid_target_display_white_y - cache->shoulder_start_y);
   cache->shoulder_a = _calculate_A(1.0f - cache->shoulder_start_x, p->sigmoid_target_display_white_y - cache->shoulder_start_y, cache->shoulder_b);
 
 
-  float linear_y_when_x_is_1 = cache->shoulder_start_y + cache->scaled_slope * (1.0f - cache->shoulder_start_x);
+  float linear_y_when_x_is_1 = cache->shoulder_start_y + cache->effective_slope * (1.0f - cache->shoulder_start_x);
   // Normally, the shoulder is convex: its gradient is gradually decreasing from slope of the linear
-  // section. If the slope of the linear section is not enough to go from (transition_toe_x_t_tx, transition_toe_y_t_ty) to
+  // section. If the slope of the linear section is not enough to go from (toe_end_x, toe_end_y) to
   // (1, target_white), we'll need a concave 'shoulder'
   cache->need_concave_shoulder = linear_y_when_x_is_1 < p->sigmoid_target_display_white_y; // FIXME: use target white y param
 
-  const float shoulder_intersection_x_s_lx = 1.0f; // Limit x is 1
+  const float shoulder_intersection_x = 1.0f; // Limit x is 1
 
-  cache->scale_shoulder
-      = _scale(shoulder_intersection_x_s_lx, p->sigmoid_target_display_white_y,
+  cache->shoulder_scale
+      = _scale(shoulder_intersection_x, p->sigmoid_target_display_white_y,
               cache->shoulder_start_x, cache->shoulder_start_y,
-              p->sigmoid_shoulder_power, cache->scaled_slope);
-  //if(isnan(cache->scale_shoulder))
+              p->sigmoid_shoulder_power, cache->effective_slope);
+  //if(isnan(cache->shoulder_scale))
   //{
-  //  errors++; // printf("scale_shoulder is NaN\n");
+  //  errors++; // printf("shoulder_scale is NaN\n");
   //}
 
-  //printf("scale_toe: %f, scale_shoulder: %f\n", cache->scale_toe, cache->scale_shoulder);
+  //printf("scale_toe: %f, shoulder_scale: %f\n", cache->scale_toe, cache->shoulder_scale);
 
   // b - intercept of the linear section
-  cache->intercept = cache->toe_start_y - cache->scaled_slope * cache->toe_start_x;
+  cache->intercept = cache->toe_start_y - cache->effective_slope * cache->toe_start_x;
   //if(isnan(cache->intercept))
   //{
   //  errors++; // printf("intercept is NaN\n");
@@ -525,19 +525,19 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
   float3 log_pixel = _apply_log_encoding(rgb_pixel, range_in_ev, minEv);
 
   // Apply sigmoid using cached parameters
-  log_pixel.r = _calculate_sigmoid(log_pixel.r, sigmoid_cache->scaled_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+  log_pixel.r = _calculate_sigmoid(log_pixel.r, sigmoid_cache->effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
                            sigmoid_cache->toe_start_x, sigmoid_cache->toe_start_y, sigmoid_cache->shoulder_start_x,
-                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->scale_shoulder,
+                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->shoulder_scale,
                            sigmoid_cache->need_convex_toe, sigmoid_cache->toe_a, sigmoid_cache->toe_b,
                            sigmoid_cache->need_concave_shoulder, sigmoid_cache->shoulder_a, sigmoid_cache->shoulder_b);
-  log_pixel.g = _calculate_sigmoid(log_pixel.g, sigmoid_cache->scaled_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+  log_pixel.g = _calculate_sigmoid(log_pixel.g, sigmoid_cache->effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
                            sigmoid_cache->toe_start_x, sigmoid_cache->toe_start_y, sigmoid_cache->shoulder_start_x,
-                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->scale_shoulder,
+                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->shoulder_scale,
                            sigmoid_cache->need_convex_toe, sigmoid_cache->toe_a, sigmoid_cache->toe_b,
                            sigmoid_cache->need_concave_shoulder, sigmoid_cache->shoulder_a, sigmoid_cache->shoulder_b);
-  log_pixel.b = _calculate_sigmoid(log_pixel.b, sigmoid_cache->scaled_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+  log_pixel.b = _calculate_sigmoid(log_pixel.b, sigmoid_cache->effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
                            sigmoid_cache->toe_start_x, sigmoid_cache->toe_start_y, sigmoid_cache->shoulder_start_x,
-                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->scale_shoulder,
+                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->shoulder_scale,
                            sigmoid_cache->need_convex_toe, sigmoid_cache->toe_a, sigmoid_cache->toe_b,
                            sigmoid_cache->need_concave_shoulder, sigmoid_cache->shoulder_a, sigmoid_cache->shoulder_b);
 
@@ -576,11 +576,11 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
   return out;
 }
 
-void _print_sigmoid(float linear_slope_P_slope,
-                                float toe_power_t_p, float shoulder_power_s_p, float transition_toe_x_t_tx,
-                                float transition_toe_y_t_ty, float transition_shoulder_x_s_tx,
-                                float transition_shoulder_y_s_ty, float scale_toe_s_t, float intercept,
-                                float scale_shoulder,
+void _print_sigmoid(float slope_around_pivot,
+                                float toe_power, float shoulder_power,
+                                float toe_end_x, float toe_end_y,
+                                float shoulder_start_x, float shoulder_start_y,
+                                float toe_scale, float intercept, float shoulder_scale,
                                 gboolean need_convex_toe, float toe_a, float toe_b,
                                 gboolean need_concave_shoulder, float shoulder_a, float shoulder_b)
 {
@@ -589,11 +589,11 @@ void _print_sigmoid(float linear_slope_P_slope,
   for (int i = 0; i <= steps; i++)
   {
     float x = i / (float) steps;
-    float y = _calculate_sigmoid(x, linear_slope_P_slope,
-      toe_power_t_p, shoulder_power_s_p,
-      transition_toe_x_t_tx, transition_toe_y_t_ty,
-      transition_shoulder_x_s_tx, transition_shoulder_y_s_ty,
-      scale_toe_s_t, intercept, scale_shoulder,
+    float y = _calculate_sigmoid(x, slope_around_pivot,
+      toe_power, shoulder_power,
+      toe_end_x, toe_end_y,
+      shoulder_start_x, shoulder_start_y,
+      toe_scale, intercept, shoulder_scale,
       need_convex_toe, toe_a, toe_b,
       need_concave_shoulder, shoulder_a, shoulder_b);
     printf("%f\t%f\n", x, y);
@@ -749,10 +749,10 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   {
     float x_norm = (float)k / steps; // Input to sigmoid [0, 1]
     float y_norm = _calculate_sigmoid(x_norm,
-        sigmoid_cache.scaled_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
+        sigmoid_cache.effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
         sigmoid_cache.toe_start_x, sigmoid_cache.toe_start_y,
         sigmoid_cache.shoulder_start_x, sigmoid_cache.shoulder_start_y,
-        sigmoid_cache.scale_toe, sigmoid_cache.intercept, sigmoid_cache.scale_shoulder,
+        sigmoid_cache.scale_toe, sigmoid_cache.intercept, sigmoid_cache.shoulder_scale,
         sigmoid_cache.need_convex_toe, sigmoid_cache.toe_a, sigmoid_cache.toe_b,
         sigmoid_cache.need_concave_shoulder, sigmoid_cache.shoulder_a, sigmoid_cache.shoulder_b);
 
@@ -1020,8 +1020,12 @@ void init_presets(dt_iop_module_so_t *self)
   dt_iop_agx_params_t p = { 0 };
 
   // common
+  p.look_slope = 1.0f;
+  p.look_original_hue_mix_ratio = 0.0f;
+
   p.range_black_relative_exposure = -10;
   p.range_white_relative_exposure = 6.5;
+
   p.sigmoid_contrast_around_pivot = 2.4;
   p.sigmoid_linear_percent_below_pivot = 0.0;
   p.sigmoid_linear_percent_below_pivot = 0.0;
@@ -1030,10 +1034,8 @@ void init_presets(dt_iop_module_so_t *self)
   p.sigmoid_target_display_black_y = 0.0;
   p.sigmoid_target_display_white_y = 1.0;
   p.sigmoid_curve_gamma = 2.2;
-  p.look_original_hue_mix_ratio = 0.0f;
 
-  // None preset
-  p.look_slope = 1.0f;
+  // Base preset
   p.look_power = 1.0f;
   p.look_offset = 0.0f;
   p.look_saturation = 1.0f;
@@ -1041,7 +1043,6 @@ void init_presets(dt_iop_module_so_t *self)
   dt_gui_presets_add_generic(_("AgX Base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   // Punchy preset
-  p.look_slope = 1.0f;  // Slope was the same for all channels in Punchy
   p.look_power = 1.35f; // Power was the same for all channels in Punchy
   p.look_offset = 0.0f;
   p.look_saturation = 1.4f;
@@ -1054,10 +1055,11 @@ void gui_cleanup(dt_iop_module_t *self)
    // Nothing specific to clean up beyond default IOP gui alloc
 }
 
-// Global data struct (not needed for this simple example)
+/*
+// Global data struct (not yet needed)
 typedef struct dt_iop_agx_global_data_t
 {
-    int placeholder; // Add a placeholder if struct cannot be empty
+
 } dt_iop_agx_global_data_t;
 
 // Functions for global data init/cleanup if needed
@@ -1073,3 +1075,4 @@ void cleanup_global(dt_iop_module_so_t *self)
     // free(self->data);
     // self->data = NULL;
 }
+*/
