@@ -43,9 +43,9 @@ typedef struct dt_iop_agx_params_t
   // P_slope
   float sigmoid_contrast_around_pivot;      // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast around the pivot"
   // P_tlength
-  float sigmoid_linear_length_below_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start, below the pivot"
+  float sigmoid_linear_percent_below_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start %, below the pivot"
   // P_slength
-  float sigmoid_linear_length_above_pivot;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start, above the pivot"
+  float sigmoid_linear_percent_above_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start %, above the pivot"
   // t_p
   float sigmoid_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe power; contrast in shadows"
   // s_p -> Renamed from sigmoid_shoulder_power for clarity
@@ -336,7 +336,7 @@ static float apply_offset(float x, float offset)
   return (1 - offset) * x + offset;
 }
 
-// https://iolite-engine.com/blog_posts/minimal_agx_implementation
+// https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
 static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
 {
   // Default
@@ -346,22 +346,22 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
   float sat = p->look_saturation;
 
   // ASC CDL
-  float offset_r = apply_offset(val.r, offset);
-  float offset_g = apply_offset(val.g, offset);
-  float offset_b = apply_offset(val.b, offset);
-  float3 pow_val = _powf3((float3){ fmaxf(0.0f, offset_r) * slope, fmaxf(0.0f, offset_g) * slope,
-                                    fmaxf(0.0f, offset_b) * slope },
-                          power);
+  float slope_and_offset_r = apply_offset(val.r * slope, offset);
+  float slope_and_offset_g = apply_offset(val.g * slope, offset);
+  float slope_and_offset_b = apply_offset(val.b * slope, offset);
 
-  // Apply saturation -- see https://help.autodesk.com/view/MAYAUL/2024/ENU/?guid=GUID-8591FA2F-FC79-4C2A-8D46-64F6F43C17F9
+  float out_r = slope_and_offset_r > 0 ? powf(slope_and_offset_r, p->look_power) : slope_and_offset_r;
+  float out_g = slope_and_offset_r > 0 ? powf(slope_and_offset_g, p->look_power) : slope_and_offset_g;
+  float out_b = slope_and_offset_r > 0 ? powf(slope_and_offset_b, p->look_power) : slope_and_offset_b;
 
   // Using Rec 2020 Y coefficients (we use insetting, so this is probably incorrect
-  const float luma = 0.2626983389565561f * pow_val.r + 0.6780087657728164f * pow_val.g + 0.05929289527062728f * pow_val.b;
+  const float luma = 0.2626983389565561f * out_r + 0.6780087657728164f * out_g + 0.05929289527062728f * out_b;
 
   float3 result;
-  result.r = luma + sat * (pow_val.r - luma);
-  result.g = luma + sat * (pow_val.g - luma);
-  result.b = luma + sat * (pow_val.b - luma);
+  result.r = luma + sat * (out_r - luma);
+  result.g = luma + sat * (out_g - luma);
+  result.b = luma + sat * (out_b - luma);
+
   return result;
 }
 
@@ -439,8 +439,8 @@ static void _calculate_agx_sigmoid_params(const dt_iop_agx_params_t *p, dt_agx_s
 
   const float pivot_y = powf(0.18f, 1.0f / p->sigmoid_curve_gamma);
 
-  float linear_below_pivot = p->sigmoid_linear_length_below_pivot;
-  float toe_start_x_from_pivot_x = _dx_from_hypotenuse_and_slope(linear_below_pivot, cache->scaled_slope);
+  // x distance between x = 0 and pivot_x is just pivot_x, times portion of linear section
+  float toe_start_x_from_pivot_x = pivot_x * p->sigmoid_linear_percent_below_pivot / 100.0f;
   cache->toe_start_x = pivot_x - toe_start_x_from_pivot_x;
   float toe_y_below_pivot_y = cache->scaled_slope * toe_start_x_from_pivot_x;
   cache->toe_start_y = pivot_y - toe_y_below_pivot_y;
@@ -471,8 +471,8 @@ static void _calculate_agx_sigmoid_params(const dt_iop_agx_params_t *p, dt_agx_s
   //}
 
   // shoulder
-  float shoulder_length_P_slength = p->sigmoid_linear_length_above_pivot;
-  float shoulder_x_from_pivot_x = _dx_from_hypotenuse_and_slope(shoulder_length_P_slength, cache->scaled_slope);
+  // distance between pivot_x and x = 1, times portion of linear section
+  float shoulder_x_from_pivot_x = (1 - pivot_x) * p->sigmoid_linear_percent_above_pivot / 100.0f;
   //printf("shoulder_x_from_pivot_x = %f\n", shoulder_x_from_pivot_x);
   cache->shoulder_start_x = pivot_x + shoulder_x_from_pivot_x;
   //printf("transition_shoulder_x_s_tx = %f\n", cache->shoulder_start_x);
@@ -626,8 +626,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("range_white_relative_exposure = %f\n", p->range_white_relative_exposure);
   printf("sigmoid_curve_gamma = %f\n", p->sigmoid_curve_gamma);
   printf("sigmoid_contrast_around_pivot = %f\n", p->sigmoid_contrast_around_pivot);
-  printf("sigmoid_linear_length_below_pivot = %f\n", p->sigmoid_linear_length_below_pivot);
-  printf("sigmoid_linear_length_above_pivot = %f\n", p->sigmoid_linear_length_above_pivot);
+  printf("sigmoid_linear_percent_below_pivot = %f\n", p->sigmoid_linear_percent_below_pivot);
+  printf("sigmoid_linear_percent_above_pivot = %f\n", p->sigmoid_linear_percent_above_pivot);
   printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
   printf("sigmoid_shoulder_power = %f\n", p->sigmoid_shoulder_power);
   printf("sigmoid_target_display_black_y = %f\n", p->sigmoid_target_display_black_y);
@@ -970,8 +970,8 @@ dt_gui_new_collapsible_section(&gui_data->tone_mapping_section, "plugins/darkroo
   self->widget = GTK_WIDGET(gui_data->advanced_section.container);
 
  // Toe
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_length_below_pivot");
- dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_percent_below_pivot");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
  gtk_widget_set_tooltip_text(slider, _("toe length"));
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_black_y");
@@ -979,8 +979,8 @@ dt_gui_new_collapsible_section(&gui_data->tone_mapping_section, "plugins/darkroo
  gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
 
  // Shoulder
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_length_above_pivot");
- dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+ slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_percent_above_pivot");
+ dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder length"));
 
  slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_white_y");
@@ -1033,8 +1033,8 @@ void init_presets(dt_iop_module_so_t *self)
   p.range_black_relative_exposure = -10;
   p.range_white_relative_exposure = 6.5;
   p.sigmoid_contrast_around_pivot = 2.4;
-  p.sigmoid_linear_length_below_pivot = 0.0;
-  p.sigmoid_linear_length_above_pivot = 0.0;
+  p.sigmoid_linear_percent_below_pivot = 0.0;
+  p.sigmoid_linear_percent_below_pivot = 0.0;
   p.sigmoid_toe_power = 1.5;
   p.sigmoid_shoulder_power = 1.5;
   p.sigmoid_target_display_black_y = 0.0;
