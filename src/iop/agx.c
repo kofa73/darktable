@@ -339,12 +339,6 @@ static float apply_offset(float x, float offset)
 // https://iolite-engine.com/blog_posts/minimal_agx_implementation
 static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
 {
-  // values? {0.2126f, 0.7152f, 0.0722f} are Rec709 Y values
-  // const float lw[] = {0.2126f, 0.7152f, 0.0722f};
-  // Rec 2020 Y:
-  const float lw[] = { 0.2626983389565561f, 0.6780087657728164f, 0.05929289527062728f };
-  float luma = lw[0] * val.r + lw[1] * val.g + lw[2] * val.b;
-
   // Default
   float slope = p->look_slope;
   float3 power = { p->look_power, p->look_power, p->look_power };
@@ -358,6 +352,11 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
   float3 pow_val = _powf3((float3){ fmaxf(0.0f, offset_r) * slope, fmaxf(0.0f, offset_g) * slope,
                                     fmaxf(0.0f, offset_b) * slope },
                           power);
+
+  // Apply saturation -- see https://help.autodesk.com/view/MAYAUL/2024/ENU/?guid=GUID-8591FA2F-FC79-4C2A-8D46-64F6F43C17F9
+
+  // Using Rec 2020 Y coefficients (we use insetting, so this is probably incorrect
+  const float luma = 0.2626983389565561f * pow_val.r + 0.6780087657728164f * pow_val.g + 0.05929289527062728f * pow_val.b;
 
   float3 result;
   result.r = luma + sat * (pow_val.r - luma);
