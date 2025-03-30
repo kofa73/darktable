@@ -97,8 +97,8 @@ typedef enum dt_gui_color_t
   DT_GUI_COLOR_MAP_LOC_SHAPE_HIGH,
   DT_GUI_COLOR_MAP_LOC_SHAPE_LOW,
   DT_GUI_COLOR_MAP_LOC_SHAPE_DEF,
-  DT_GUI_COLOR_ISO12646_BG,
-  DT_GUI_COLOR_ISO12646_FG,
+  DT_GUI_COLOR_COLOR_ASSESSMENT_BG,
+  DT_GUI_COLOR_COLOR_ASSESSMENT_FG,
   DT_GUI_COLOR_LAST
 } dt_gui_color_t;
 
@@ -404,7 +404,7 @@ static inline GtkWidget *dt_ui_section_label_new(const gchar *str)
 static inline GtkWidget *dt_ui_label_new(const gchar *str)
 {
   GtkWidget *label = gtk_label_new(str);
-  g_object_set(label, "halign", GTK_ALIGN_START, "xalign", 0.0f, "ellipsize", PANGO_ELLIPSIZE_END, NULL);
+  g_object_set(label, "halign", GTK_ALIGN_START, "xalign", 0.0f, "ellipsize", PANGO_ELLIPSIZE_END, (void *)0);
   return label;
 };
 
