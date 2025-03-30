@@ -29,9 +29,9 @@ const float _epsilon = 1E-6f;
 typedef struct dt_iop_agx_params_t
 {
   // look params
-  float look_slope;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope (decrease or increase brightness)"
-  float look_power;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power (brighten or darken midtones)"
-  float look_offset;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset (deepen or lift shadows)"
+  float look_offset;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset (deepen(-) or lift(+) shadows)"
+  float look_slope;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope (decrease(-) or increase(+) contrast and brightness)"
+  float look_power;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power (increase(-) or decrease(+) brightness)"
   float look_saturation;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
   float look_original_hue_mix_ratio;    // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
@@ -112,19 +112,6 @@ static float3 _mat3f_mul_float3(const mat3f m, const float3 v)
   result.b = m.m[2][0] * v.r + m.m[2][1] * v.g + m.m[2][2] * v.b;
   return result;
 }
-
-// Helper function: pow function
-static float3 _powf3(float3 base, float3 exponent)
-{
-  float3 result;
-  result.r = powf(base.r, exponent.r);
-  result.g = powf(base.g, exponent.g);
-  result.b = powf(base.b, exponent.b);
-  return result;
-}
-
-
-// Modelines (needed, but not that relevant right now)
 
 // Translatable name
 const char *name()
@@ -332,8 +319,11 @@ static float _lerp_hue(float hue1, float hue2, float mix)
 
 static float apply_offset(float x, float offset)
 {
+  // ASC CDL:
+  return x + offset;
+  // alternative:
   // y = mx + b, b is the offset, m = (1 - offset), so the line runs from (0, offset) to (1, 1)
-  return (1 - offset) * x + offset;
+  //return (1 - offset) * x + offset;
 }
 
 // https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
@@ -341,7 +331,6 @@ static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
 {
   // Default
   float slope = p->look_slope;
-  float3 power = { p->look_power, p->look_power, p->look_power };
   float offset = p->look_offset;
   float sat = p->look_saturation;
 
@@ -886,20 +875,21 @@ static void _add_look_box(dt_iop_module_t *self)
   GtkWidget *label = gtk_label_new(_("Look"));
   gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
   GtkWidget *slider;
-  slider = dt_bauhaus_slider_from_params(self, "look_saturation");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+
+  slider = dt_bauhaus_slider_from_params(self, "look_offset");
+  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
   gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
   slider = dt_bauhaus_slider_from_params(self, "look_slope");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
   gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
-  slider = dt_bauhaus_slider_from_params(self, "look_offset");
-  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
   slider = dt_bauhaus_slider_from_params(self, "look_power");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+
+  slider = dt_bauhaus_slider_from_params(self, "look_saturation");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
   slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
