@@ -17,7 +17,7 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 
 // Module introspection version
-DT_MODULE_INTROSPECTION(1, dt_iop_agx_params_t)
+DT_MODULE_INTROSPECTION(1, dt_iop_agx_user_params_t)
 
 // so we have a breakpoint target in error-handling branches, to be removed after debugging
 static int errors = 0; // Use static if needed within this file only
@@ -25,8 +25,8 @@ static int errors = 0; // Use static if needed within this file only
 const float _epsilon = 1E-6f;
 
 // Module parameters struct
-// Updated struct dt_iop_agx_params_t
-typedef struct dt_iop_agx_params_t
+// Updated struct dt_iop_agx_user_params_t
+typedef struct dt_iop_agx_user_params_t
 {
   // look params
   float look_offset;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset (deepen(-) or lift(+) shadows)"
@@ -41,24 +41,24 @@ typedef struct dt_iop_agx_params_t
 
   // curve params - comments indicate the original variables from https://www.desmos.com/calculator/yrysofmx8h
   // P_slope
-  float sigmoid_contrast_around_pivot;      // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast around the pivot"
+  float curve_contrast_around_pivot;      // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast around the pivot"
   // P_tlength
-  float sigmoid_linear_percent_below_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start %, below the pivot"
+  float curve_linear_percent_below_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start %, below the pivot"
   // P_slength
-  float sigmoid_linear_percent_above_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start %, above the pivot"
+  float curve_linear_percent_above_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start %, above the pivot"
   // t_p
-  float sigmoid_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe power; contrast in shadows"
-  // s_p -> Renamed from sigmoid_shoulder_power for clarity
-  float sigmoid_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder power; contrast in highlights"
+  float curve_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe power; contrast in shadows"
+  // s_p -> Renamed from curve_shoulder_power for clarity
+  float curve_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder power; contrast in highlights"
   // we don't have a parameter for pivot_x, it's set to the x value representing mid-grey, splitting [0..1] in the ratio
   // range_black_relative_exposure : range_white_relative_exposure
   // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
-  float sigmoid_curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Curve y gamma"
+  float curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Curve y gamma"
   // t_ly
-  float sigmoid_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
+  float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
   // s_ly
-  float sigmoid_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
-} dt_iop_agx_params_t;
+  float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
+} dt_iop_agx_user_params_t;
 
 
 typedef struct dt_iop_agx_gui_data_t
@@ -81,7 +81,50 @@ typedef struct dt_iop_agx_gui_data_t
   GtkStyleContext *context;
 } dt_iop_agx_gui_data_t;
 
-// Structs for vector and matrix math (pure C)
+typedef struct curve_and_look_params_t
+{
+  // shared
+  float min_ev;
+  float max_ev;
+  float range_in_ev;
+  float curve_gamma;
+
+  // the toe runs from (0, target black) to (toe_transition_x, toe_transition_y)
+  // t_lx = 0 for us
+  float target_black; // t_ly
+  float toe_power; // t_p
+  float toe_transition_x; // t_tx
+  float toe_transition_y; // t_ty
+  float toe_scale; // t_s
+  gboolean need_convex_toe;
+  float toe_a;
+  float toe_b;
+
+  // the linear section lies on y = mx + b, running from (toe_transition_x, toe_transition_y) to (shoulder_transition_x, shoulder_transition_y)
+  // it can have length 0, in which case it only contains the pivot (pivot_x, pivot_y)
+  // the pivot may coincide with toe_transition or shoulder_start or both
+  float slope; // m - for the linear section
+  float intercept; // b parameter of the straight segment (y = mx + b, intersection with the y-axis at (0, b))
+
+  // the shoulder runs from (shoulder_transition_x, shoulder_transition_y) to (1, target_white)
+  // s_lx = 1 for us
+  float target_white; // s_ly
+  float shoulder_power; // s_p
+  float shoulder_transition_x; // s_tx
+  float shoulder_transition_y; // s_ty
+  float shoulder_scale; // s_s
+  gboolean need_concave_shoulder;
+  float shoulder_a;
+  float shoulder_b;
+
+  // look
+  float look_offset;
+  float look_slope;
+  float look_power;
+  float look_saturation;
+  float look_original_hue_mix_ratio;
+} curve_and_look_params_t;
+
 typedef struct
 {
   float r, g, b;
@@ -92,16 +135,6 @@ typedef struct
   float m[3][3];
 } mat3f;
 
-
-// --- Forward declarations ---
-static float _calculate_sigmoid(float x,
-                                float slope_around_pivot,
-                                float toe_power, float shoulder_power, float toe_end_x,
-                                float toe_end_y, float shoulder_start_x,
-                                float shoulder_start_y, float toe_scale, float intercept,
-                                float shoulder_scale,
-                                gboolean need_convex_toe, float toe_a, float toe_b,
-                                gboolean need_concave_shoulder, float shoulder_a, float shoulder_b);
 
 // Helper function: matrix multiplication
 static float3 _mat3f_mul_float3(const mat3f m, const float3 v)
@@ -160,12 +193,6 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 
 // AgX implementation
 
-/*
-https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
-        inset_matrix = numpy.array([[0.856627153315983, 0.0951212405381588, 0.0482516061458583],
-                                    [0.137318972929847, 0.761241990602591, 0.101439036467562],
-                                    [0.11189821299995, 0.0767994186031903, 0.811302368396859]])
-*/
 const mat3f AgXInsetMatrix = { { { 0.856627153315983f, 0.0951212405381588f, 0.0482516061458583f },
                                  { 0.137318972929847f, 0.761241990602591f, 0.101439036467562f },
                                  { 0.11189821299995f, 0.0767994186031903f, 0.811302368396859f } } };
@@ -175,35 +202,36 @@ const mat3f AgXInsetMatrixInverse = { { { 1.1974410768877f, -0.14426151269800f, 
                                         { -0.19647462632135f, 1.3540951314697f, -0.15762050514838f },
                                         { -0.14655741710660f, -0.10828405878847f, 1.2548414758951f } } };
 
-static float _line(float x_in, float slope, float intercept)
+static float _line(const float x, const float slope, const float intercept)
 {
-  return slope * x_in + intercept;
+  return slope * x + intercept;
 }
 
-static float _scale(float limit_x_lx, float limit_y_ly, float transition_x_tx, float transition_y_ty,
-                    float power_p, float slope_m)
+static float _scale(float limit_x, float limit_y, float transition_x, float transition_y, float slope, float power)
 {
-  float linear_y_delta = slope_m * (limit_x_lx - transition_x_tx);
-  printf("linear_y_delta = %f\n", linear_y_delta);
+  const float dy_limit_to_transition_at_constant_slope = slope * (limit_x - transition_x);
+  printf("dy_limit_to_transition = %f\n", dy_limit_to_transition_at_constant_slope);
 
-  float power_curved_y_delta = powf(linear_y_delta, -power_p); // dampened / steepened
-  printf("power_curved_y_delta = %f\n", power_curved_y_delta);
+  const float dy_to_power = powf(dy_limit_to_transition_at_constant_slope, -power);
+  printf("dy_to_power = %f\n", dy_to_power);
 
   // in case the linear section extends too far; avoid division by 0
-  float remaining_y_span = fmaxf(_epsilon, limit_y_ly - transition_y_ty);
+  const float remaining_y_span = fmaxf(_epsilon, limit_y - transition_y);
   printf("remaining_y_span = %f\n", remaining_y_span);
 
-  float y_delta_ratio = linear_y_delta / remaining_y_span;
+  const float y_delta_ratio = dy_limit_to_transition_at_constant_slope / remaining_y_span;
   printf("y_delta_ratio = %f\n", y_delta_ratio);
 
-  float term_b = powf(y_delta_ratio, power_p) - 1.0f;
+  float term_b = powf(y_delta_ratio, power) - 1.0f;
   term_b = fmaxf(term_b, _epsilon);
   printf("term_b = %f\n", term_b);
 
-  float base = power_curved_y_delta * term_b;
+  const float base = dy_to_power * term_b;
   printf("base = %f\n", base);
 
-  float scale_value = powf(base, -1.0f / power_p);
+  // this is t_s or s_s on the chart, what's next?!
+
+  float scale_value = powf(base, -1.0f / power);
 
   scale_value = fminf(1e6, scale_value);
   scale_value = fmaxf(-1e6, scale_value);
@@ -213,9 +241,10 @@ static float _scale(float limit_x_lx, float limit_y_ly, float transition_x_tx, f
   return scale_value;
 }
 
-static float _exponential(float x_in, float power)
+// this is f_t(x), f_s(x) at https://www.desmos.com/calculator/yrysofmx8h
+static float _exponential(float x, float power)
 {
-  const float value = x_in / powf(1.0f + powf(x_in, power), 1.0f / power);
+  const float value = x / powf(1.0f + powf(x, power), 1.0f / power);
   if(isnan(value))
   {
     errors++; // printf("_exponential returns nan\n");
@@ -223,10 +252,11 @@ static float _exponential(float x_in, float power)
   return value;
 }
 
-static float _exponential_curve(float x_in, float scale_, float slope, float power, float transition_x,
+static float _exponential_curve(float x, float scale, float slope, float power, float transition_x,
                                 float transition_y)
 {
-  float value = scale_ * _exponential(slope * (x_in - transition_x) / scale_, power) + transition_y;
+  // this is f_ss, f_ts on the original curve https://www.desmos.com/calculator/yrysofmx8h
+  const float value = scale * _exponential(slope * (x - transition_x) / scale, power) + transition_y;
   if(isnan(value))
   {
     errors++; // printf("_exponential_curve returns nan\n");
@@ -236,57 +266,49 @@ static float _exponential_curve(float x_in, float scale_, float slope, float pow
 
 // Fallback toe/shoulder, so we can always reach black and white.
 // See https://www.desmos.com/calculator/gijzff3wlv
-static float _fallback_toe(float x, float toe_a, float toe_b)
+static float _fallback_toe(const float x, const curve_and_look_params_t *curve_params)
 {
-  // FIXME target black
-  return x <= 0 ? 0 : fmaxf(0, toe_a * powf(x, toe_b));
+  return x <= 0 ?
+    curve_params->target_black :
+    curve_params->target_black + fmaxf(0, curve_params -> toe_a * powf(x, curve_params -> toe_b));
 }
 
-static float _fallback_shoulder(float x, float shoulder_a, float shoulder_b)
+static float _fallback_shoulder(const float x, const curve_and_look_params_t *curve_params)
 {
-  // FIXME: target white
-  return (x >= 1) ? 1 : fminf(1, 1 - shoulder_a * powf(1 - x, shoulder_b));
+  return x >= 1 ?
+    curve_params->target_white :
+    curve_params->target_white - fmaxf(0, curve_params->shoulder_a * powf(1 - x, curve_params->shoulder_b));
 }
-
 
 // the commented values (t_tx, etc) are references to https://www.desmos.com/calculator/yrysofmx8h
-static float _calculate_sigmoid(float x,
-                                // Slope of linear portion.
-                                float slope_around_pivot,
-                                // Exponential power of the toe and shoulder regions.
-                                float toe_power, float shoulder_power,
-                                float toe_end_x, float toe_end_y,
-                                float shoulder_start_x, float shoulder_start_y,
-                                float toe_scale, float intercept,
-                                float shoulder_scale,
-                                gboolean need_convex_toe, float toe_a, float toe_b,
-                                gboolean need_concave_shoulder, float shoulder_a, float shoulder_b)
+static float _calculate_curve(const float x, const curve_and_look_params_t *curve_params)
 {
   float result;
 
-  if(x < toe_end_x)
+  if(x < curve_params->toe_transition_x)
   {
-    result = need_convex_toe ? _fallback_toe(x, toe_a, toe_b) : _exponential_curve(x, toe_scale, slope_around_pivot, toe_power, toe_end_x,
-                                toe_end_y);
+    result = curve_params->need_convex_toe ?
+      _fallback_toe(x, curve_params) :
+      _exponential_curve(x, curve_params->toe_scale, curve_params->slope, curve_params->toe_power, curve_params->toe_transition_x, curve_params->toe_transition_y);
   }
-  else if(x <= shoulder_start_x)
+  else if(x <= curve_params->shoulder_transition_x)
   {
-    result = _line(x, slope_around_pivot, intercept);
+    result = _line(x, curve_params->slope, curve_params->intercept);
   }
   else
   {
-    result = need_concave_shoulder ? _fallback_shoulder(x, shoulder_a, shoulder_b) : _exponential_curve(x, shoulder_scale, slope_around_pivot, shoulder_power,
-                                shoulder_start_x, shoulder_start_y);
+    result = curve_params->need_concave_shoulder ?
+      _fallback_shoulder(x, curve_params) :
+      _exponential_curve(x, curve_params->shoulder_scale, curve_params->slope, curve_params->shoulder_power, curve_params->shoulder_transition_x, curve_params->shoulder_transition_y);
   }
 
-  // TODO: white, black
-  return fmaxf(0, fminf(1, result));
+  return fmaxf(curve_params->target_black, fminf(curve_params->target_white, result));
 }
 
 // 'lerp', but take care of the boundary: hue wraps around 1 -> 0
 static float _lerp_hue(float hue1, float hue2, float mix)
 {
-  float hue_diff = hue2 - hue1;
+  const float hue_diff = hue2 - hue1;
 
   if(hue_diff > 0.5)
   {
@@ -314,8 +336,8 @@ static float apply_slope_offset(float x, float slope, float offset)
   // negative offset should darken the image; positive brighten it
   // without the scale: m = 1 / (1 + offset)
   // offset = 1, slope = 1, x = 0 -> m = 1 / (1+1) = 1/2, b = 1 * 1/2 = 1/2, y = 1/2*0 + 1/2 = 1/2
-  float m = slope / (1 + offset);
-  float b = offset * m;
+  const float m = slope / (1 + offset);
+  const float b = offset * m;
   return fmaxf(0.0f, m * x + b);
   // ASC CDL:
   // return x * slope + offset;
@@ -325,23 +347,23 @@ static float apply_slope_offset(float x, float slope, float offset)
 }
 
 // https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
-static float3 _agxLook(float3 val, const dt_iop_agx_params_t *p)
+static float3 _agxLook(float3 val, const curve_and_look_params_t *params)
 {
   // Default
-  float slope = p->look_slope;
-  float offset = p->look_offset;
-  float sat = p->look_saturation;
+  const float slope = params->look_slope;
+  const float offset = params->look_offset;
+  const float sat = params->look_saturation;
 
   // ASC CDL
-  float slope_and_offset_r = apply_slope_offset(val.r, slope, offset);
-  float slope_and_offset_g = apply_slope_offset(val.g, slope, offset);
-  float slope_and_offset_b = apply_slope_offset(val.b, slope, offset);
+  const float slope_and_offset_r = apply_slope_offset(val.r, slope, offset);
+  const float slope_and_offset_g = apply_slope_offset(val.g, slope, offset);
+  const float slope_and_offset_b = apply_slope_offset(val.b, slope, offset);
 
-  float out_r = slope_and_offset_r > 0 ? powf(slope_and_offset_r, p->look_power) : slope_and_offset_r;
-  float out_g = slope_and_offset_r > 0 ? powf(slope_and_offset_g, p->look_power) : slope_and_offset_g;
-  float out_b = slope_and_offset_r > 0 ? powf(slope_and_offset_b, p->look_power) : slope_and_offset_b;
+  const float out_r = slope_and_offset_r > 0 ? powf(slope_and_offset_r, params->look_power) : slope_and_offset_r;
+  const float out_g = slope_and_offset_r > 0 ? powf(slope_and_offset_g, params->look_power) : slope_and_offset_g;
+  const float out_b = slope_and_offset_r > 0 ? powf(slope_and_offset_b, params->look_power) : slope_and_offset_b;
 
-  // Using Rec 2020 Y coefficients (we use insetting, so this is probably incorrect
+  // Using Rec 2020 Y coefficients (we use insetting, so this is probably incorrect)
   const float luma = 0.2626983389565561f * out_r + 0.6780087657728164f * out_g + 0.05929289527062728f * out_b;
 
   float3 result;
@@ -371,7 +393,7 @@ static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, f
   v.g = (v.g - minEv) / range_in_ev;
   v.b = (v.b - minEv) / range_in_ev;
 
-  // Clamp result to [0, 1] - this is the input domain for the sigmoid
+  // Clamp result to [0, 1] - this is the input domain for the curve
   v.r = fminf(fmaxf(v.r, 0.0f), 1.0f);
   v.g = fminf(fmaxf(v.g, 0.0f), 1.0f);
   v.b = fminf(fmaxf(v.b, 0.0f), 1.0f);
@@ -380,133 +402,139 @@ static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, f
 }
 
 
-// Struct to hold calculated sigmoid parameters
-typedef struct dt_agx_sigmoid_params_cache_t
-{
-  float effective_slope;
-  float toe_start_x;
-  float toe_start_y;
-  float shoulder_start_x;
-  float shoulder_start_y;
-  float scale_toe;
-  float shoulder_scale;
-  float intercept;
-  gboolean need_convex_toe;
-  float toe_a;
-  float toe_b;
-  gboolean need_concave_shoulder;
-  float shoulder_a;
-  float shoulder_b;
-} dt_agx_sigmoid_params_cache_t;
-
 // see https://www.desmos.com/calculator/gijzff3wlv
-static float _calculate_B(float slope, float transition_x, float transition_y)
+static float _calculate_B(float slope, float dx_transition_to_limit, float dy_transition_to_limit)
 {
-  return slope * transition_x / transition_y;
+  return slope * dx_transition_to_limit / dy_transition_to_limit;
 }
 
-static float _calculate_A(float transition_x, float transition_y, float B)
+static float _calculate_A(const float dx_transition_to_limit, const float dy_transition_to_limit, const float B)
 {
-  return transition_y / powf(transition_x, B);
+  return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
 
 
-// Helper to calculate sigmoid parameters based on module params
-static void _calculate_agx_sigmoid_params(const dt_iop_agx_params_t *p, dt_agx_sigmoid_params_cache_t *cache)
+// Helper to calculate curve parameters based on module params
+static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
 {
-  const float maxEv = p->range_white_relative_exposure;
-  const float minEv = p->range_black_relative_exposure;
-  float range_in_ev = maxEv - minEv;
+  curve_and_look_params_t params;
+
+  // look
+  params.look_offset = user_params->look_offset;
+  params.look_slope = user_params->look_slope;
+  params.look_saturation = user_params->look_saturation;
+  params.look_power = user_params->look_power;
+  params.look_original_hue_mix_ratio = user_params->look_original_hue_mix_ratio;
+
+  printf("===== curve params calculation =====\n");
+
+  // log mapping
+  params.max_ev = user_params->range_white_relative_exposure;
+  printf("max_ev = %f\n", params.max_ev);
+  params.min_ev = user_params->range_black_relative_exposure;
+  printf("min_ev = %f\n", params.min_ev);
+  params.range_in_ev = params.max_ev - params.min_ev;
+  printf("range_in_ev = %f\n", params.range_in_ev);
+
+  params.curve_gamma = user_params->curve_gamma;
+  printf("curve_gamma = %f\n", params.curve_gamma);
 
   // TODO: expose the pivot; for now: 18% mid-grey
-  const float pivot_x = fabsf(minEv / range_in_ev);
-  const float pivot_y = powf(0.18f, 1.0f / p->sigmoid_curve_gamma);
+  const float pivot_x = fabsf(params.min_ev / params.range_in_ev);
+  const float pivot_y = powf(0.18f, 1.0f / params.curve_gamma);
+  printf("pivot(%f, %f) at gamma = %f\n", pivot_x, pivot_y, params.curve_gamma);
 
-  // avoid range altering slope - 16.5 EV is the default AgX range; keep scaling pro
-  cache->effective_slope = p->sigmoid_contrast_around_pivot * (range_in_ev / 16.5f);
-  //printf("scaled slope = %f\n", cache->effective_slope);
+  // avoid range altering slope - 16.5 EV is the default AgX range; keep the meaning of slope
+  params.slope = user_params->curve_contrast_around_pivot * (params.range_in_ev / 16.5f);
+  printf("scaled slope = %f from user_contrast_around_pivot = %f\n", params.slope, user_params->curve_contrast_around_pivot);
 
-  // x distance between x = 0 and pivot_x is just pivot_x, times portion of linear section
-  float toe_start_x_from_pivot_x = pivot_x * p->sigmoid_linear_percent_below_pivot / 100.0f;
-  cache->toe_start_x = pivot_x - toe_start_x_from_pivot_x;
-  float toe_y_below_pivot_y = cache->effective_slope * toe_start_x_from_pivot_x;
-  cache->toe_start_y = pivot_y - toe_y_below_pivot_y;
+  // toe
+  params.target_black = user_params->curve_target_display_black_y;
+  printf("target_black = %f\n", params.target_black);
+  params.toe_power = user_params->curve_toe_power;
+  printf("toe_power = %f\n", params.toe_power);
 
-  // toe fallback curve params
-  cache->toe_b = _calculate_B(cache->effective_slope, cache->toe_start_x, cache->toe_start_y);
-  cache->toe_a = _calculate_A(cache->toe_start_x, cache->toe_start_y, cache->toe_b);
+  // length of (0 -> pivot_x) is just pivot_x; we take the portion specified using the percentage...
+  const float dx_linear_below_pivot = pivot_x * user_params->curve_linear_percent_below_pivot / 100.0f;
+  // ...and subtract it from pivot_x to get the x coordinate where the linear section joins the toe
+  params.toe_transition_x = pivot_x - dx_linear_below_pivot;
+  printf("toe_transition_x = %f\n", params.toe_transition_x);
 
+  // from the 'run' pivot_x -> toe_transition_x, we calculate the 'rise'
+  const float toe_y_below_pivot_y = params.slope * dx_linear_below_pivot;
+  params.toe_transition_y = pivot_y - toe_y_below_pivot_y;
+  printf("toe_transition_y = %f\n", params.toe_transition_y);
 
-  // starting with a line of gradient effective_slope from (0, 0 -> FIXME: target_black) would take us to (pivot_x, linear_y_at_pivot_x_at_slope)
-  float linear_y_at_toe_start_x_at_slope = cache->effective_slope * cache->toe_start_x;
-  // Normally, the toe is concave: its gradient is gradually increasing, up to the slope of the linear
-  // section. If the slope of the linear section is not enough to go from (0, target_black) to
-  // (toe_end_x, toe_end_y), we'll need a convex 'toe'
-  cache->need_convex_toe = linear_y_at_toe_start_x_at_slope < cache->toe_start_y; // FIXME: use target black y param
-
-  const float inverse_toe_limit_x = 1.0f; // 1 - t_lx (limit is 0, so inverse is 1)
-  const float inverse_toe_limit_y = 1.0f - p->sigmoid_target_display_black_y; // Inverse limit y
+  const float toe_dx_transition_to_limit = fmaxf(_epsilon, params.toe_transition_x); // limit_x is 0; use epsilon to avoid division by 0 later
+  const float toe_dy_transition_to_limit = fmaxf(_epsilon, params.toe_transition_y - params.target_black);
+  const float toe_slope_transition_to_limit = toe_dy_transition_to_limit / toe_dx_transition_to_limit;
 
   // we use the same calculation as for the shoulder, so we flip the toe left <-> right, up <-> down
-  float inverse_toe_transition_x = 1.0f - cache->toe_start_x;
-  float inverse_toe_transition_y = 1.0f - cache->toe_start_y;
+  const float inverse_toe_limit_x = 1.0f; // 1 - toeLimix_x (toeLimix_x = 0, so inverse = 1)
+  const float inverse_toe_limit_y = 1.0f - params.target_black; // Inverse limit y
+
+  const float inverse_toe_transition_x = 1.0f - params.toe_transition_x;
+  const float inverse_toe_transition_y = 1.0f - params.toe_transition_y;
 
   // and then flip the scale
-  cache->scale_toe = -_scale(inverse_toe_limit_x, inverse_toe_limit_y, inverse_toe_transition_x,
-                                inverse_toe_transition_y, p->sigmoid_toe_power, cache->effective_slope);
-  //if(isnan(cache->scale_toe))
-  //{
-  //  errors++; // printf("scale_toe is NaN\n");
-  //}
+  params.toe_scale = -_scale(inverse_toe_limit_x, inverse_toe_limit_y,
+                                    inverse_toe_transition_x, inverse_toe_transition_y,
+                                    params.slope, params.toe_power);
+  printf("toe_scale = %f\n", params.toe_scale);
+
+  params.need_convex_toe = toe_slope_transition_to_limit > params.slope;
+  printf("need_convex_toe = %d\n", params.need_convex_toe);
+
+  // toe fallback curve params
+  params.toe_b = _calculate_B(params.slope, toe_dx_transition_to_limit, toe_dy_transition_to_limit);
+  printf("toe_b = %f\n", params.toe_b);
+  params.toe_a = _calculate_A(toe_dx_transition_to_limit, toe_dy_transition_to_limit, params.toe_b);
+  printf("toe_a = %f\n", params.toe_a);
+
+  // if x went from toe_transition_x to 0, at the given slope, starting from toe_transition_y, where would we intersect the y axis?
+  params.intercept = params.toe_transition_y - params.slope * params.toe_transition_x;
+  printf("intercept = %f\n", params.intercept);
 
   // shoulder
+  params.target_white = user_params->curve_target_display_white_y;
+  printf("target_white = %f\n", params.target_white);
   // distance between pivot_x and x = 1, times portion of linear section
-  float shoulder_x_from_pivot_x = (1 - pivot_x) * p->sigmoid_linear_percent_above_pivot / 100.0f;
-  //printf("shoulder_x_from_pivot_x = %f\n", shoulder_x_from_pivot_x);
-  cache->shoulder_start_x = pivot_x + shoulder_x_from_pivot_x;
-  //printf("shoulder_start_x = %f\n", cache->shoulder_start_x);
-  float shoulder_y_from_pivot_y = cache->effective_slope * shoulder_x_from_pivot_x;
-  //printf("shoulder_y_from_pivot_y = %f\n", shoulder_y_from_pivot_y);
-  cache->shoulder_start_y = pivot_y + shoulder_y_from_pivot_y;
-  //printf("shoulder_start_y = %f\n", cache->shoulder_start_y);
+  const float shoulder_x_from_pivot_x = (1 - pivot_x) * user_params->curve_linear_percent_above_pivot / 100.0f;
+  params.shoulder_transition_x = pivot_x + shoulder_x_from_pivot_x;
+  printf("shoulder_transition_x = %f\n", params.shoulder_transition_x);
+  const float shoulder_y_above_pivot_y = params.slope * shoulder_x_from_pivot_x;
+  params.shoulder_transition_y = pivot_y + shoulder_y_above_pivot_y;
+  printf("shoulder_transition_y = %f\n", params.shoulder_transition_y);
+  const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - params.shoulder_transition_x); // dx to 0, avoid division by 0 later
+  const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, params.target_white - params.shoulder_transition_y);
+  const float shoulder_slope_transition_to_limit = shoulder_dy_transition_to_limit / shoulder_dx_transition_to_limit;
+  params.shoulder_power = user_params->curve_shoulder_power;
+  printf("shoulder_power = %f\n", params.shoulder_power);
+
+  const float shoulder_limit_x = 1;
+  params.shoulder_scale = _scale(shoulder_limit_x, params.target_white,
+                                    params.shoulder_transition_x, params.shoulder_transition_y,
+                                    params.slope, params.shoulder_power);
+  printf("shoulder_scale = %f\n", params.shoulder_scale);
+  params.need_concave_shoulder = shoulder_slope_transition_to_limit > params.slope;
+  printf("need_concave_shoulder = %d\n", params.need_concave_shoulder);
 
   // shoulder fallback curve params
-  cache->shoulder_b = _calculate_B(cache->effective_slope, 1.0f - cache->shoulder_start_x, p->sigmoid_target_display_white_y - cache->shoulder_start_y);
-  cache->shoulder_a = _calculate_A(1.0f - cache->shoulder_start_x, p->sigmoid_target_display_white_y - cache->shoulder_start_y, cache->shoulder_b);
+  params.shoulder_b = _calculate_B(params.slope, shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit);
+  printf("shoulder_b = %f\n", params.shoulder_b);
+  params.shoulder_a = _calculate_A(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, params.shoulder_b);
+  printf("shoulder_a = %f\n", params.shoulder_a);
 
-
-  float linear_y_when_x_is_1 = cache->shoulder_start_y + cache->effective_slope * (1.0f - cache->shoulder_start_x);
-  // Normally, the shoulder is convex: its gradient is gradually decreasing from slope of the linear
-  // section. If the slope of the linear section is not enough to go from (toe_end_x, toe_end_y) to
-  // (1, target_white), we'll need a concave 'shoulder'
-  cache->need_concave_shoulder = linear_y_when_x_is_1 < p->sigmoid_target_display_white_y; // FIXME: use target white y param
-
-  const float shoulder_intersection_x = 1.0f; // Limit x is 1
-
-  cache->shoulder_scale
-      = _scale(shoulder_intersection_x, p->sigmoid_target_display_white_y,
-              cache->shoulder_start_x, cache->shoulder_start_y,
-              p->sigmoid_shoulder_power, cache->effective_slope);
-  //if(isnan(cache->shoulder_scale))
+  //if(isnan(shoulder_scale))
   //{
   //  errors++; // printf("shoulder_scale is NaN\n");
   //}
 
-  //printf("scale_toe: %f, shoulder_scale: %f\n", cache->scale_toe, cache->shoulder_scale);
-
-  // b - intercept of the linear section
-  cache->intercept = cache->toe_start_y - cache->effective_slope * cache->toe_start_x;
-  //if(isnan(cache->intercept))
-  //{
-  //  errors++; // printf("intercept is NaN\n");
-  //}
-
-  //printf("need_convex_toe: %d, need_concave_shoulder: %d\n", cache->need_convex_toe, cache->need_concave_shoulder);
+  return params;
 }
 
 
-static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float range_in_ev, float minEv,
-                                const dt_agx_sigmoid_params_cache_t* sigmoid_cache)
+static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * params)
 {
   // Apply Inset Matrix
   rgb = _mat3f_mul_float3(AgXInsetMatrix, rgb);
@@ -520,42 +548,30 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
   // record current chromaticity angle
   dt_aligned_pixel_t hsv_pixel;
   dt_RGB_2_HSV(rgb_pixel, hsv_pixel);
-  float h_before = hsv_pixel[0];
+  const float h_before = hsv_pixel[0];
 
-  float3 log_pixel = _apply_log_encoding(rgb_pixel, range_in_ev, minEv);
+  float3 log_pixel = _apply_log_encoding(rgb_pixel, params->range_in_ev, params->min_ev);
 
-  // Apply sigmoid using cached parameters
-  log_pixel.r = _calculate_sigmoid(log_pixel.r, sigmoid_cache->effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-                           sigmoid_cache->toe_start_x, sigmoid_cache->toe_start_y, sigmoid_cache->shoulder_start_x,
-                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->shoulder_scale,
-                           sigmoid_cache->need_convex_toe, sigmoid_cache->toe_a, sigmoid_cache->toe_b,
-                           sigmoid_cache->need_concave_shoulder, sigmoid_cache->shoulder_a, sigmoid_cache->shoulder_b);
-  log_pixel.g = _calculate_sigmoid(log_pixel.g, sigmoid_cache->effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-                           sigmoid_cache->toe_start_x, sigmoid_cache->toe_start_y, sigmoid_cache->shoulder_start_x,
-                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->shoulder_scale,
-                           sigmoid_cache->need_convex_toe, sigmoid_cache->toe_a, sigmoid_cache->toe_b,
-                           sigmoid_cache->need_concave_shoulder, sigmoid_cache->shoulder_a, sigmoid_cache->shoulder_b);
-  log_pixel.b = _calculate_sigmoid(log_pixel.b, sigmoid_cache->effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-                           sigmoid_cache->toe_start_x, sigmoid_cache->toe_start_y, sigmoid_cache->shoulder_start_x,
-                           sigmoid_cache->shoulder_start_y, sigmoid_cache->scale_toe, sigmoid_cache->intercept, sigmoid_cache->shoulder_scale,
-                           sigmoid_cache->need_convex_toe, sigmoid_cache->toe_a, sigmoid_cache->toe_b,
-                           sigmoid_cache->need_concave_shoulder, sigmoid_cache->shoulder_a, sigmoid_cache->shoulder_b);
+  // Apply curve using cached parameters
+  log_pixel.r = _calculate_curve(log_pixel.r, params);
+  log_pixel.g = _calculate_curve(log_pixel.g, params);
+  log_pixel.b = _calculate_curve(log_pixel.b, params);
 
   // Apply AgX look
-  log_pixel = _agxLook(log_pixel, p);
+  log_pixel = _agxLook(log_pixel, params);
 
   // Linearize
-  rgb_pixel[0] = powf(fmaxf(0.0f, log_pixel.r), p->sigmoid_curve_gamma);
-  rgb_pixel[1] = powf(fmaxf(0.0f, log_pixel.g), p->sigmoid_curve_gamma);
-  rgb_pixel[2] = powf(fmaxf(0.0f, log_pixel.b), p->sigmoid_curve_gamma);
+  rgb_pixel[0] = powf(fmaxf(0.0f, log_pixel.r), params->curve_gamma);
+  rgb_pixel[1] = powf(fmaxf(0.0f, log_pixel.g), params->curve_gamma);
+  rgb_pixel[2] = powf(fmaxf(0.0f, log_pixel.b), params->curve_gamma);
 
-  // record post-sigmoid chroma angle
+  // record post-curve chroma angle
   dt_RGB_2_HSV(rgb_pixel, hsv_pixel);
 
   float h_after = hsv_pixel[0];
 
   // Mix hue back if requested
-  h_after = _lerp_hue(h_before, h_after, p->look_original_hue_mix_ratio);
+  h_after = _lerp_hue(h_before, h_after, params->look_original_hue_mix_ratio);
 
   hsv_pixel[0] = h_after;
   dt_HSV_2_RGB(hsv_pixel, rgb_pixel);
@@ -576,26 +592,14 @@ static float3 _agx_tone_mapping(float3 rgb, const dt_iop_agx_params_t *p, float 
   return out;
 }
 
-void _print_sigmoid(float slope_around_pivot,
-                                float toe_power, float shoulder_power,
-                                float toe_end_x, float toe_end_y,
-                                float shoulder_start_x, float shoulder_start_y,
-                                float toe_scale, float intercept, float shoulder_scale,
-                                gboolean need_convex_toe, float toe_a, float toe_b,
-                                gboolean need_concave_shoulder, float shoulder_a, float shoulder_b)
+void _print_curve(curve_and_look_params_t *curve_params)
 {
   const int steps = 100;
-  printf("\nSigmoid\n");
+  printf("\nCurve\n");
   for (int i = 0; i <= steps; i++)
   {
-    float x = i / (float) steps;
-    float y = _calculate_sigmoid(x, slope_around_pivot,
-      toe_power, shoulder_power,
-      toe_end_x, toe_end_y,
-      shoulder_start_x, shoulder_start_y,
-      toe_scale, intercept, shoulder_scale,
-      need_convex_toe, toe_a, toe_b,
-      need_concave_shoulder, shoulder_a, shoulder_b);
+    float x = i / (float)steps;
+    const float y = _calculate_curve(x, curve_params);
     printf("%f\t%f\n", x, y);
   }
   printf("\n");
@@ -605,7 +609,7 @@ void _print_sigmoid(float slope_around_pivot,
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  dt_iop_agx_params_t *p = piece->data;
+  const dt_iop_agx_user_params_t *p = piece->data;
   const size_t ch = piece->colors;
 
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out)) return;
@@ -613,28 +617,23 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("================== start ==================\n");
   printf("range_black_relative_exposure = %f\n", p->range_black_relative_exposure);
   printf("range_white_relative_exposure = %f\n", p->range_white_relative_exposure);
-  printf("sigmoid_curve_gamma = %f\n", p->sigmoid_curve_gamma);
-  printf("sigmoid_contrast_around_pivot = %f\n", p->sigmoid_contrast_around_pivot);
-  printf("sigmoid_linear_percent_below_pivot = %f\n", p->sigmoid_linear_percent_below_pivot);
-  printf("sigmoid_linear_percent_above_pivot = %f\n", p->sigmoid_linear_percent_above_pivot);
-  printf("sigmoid_toe_power = %f\n", p->sigmoid_toe_power);
-  printf("sigmoid_shoulder_power = %f\n", p->sigmoid_shoulder_power);
-  printf("sigmoid_target_display_black_y = %f\n", p->sigmoid_target_display_black_y);
-  printf("sigmoid_target_display_white_y = %f\n", p->sigmoid_target_display_white_y);
+  printf("curve_gamma = %f\n", p->curve_gamma);
+  printf("curve_contrast_around_pivot = %f\n", p->curve_contrast_around_pivot);
+  printf("curve_linear_percent_below_pivot = %f\n", p->curve_linear_percent_below_pivot);
+  printf("curve_linear_percent_above_pivot = %f\n", p->curve_linear_percent_above_pivot);
+  printf("curve_toe_power = %f\n", p->curve_toe_power);
+  printf("curve_shoulder_power = %f\n", p->curve_shoulder_power);
+  printf("curve_target_display_black_y = %f\n", p->curve_target_display_black_y);
+  printf("curve_target_display_white_y = %f\n", p->curve_target_display_white_y);
 
-  // Calculate sigmoid parameters once
-  dt_agx_sigmoid_params_cache_t sigmoid_cache;
-  _calculate_agx_sigmoid_params(p, &sigmoid_cache);
-
-  const float maxEv = p->range_white_relative_exposure;
-  const float minEv = p->range_black_relative_exposure;
-  const float range_in_ev = maxEv - minEv;
+  // Calculate curve parameters once
+  curve_and_look_params_t curve_params = _calculate_curve_params(p);
 
   DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
   {
-    float *in = ((float *)ivoid) + (size_t)ch * roi_in->width * j;
-    float *out = ((float *)ovoid) + (size_t)ch * roi_out->width * j;
+    const float *in = (float *)ivoid + (size_t)ch * roi_in->width * j;
+    float *out = (float *)ovoid + (size_t)ch * roi_out->width * j;
 
     for(int i = 0; i < roi_out->width; i++)
     {
@@ -643,9 +642,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       rgb.g = in[1];
       rgb.b = in[2];
 
-      int debug = (i == 0 && j == 0);
+      const int debug = i == 0 && j == 0;
 
-      float3 agx_rgb = _agx_tone_mapping(rgb, p, range_in_ev, minEv, &sigmoid_cache);
+      const float3 agx_rgb = _agx_tone_mapping(rgb, &curve_params);
 
       out[0] = agx_rgb.r;
       out[1] = agx_rgb.g;
@@ -666,15 +665,14 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   }
 }
 
-// Draw function for the sigmoid curve
+// Plot the curve
 static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t *self)
 {
-  dt_iop_agx_params_t *p = self->params;
+  dt_iop_agx_user_params_t *p = self->params;
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
-  // Calculate current sigmoid parameters
-  dt_agx_sigmoid_params_cache_t sigmoid_cache;
-  _calculate_agx_sigmoid_params(p, &sigmoid_cache);
+  curve_and_look_params_t curve_params = _calculate_curve_params(p);
+  // Calculate current curve parameters
 
   // --- Boilerplate cairo/pango setup ---
   gtk_widget_get_allocation(widget, &g->allocation);
@@ -740,25 +738,19 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   cairo_stroke(cr);
   cairo_restore(cr);
 
-  // Draw the sigmoid curve
+  // Draw the curve
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));
   set_color(cr, darktable.bauhaus->graph_fg);
 
   const int steps = 200;
   for (int k = 0; k <= steps; k++)
   {
-    float x_norm = (float)k / steps; // Input to sigmoid [0, 1]
-    float y_norm = _calculate_sigmoid(x_norm,
-        sigmoid_cache.effective_slope, p->sigmoid_toe_power, p->sigmoid_shoulder_power,
-        sigmoid_cache.toe_start_x, sigmoid_cache.toe_start_y,
-        sigmoid_cache.shoulder_start_x, sigmoid_cache.shoulder_start_y,
-        sigmoid_cache.scale_toe, sigmoid_cache.intercept, sigmoid_cache.shoulder_scale,
-        sigmoid_cache.need_convex_toe, sigmoid_cache.toe_a, sigmoid_cache.toe_b,
-        sigmoid_cache.need_concave_shoulder, sigmoid_cache.shoulder_a, sigmoid_cache.shoulder_b);
+    float x_norm = (float)k / steps; // Input to the curve [0, 1]
+    float y_norm = _calculate_curve(x_norm, &curve_params);
 
     // Map normalized coords [0,1] to graph pixel coords
-    float x_graph = x_norm * g->graph_width;
-    float y_graph = y_norm * g->graph_height;
+    const float x_graph = x_norm * g->graph_width;
+    const float y_graph = y_norm * g->graph_height;
 
     if (k == 0)
       cairo_move_to(cr, x_graph, y_graph);
@@ -849,7 +841,7 @@ void cleanup(dt_iop_module_t *self)
 // GUI changed
 void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
-  dt_iop_agx_gui_data_t *g = self->gui_data;
+  const dt_iop_agx_gui_data_t *g = self->gui_data;
   // Trigger redraw when any parameter changes
   if (g && g->area) {
     gtk_widget_queue_draw(GTK_WIDGET(g->area));
@@ -859,7 +851,7 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 // GUI update (called when module UI is shown/refreshed)
 void gui_update(dt_iop_module_t *self)
 {
-  dt_iop_agx_gui_data_t *g = self->gui_data;
+  const dt_iop_agx_gui_data_t *g = self->gui_data;
 
   // Ensure the graph is drawn initially
   if (g && g->area) {
@@ -915,7 +907,7 @@ dt_gui_new_collapsible_section(&gui_data->tone_mapping_section, "plugins/darkroo
   dt_action_define_iop(self, NULL, N_("graph"), GTK_WIDGET(gui_data->area), NULL);
   gtk_widget_set_can_focus(GTK_WIDGET(gui_data->area), TRUE);
   g_signal_connect(G_OBJECT(gui_data->area), "draw", G_CALLBACK(agx_draw_curve), self);
-  gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->area), _("Sigmoid tone mapping curve (log input, linear output)"));
+  gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->area), _("tone mapping curve"));
 
   // Pack drawing area at the top
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(gui_data->area), TRUE, TRUE, 0);
@@ -932,48 +924,48 @@ dt_gui_new_collapsible_section(&gui_data->tone_mapping_section, "plugins/darkroo
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
  gtk_widget_set_tooltip_text(slider, _("maximum relative exposure (white point)"));
 
- label = gtk_label_new(_("Sigmoid curve parameters"));
+ label = gtk_label_new(_("curve parameters"));
  gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
 
  // Internal 'gamma'
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_curve_gamma");
+ slider = dt_bauhaus_slider_from_params(self, "curve_gamma");
  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("Fine-tune contrast, shifts pivot along the y axis"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_contrast_around_pivot");
+ slider = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_toe_power");
+ slider = dt_bauhaus_slider_from_params(self, "curve_toe_power");
  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("toe power"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_shoulder_power");
+ slider = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder power"));
 
  // Create a nested collapsible section for additional parameters
  GtkWidget *parent_box = self->widget;
- dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_sigmoid_advanced",
+ dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
  _("advanced"), GTK_BOX(parent_box), DT_ACTION(self));
 
   self->widget = GTK_WIDGET(gui_data->advanced_section.container);
 
  // Toe
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_percent_below_pivot");
+ slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_below_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
  gtk_widget_set_tooltip_text(slider, _("toe length"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_black_y");
+ slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_y");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
  gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
 
  // Shoulder
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_linear_percent_above_pivot");
+ slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder length"));
 
- slider = dt_bauhaus_slider_from_params(self, "sigmoid_target_display_white_y");
+ slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
  gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
 }
@@ -1017,7 +1009,7 @@ void init_presets(dt_iop_module_so_t *self)
     dt_gui_presets_update_autoapply(_("scene-referred default"), self->op, self->version(), TRUE);
   }
 
-  dt_iop_agx_params_t p = { 0 };
+  dt_iop_agx_user_params_t p = { 0 };
 
   // common
   p.look_slope = 1.0f;
@@ -1026,14 +1018,14 @@ void init_presets(dt_iop_module_so_t *self)
   p.range_black_relative_exposure = -10;
   p.range_white_relative_exposure = 6.5;
 
-  p.sigmoid_contrast_around_pivot = 2.4;
-  p.sigmoid_linear_percent_below_pivot = 0.0;
-  p.sigmoid_linear_percent_below_pivot = 0.0;
-  p.sigmoid_toe_power = 1.5;
-  p.sigmoid_shoulder_power = 1.5;
-  p.sigmoid_target_display_black_y = 0.0;
-  p.sigmoid_target_display_white_y = 1.0;
-  p.sigmoid_curve_gamma = 2.2;
+  p.curve_contrast_around_pivot = 2.4;
+  p.curve_linear_percent_below_pivot = 0.0;
+  p.curve_linear_percent_below_pivot = 0.0;
+  p.curve_toe_power = 1.5;
+  p.curve_shoulder_power = 1.5;
+  p.curve_target_display_black_y = 0.0;
+  p.curve_target_display_white_y = 1.0;
+  p.curve_gamma = 2.2;
 
   // Base preset
   p.look_power = 1.0f;
