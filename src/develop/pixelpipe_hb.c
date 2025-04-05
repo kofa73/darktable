@@ -140,10 +140,13 @@ void dt_print_pipe_ext(const char *title,
   if(pipe)
   {
     snprintf(pname, sizeof(pname), "[%s]", dt_dev_pixelpipe_type_to_str(pipe->type));
-    if(pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_ANY)
+    if(pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU)
+      snprintf(masking, sizeof(masking), " passthru");
+    else if(pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_ANY)
       snprintf(masking, sizeof(masking),
-               " masking=%#x %s", pipe->mask_display,
-               pipe->bypass_blendif ? ", bypass blend" : "" );
+               " masking=%#x %s%s", pipe->mask_display,
+               pipe->bypass_blendif ? ", bypass blend" : "",
+               pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_STICKY ? ", sticky" : "");
   }
 
   va_list ap;
@@ -1789,12 +1792,15 @@ static gboolean _dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   dt_pixelpipe_flow_t pixelpipe_flow =
     (PIXELPIPE_FLOW_NONE | PIXELPIPE_FLOW_HISTOGRAM_NONE);
 
-  // special case: user requests to see channel data in the parametric
-  // mask of a module, or the blending mask. In that case we skip all
-  // modules manipulating pixel content and only process image
-  // distorting modules. Finally "gamma" is responsible for displaying
-  // channel/mask data accordingly.
-  // FIXME: Could we do a copy by roi here ?
+  /* special case: user requests to see channel data in the parametric
+      mask of a module or the blending mask.
+      In that case we skip all modules manipulating pixel content and only
+      process image distorting modules.
+      Finally "gamma" is responsible for displaying channel/mask data accordingly.
+    Note: As pipe->mask_display is intentionally not included in the piece hash
+      ensuring pixelpipe cacheline integrity, gamma is responsible to invalidate
+      it's input data.
+  */
   if(!dt_iop_module_is(module->so, "gamma")
      && (pipe->mask_display != DT_DEV_PIXELPIPE_DISPLAY_NONE)
      && !(module->operation_tags() & IOP_TAG_DISTORT)
