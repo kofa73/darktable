@@ -3,9 +3,12 @@
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "iop/iop_api.h"
-#include "gui/draw.h" // Needed for dt_draw_grid
-#include "gui/accelerators.h" // For dt_action_define_iop
-
+#include "gui/draw.h"
+#include "gui/accelerators.h"
+#include "gui/color_picker_proxy.h"
+#include "control/control.h"
+#include "develop/develop.h"
+#include "common/iop_profile.h"
 #include <gtk/gtk.h>
 #include <math.h> // For math functions
 #include <stdlib.h>
@@ -67,6 +70,9 @@ typedef struct dt_iop_agx_gui_data_t
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
+  // Slider widgets for pickers
+  GtkWidget *range_black_slider;
+  GtkWidget *range_white_slider;
   float line_height;
   float sign_width;
   float zero_width;
@@ -78,6 +84,11 @@ typedef struct dt_iop_agx_gui_data_t
   GtkAllocation allocation;
   PangoRectangle ink;
   GtkStyleContext *context;
+
+  // Picker widgets
+  GtkWidget *range_black_picker;
+  GtkWidget *range_white_picker;
+  GtkWidget *auto_tune_picker;
 } dt_iop_agx_gui_data_t;
 
 typedef struct curve_and_look_params_t
@@ -605,6 +616,73 @@ static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * para
   return out;
 }
 
+// Get pixel norm using max RGB method (similar to filmic's choice for black/white)
+DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
+static inline float _agx_get_pixel_norm_max_rgb(const dt_aligned_pixel_t pixel)
+{
+  return fmaxf(fmaxf(pixel[0], pixel[1]), pixel[2]);
+}
+
+// Apply logic for black point picker
+static void apply_auto_black_exposure(dt_iop_module_t *self)
+{
+  if(darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *p = self->params;
+  dt_iop_agx_gui_data_t *g = self->gui_data;
+
+  const float black_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_min);
+  p->range_black_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->range_black_slider, p->range_black_relative_exposure);
+  --darktable.gui->reset;
+
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
+// Apply logic for white point picker
+static void apply_auto_white_exposure(dt_iop_module_t *self)
+{
+  if(darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *p = self->params;
+  dt_iop_agx_gui_data_t *g = self->gui_data;
+
+  const float white_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_max);
+  p->range_white_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->range_white_slider, p->range_white_relative_exposure);
+  --darktable.gui->reset;
+
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
+// Apply logic for auto-tuning both black and white points
+static void apply_auto_tune_exposure(dt_iop_module_t *self)
+{
+  if(darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *p = self->params;
+  dt_iop_agx_gui_data_t *g = self->gui_data;
+
+  // Black point
+  const float black_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_min);
+  p->range_black_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+
+  // White point
+  const float white_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_max);
+  p->range_white_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->range_black_slider, p->range_black_relative_exposure);
+  dt_bauhaus_slider_set(g->range_white_slider, p->range_white_relative_exposure);
+  --darktable.gui->reset;
+
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
 void _print_curve(curve_and_look_params_t *curve_params)
 {
   const int steps = 100;
@@ -928,13 +1006,29 @@ static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   // black/white relative exposure
   label = gtk_label_new(_("Input exposure range"));
   gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
-  slider = dt_bauhaus_slider_from_params(self, "range_black_relative_exposure");
+
+  // Create black point slider and associate picker
+  gui_data->range_black_slider = dt_bauhaus_slider_from_params(self, "range_black_relative_exposure");
+  slider = gui_data->range_black_slider;
   dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
+  gui_data->range_black_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
   gtk_widget_set_tooltip_text(slider, _("minimum relative exposure (black point)"));
 
-  slider = dt_bauhaus_slider_from_params(self, "range_white_relative_exposure");
+
+  // Create white point slider and associate picker
+  gui_data->range_white_slider = dt_bauhaus_slider_from_params(self, "range_white_relative_exposure");
+  slider = gui_data->range_white_slider;
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
+  gui_data->range_white_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
+  gtk_widget_set_tooltip_text(gui_data->range_white_picker, _("pick white exposure")); // Tooltip for picker icon
   gtk_widget_set_tooltip_text(slider, _("maximum relative exposure (white point)"));
+
+  // Auto tune slider (similar to filmic's)
+  gui_data->auto_tune_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                                                  dt_bauhaus_combobox_new(self));
+  dt_bauhaus_widget_set_label(gui_data->auto_tune_picker, NULL, N_("auto tune levels"));
+  gtk_widget_set_tooltip_text(gui_data->auto_tune_picker, _("pick image area to automatically set black and white exposure"));
+  gtk_box_pack_start(GTK_BOX(self->widget), gui_data->auto_tune_picker, TRUE, TRUE, 0);
 
   label = gtk_label_new(_("curve parameters"));
   gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
@@ -1067,6 +1161,17 @@ void init_presets(dt_iop_module_so_t *self)
 void gui_cleanup(dt_iop_module_t *self)
 {
    // Nothing specific to clean up beyond default IOP gui alloc
+}
+
+// Callback for color pickers
+void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
+                        dt_dev_pixelpipe_t *pipe)
+{
+  dt_iop_agx_gui_data_t *g = self->gui_data;
+
+  if(picker == g->range_black_picker) apply_auto_black_exposure(self);
+  else if(picker == g->range_white_picker) apply_auto_white_exposure(self);
+  else if(picker == g->auto_tune_picker) apply_auto_tune_exposure(self);
 }
 
 /*
