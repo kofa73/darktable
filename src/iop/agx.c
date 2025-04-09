@@ -27,9 +27,9 @@ const float _epsilon = 1E-6f;
 typedef struct dt_iop_agx_user_params_t
 {
   // look params
-  float look_offset;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset (deepen(-) or lift(+) shadows)"
-  float look_slope;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope (decrease(-) or increase(+) contrast and brightness)"
-  float look_power;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power (increase(-) or decrease(+) brightness)"
+  float look_offset;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
+  float look_slope;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
+  float look_power;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
   float look_saturation;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
   float look_original_hue_mix_ratio;    // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
 
@@ -961,14 +961,17 @@ static void _add_look_box(dt_iop_module_t *self)
 
   slider = dt_bauhaus_slider_from_params(self, "look_offset");
   dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("deepen or lift shadows"));  // Tooltip text for look_offset
   gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
   slider = dt_bauhaus_slider_from_params(self, "look_slope");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("decrease or increase contrast and brightness"));
   gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
   slider = dt_bauhaus_slider_from_params(self, "look_power");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("increase or decrease brightness"));
   gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
 
   slider = dt_bauhaus_slider_from_params(self, "look_saturation");
