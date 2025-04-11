@@ -1130,7 +1130,7 @@ static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   gtk_widget_set_tooltip_text(slider, _("Pivot x shift"));
   gui_data->curve_pivot_x_shift_slider = slider; // Store the slider widget
   gui_data->pivot_x_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
-  gtk_widget_set_tooltip_text(gui_data->pivot_x_picker, _("pick image neutral point to map to pivot x"));
+  gtk_widget_set_tooltip_text(gui_data->pivot_x_picker, _("pick range to serve as contrast pivot"));
 
 
   slider = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
@@ -1234,6 +1234,8 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_target_display_black_y = 0.0;
   p.curve_target_display_white_y = 1.0;
   p.curve_gamma = 2.2;
+  p.curve_pivot_x_shift = 0.0;
+  p.curve_pivot_y_linear = 0.18;
 
   // Base preset
   p.look_power = 1.0f;
