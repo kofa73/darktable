@@ -622,6 +622,13 @@ static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * para
   return out;
 }
 
+// Get pixel norm approximating Y - later maybe compute Y properly using the working space
+DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
+static inline float _agx_get_pixel_norm_Ylike_rgb(const dt_aligned_pixel_t pixel)
+{
+  return fmaxf(0.0f, pixel[0]) * 0.25 + fmaxf(0.0f, pixel[1]) * 0.7 + fmaxf(0.0f, pixel[2]) * 0.05;
+}
+
 // Get pixel norm using max RGB method (similar to filmic's choice for black/white)
 DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
 static inline float _agx_get_pixel_norm_max_rgb(const dt_aligned_pixel_t pixel)
@@ -704,7 +711,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
   // Calculate norm and EV of the picked color
-  const float norm = _agx_get_pixel_norm_max_rgb(self->picked_color);
+  const float norm = _agx_get_pixel_norm_Ylike_rgb(self->picked_color);
   const float picked_ev = log2f(fmaxf(_epsilon, norm) / 0.18f);
 
   // Calculate the target pivot_x based on the picked EV and the current EV range
