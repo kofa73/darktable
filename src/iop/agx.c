@@ -61,7 +61,7 @@ typedef struct dt_iop_agx_user_params_t
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
 
-  gboolean compensate_low_end;     // $DEFAULT: TRUE $DESCRIPTION: "Try to compensate negative values"
+  gboolean compensate_low_end;     // $MIN: FALSE $MAX: TRUE $DEFAULT: FALSE $DESCRIPTION: "Try to compensate negative values"
 } dt_iop_agx_user_params_t;
 
 
@@ -1388,7 +1388,7 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_pivot_x_shift = 0.0;
   p.curve_pivot_y_linear = 0.18;
 
-  p.compensate_low_end = TRUE;
+  p.compensate_low_end = FALSE;
 
   // Base preset
   p.look_power = 1.0f;
