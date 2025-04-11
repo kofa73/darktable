@@ -101,6 +101,8 @@ typedef struct curve_and_look_params_t
 
   // the toe runs from (0, target black) to (toe_transition_x, toe_transition_y)
   // t_lx = 0 for us
+  float pivot_x;
+  float pivot_y;
   float target_black; // t_ly
   float toe_power; // t_p
   float toe_transition_x; // t_tx
@@ -462,11 +464,11 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
     pivot_x = pivot_x * gray_ratio + white_ratio;
   }
 
-  const float pivot_y = powf(
-    CLAMP(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_y, user_params->curve_target_display_white_y),
+  params.pivot_x = pivot_x;
+  params.pivot_y = powf(CLAMP(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_y, user_params->curve_target_display_white_y),
     1.0f / params.curve_gamma
   );
-  printf("pivot(%f, %f) at gamma = %f\n", pivot_x, pivot_y, params.curve_gamma);
+  printf("pivot(%f, %f) at gamma = %f\n", pivot_x, params.pivot_y, params.curve_gamma);
 
   // avoid range altering slope - 16.5 EV is the default AgX range; keep the meaning of slope
   params.slope = user_params->curve_contrast_around_pivot * (params.range_in_ev / 16.5f);
@@ -486,7 +488,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
 
   // from the 'run' pivot_x -> toe_transition_x, we calculate the 'rise'
   const float toe_y_below_pivot_y = params.slope * dx_linear_below_pivot;
-  params.toe_transition_y = pivot_y - toe_y_below_pivot_y;
+  params.toe_transition_y = params.pivot_y - toe_y_below_pivot_y;
   printf("toe_transition_y = %f\n", params.toe_transition_y);
 
   const float toe_dx_transition_to_limit = fmaxf(_epsilon, params.toe_transition_x); // limit_x is 0; use epsilon to avoid division by 0 later
@@ -527,7 +529,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   params.shoulder_transition_x = pivot_x + shoulder_x_from_pivot_x;
   printf("shoulder_transition_x = %f\n", params.shoulder_transition_x);
   const float shoulder_y_above_pivot_y = params.slope * shoulder_x_from_pivot_x;
-  params.shoulder_transition_y = pivot_y + shoulder_y_above_pivot_y;
+  params.shoulder_transition_y = params.pivot_y + shoulder_y_above_pivot_y;
   printf("shoulder_transition_y = %f\n", params.shoulder_transition_y);
   const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - params.shoulder_transition_x); // dx to 0, avoid division by 0 later
   const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, params.target_white - params.shoulder_transition_y);
@@ -849,6 +851,20 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
       cairo_line_to(cr, x_graph, y_graph);
   }
   cairo_stroke(cr);
+
+  // Draw the pivot point
+  cairo_save(cr);
+  cairo_rectangle(cr, -DT_PIXEL_APPLY_DPI(4.), -DT_PIXEL_APPLY_DPI(4.),
+                  g->graph_width + 2. * DT_PIXEL_APPLY_DPI(4.), g->graph_height + 2. * DT_PIXEL_APPLY_DPI(4.));
+  cairo_clip(cr);
+
+  const float x_pivot_graph = curve_params.pivot_x * g->graph_width;
+  const float y_pivot_graph = curve_params.pivot_y * g->graph_height;
+  set_color(cr, darktable.bauhaus->graph_fg_active); // Use a distinct color, e.g., active foreground
+  cairo_arc(cr, x_pivot_graph, y_pivot_graph, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI); // Adjust radius as needed
+  cairo_fill(cr);
+  cairo_stroke(cr);
+  cairo_restore(cr);
 
   // Draw Axis Labels (Simplified)
   cairo_save(cr);
