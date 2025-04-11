@@ -60,6 +60,8 @@ typedef struct dt_iop_agx_user_params_t
   float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
+
+  gboolean compensate_low_end;     // $DEFAULT: TRUE $DESCRIPTION: "Try to compensate negative values"
 } dt_iop_agx_user_params_t;
 
 
@@ -93,6 +95,7 @@ typedef struct dt_iop_agx_gui_data_t
   GtkWidget *range_white_slider;
   GtkWidget *curve_pivot_x_shift_slider;
   GtkWidget *curve_pivot_y_linear_slider;
+
 } dt_iop_agx_gui_data_t;
 
 typedef struct curve_and_look_params_t
@@ -218,6 +221,29 @@ const mat3f AgXInsetMatrixInverse = { { { 1.1974410768877f, -0.14426151269800f, 
                                         { -0.19647462632135f, 1.3540951314697f, -0.15762050514838f },
                                         { -0.14655741710660f, -0.10828405878847f, 1.2548414758951f } } };
 
+static float _luminance(const dt_aligned_pixel_t pixel, const dt_iop_order_iccprofile_info_t *const profile)
+{
+  float lum = (profile) ? dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
+                                                          profile->unbounded_coeffs_in, profile->lutsize,
+                                                          profile->nonlinearlut)
+                      : dt_camera_rgb_luminance(pixel);
+  if (lum <= _epsilon)
+  {
+    errors++;
+  }
+  return lum;
+}
+
+static float _luminance3(const float3 pixel, const dt_iop_order_iccprofile_info_t *const profile)
+{
+  dt_aligned_pixel_t aligned_pixel;
+  aligned_pixel[0] = pixel.r;
+  aligned_pixel[1] = pixel.g;
+  aligned_pixel[2] = pixel.b;
+  aligned_pixel[3] = 1;
+  return _luminance(aligned_pixel, profile);
+}
+
 static float _line(const float x, const float slope, const float intercept)
 {
   return slope * x + intercept;
@@ -318,7 +344,12 @@ static float _calculate_curve(const float x, const curve_and_look_params_t *curv
       _exponential_curve(x, curve_params->shoulder_scale, curve_params->slope, curve_params->shoulder_power, curve_params->shoulder_transition_x, curve_params->shoulder_transition_y);
   }
 
-  return CLAMP(result, curve_params->target_black, curve_params->target_white);
+  if ((x >= 0.1 && result <= 0.1f) || isnan(result) || isinf(result))
+  {
+    errors++;
+  }
+
+  return CLAMPF(result, curve_params->target_black, curve_params->target_white);
 }
 
 // 'lerp', but take care of the boundary: hue wraps around 1 -> 0
@@ -410,9 +441,9 @@ static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, f
   v.b = (v.b - minEv) / range_in_ev;
 
   // Clamp result to [0, 1] - this is the input domain for the curve
-  v.r = CLAMP(v.r, 0.0f, 1.0f);
-  v.g = CLAMP(v.g, 0.0f, 1.0f);
-  v.b = CLAMP(v.b, 0.0f, 1.0f);
+  v.r = CLAMPF(v.r, 0.0f, 1.0f);
+  v.g = CLAMPF(v.g, 0.0f, 1.0f);
+  v.b = CLAMPF(v.b, 0.0f, 1.0f);
 
   return v;
 }
@@ -429,6 +460,40 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
   return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
 
+static float3 _compensate_low_side(const float3 pixel, const dt_iop_order_iccprofile_info_t *const profile)
+{
+  if(pixel.r >= 0 && pixel.g >= 0 && pixel.b >= 0)
+  {
+    return pixel;
+  }
+
+  float original_luminance = _luminance3(pixel, profile);
+  if (original_luminance < _epsilon)
+  {
+    float3 black_pixel;
+    black_pixel.r = 0;
+    black_pixel.g = 0;
+    black_pixel.b = 0;
+    return black_pixel;
+  }
+
+  const float most_negative_component = fminf(pixel.r, fminf(pixel.g, pixel.b));
+  // offset, so no component remains negative
+  float3 offset_pixel;
+  offset_pixel.r = pixel.r - most_negative_component;
+  offset_pixel.g = pixel.g - most_negative_component;
+  offset_pixel.b = pixel.b - most_negative_component;
+
+  const float offset_luminance = _luminance3(offset_pixel, profile);
+
+  const float luminance_correction = original_luminance / offset_luminance;
+
+  offset_pixel.r *= luminance_correction;
+  offset_pixel.g *= luminance_correction;
+  offset_pixel.b *= luminance_correction;
+
+  return offset_pixel;
+}
 
 // Helper to calculate curve parameters based on module params
 static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
@@ -469,7 +534,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   }
 
   params.pivot_x = pivot_x;
-  params.pivot_y = powf(CLAMP(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_y, user_params->curve_target_display_white_y),
+  params.pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_y, user_params->curve_target_display_white_y),
     1.0f / params.curve_gamma
   );
   printf("pivot(%f, %f) at gamma = %f\n", pivot_x, params.pivot_y, params.curve_gamma);
@@ -559,6 +624,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   //{
   //  errors++; // printf("shoulder_scale is NaN\n");
   //}
+  printf("================== end ==================\n");
 
   return params;
 }
@@ -566,6 +632,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
 
 static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * params)
 {
+
   // Apply Inset Matrix
   rgb = _mat3f_mul_float3(AgXInsetMatrix, rgb);
 
@@ -615,18 +682,11 @@ static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * para
   out = _mat3f_mul_float3(AgXInsetMatrixInverse, out);
 
   // Clamp final output to display range [0, 1]
-  out.r = CLAMP(out.r, 0.0f, 1.0f);
-  out.g = CLAMP(out.g, 0.0f, 1.0f);
-  out.b = CLAMP(out.b, 0.0f, 1.0f);
+  out.r = CLAMPF(out.r, 0.0f, 1.0f);
+  out.g = CLAMPF(out.g, 0.0f, 1.0f);
+  out.b = CLAMPF(out.b, 0.0f, 1.0f);
 
   return out;
-}
-
-// Get pixel norm approximating Y - later maybe compute Y properly using the working space
-DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
-static inline float _agx_get_pixel_norm_Ylike_rgb(const dt_aligned_pixel_t pixel)
-{
-  return fmaxf(0.0f, pixel[0]) * 0.25 + fmaxf(0.0f, pixel[1]) * 0.7 + fmaxf(0.0f, pixel[2]) * 0.05;
 }
 
 // Get pixel norm using max RGB method (similar to filmic's choice for black/white)
@@ -651,7 +711,7 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
   const float black_norm = _agx_get_pixel_norm_min_rgb(self->picked_color_min);
-  p->range_black_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+  p->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   ++darktable.gui->reset;
   dt_bauhaus_slider_set(g->range_black_slider, p->range_black_relative_exposure);
@@ -669,7 +729,7 @@ static void apply_auto_white_exposure(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
   const float white_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_max);
-  p->range_white_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+  p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
   dt_bauhaus_slider_set(g->range_white_slider, p->range_white_relative_exposure);
@@ -688,11 +748,11 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
 
   // Black point
   const float black_norm = _agx_get_pixel_norm_min_rgb(self->picked_color_min);
-  p->range_black_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+  p->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   // White point
   const float white_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_max);
-  p->range_white_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+  p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
   dt_bauhaus_slider_set(g->range_black_slider, p->range_black_relative_exposure);
@@ -704,21 +764,21 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
 }
 
 // Apply logic for pivot x picker
-static void apply_auto_pivot_x(dt_iop_module_t *self)
+static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_info_t *profile)
 {
   if(darktable.gui->reset) return;
   dt_iop_agx_user_params_t *p = self->params;
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
   // Calculate norm and EV of the picked color
-  const float norm = _agx_get_pixel_norm_Ylike_rgb(self->picked_color);
+  const float norm = _luminance(self->picked_color, profile);
   const float picked_ev = log2f(fmaxf(_epsilon, norm) / 0.18f);
 
   // Calculate the target pivot_x based on the picked EV and the current EV range
   const float min_ev = p->range_black_relative_exposure;
   const float max_ev = p->range_white_relative_exposure;
   const float range_in_ev = fmaxf(_epsilon, max_ev - min_ev);
-  const float target_pivot_x = CLAMP((picked_ev - min_ev) / range_in_ev, 0.0f, 1.0f);
+  const float target_pivot_x = CLAMPF((picked_ev - min_ev) / range_in_ev, 0.0f, 1.0f);
 
   // Calculate the required pivot_x_shift to achieve the target_pivot_x
   const float base_pivot_x = fabsf(min_ev / range_in_ev); // Pivot representing 0 EV (mid-gray)
@@ -748,7 +808,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self)
   }
 
   // Clamp and set the parameter
-  p->curve_pivot_x_shift = CLAMP(s, -1.0f, 1.0f);
+  p->curve_pivot_x_shift = CLAMPF(s, -1.0f, 1.0f);
 
   // Update the slider visually
   ++darktable.gui->reset;
@@ -780,6 +840,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 {
   const dt_iop_agx_user_params_t *p = piece->data;
   const size_t ch = piece->colors;
+  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+  const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
 
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out)) return;
 
@@ -811,13 +873,97 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       rgb.g = in[1];
       rgb.b = in[2];
 
-      const int debug = i == 0 && j == 0;
+      // float in_r = in[0];
+      // float in_g = in[1];
+      // float in_b = in[2];
+
+      if (p->compensate_low_end)
+      {
+        rgb = _compensate_low_side(rgb, work_profile);
+      }
+      // float compensated_in_r = rgb.r;
+      // float compensated_in_g = rgb.g;
+      // float compensated_in_b = rgb.b;
 
       const float3 agx_rgb = _agx_tone_mapping(rgb, &curve_params);
 
-      out[0] = agx_rgb.r;
-      out[1] = agx_rgb.g;
-      out[2] = agx_rgb.b;
+      dt_aligned_pixel_t rgb_pixel;
+
+      // float agx_r = rgb_pixel[0];
+      // float agx_g = rgb_pixel[1];
+      // float agx_b = rgb_pixel[2];
+
+      rgb_pixel[0] = agx_rgb.r;
+      rgb_pixel[1] = agx_rgb.g;
+      rgb_pixel[2] = agx_rgb.b;
+      rgb_pixel[3] = in[3];
+
+      if (p->compensate_low_end)
+      {
+        dt_aligned_pixel_t xyz_pixel;
+
+        dt_ioppr_rgb_matrix_to_xyz(rgb_pixel, xyz_pixel, work_profile->matrix_in_transposed, work_profile->lut_in,
+                               work_profile->unbounded_coeffs_in, work_profile->lutsize,
+                               work_profile->nonlinearlut);
+        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb_pixel, output_profile->matrix_out_transposed,
+                                 output_profile->lut_out,
+                                 output_profile->unbounded_coeffs_out,
+                                 output_profile->lutsize,
+                                 output_profile->nonlinearlut);
+
+        // float agx_outspace_r = rgb_pixel[0];
+        // float agx_outspace_g = rgb_pixel[1];
+        // float agx_outspace_b = rgb_pixel[2];
+
+        // rgb_pixel now has the components in the output profile
+        rgb.r = rgb_pixel[0];
+        rgb.g = rgb_pixel[1];
+        rgb.b = rgb_pixel[2];
+
+        // protect the output gamut
+        rgb = _compensate_low_side(rgb, output_profile);
+
+        // float compensated_agx_outspace_r = rgb_pixel[0];
+        // float compensated_agx_outspace_g = rgb_pixel[1];
+        // float compensated_agx_outspace_b = rgb_pixel[2];
+
+        rgb_pixel[0] = rgb.r;
+        rgb_pixel[1] = rgb.g;
+        rgb_pixel[2] = rgb.b;
+
+        // bring back to working space
+        dt_ioppr_rgb_matrix_to_xyz(rgb_pixel, xyz_pixel, output_profile->matrix_in_transposed, output_profile->lut_in,
+                               output_profile->unbounded_coeffs_in, output_profile->lutsize,
+                               output_profile->nonlinearlut);
+        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb_pixel, work_profile->matrix_out_transposed,
+                              work_profile->lut_out,
+                              work_profile->unbounded_coeffs_out,
+                              work_profile->lutsize,
+                              work_profile->nonlinearlut);
+
+        // float compensated_agx_workspace_r = rgb_pixel[0];
+        // float compensated_agx_workspace_g = rgb_pixel[1];
+        // float compensated_agx_workspace_b = rgb_pixel[2];
+
+        // printf("in: [%f, %f, %f]"
+        //   " -> compensated in: [%f, %f, %f]"
+        //   " -> agx: [%f, %f, %f]"
+        //   "-> agx_out: [%f, %f, %f]"
+        //   "-> compensated_agx_out: [%f, %f, %f]"
+        //   "-> compensated_agx_work: [%f, %f, %f]\n"
+        //   , in_r, in_g, in_b,
+        //   compensated_in_r, compensated_in_g, compensated_in_b,
+        //   agx_r, agx_g, agx_b,
+        //   agx_outspace_r, agx_outspace_g, agx_outspace_b,
+        //   compensated_agx_outspace_r, compensated_agx_outspace_g, compensated_agx_outspace_b,
+        //   compensated_agx_workspace_r, compensated_agx_workspace_g, compensated_agx_workspace_b
+        //   );
+      }
+
+      out[0] = rgb_pixel[0];
+      out[1] = rgb_pixel[1];
+      out[2] = rgb_pixel[2];
+
 
       if(ch == 4)
       {
@@ -826,10 +972,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
       in += ch;
       out += ch;
-      if(debug)
-      {
-        printf("================== end ==================\n");
-      }
     }
   }
 }
@@ -1181,6 +1323,8 @@ static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
+
+  dt_bauhaus_toggle_from_params(self, "compensate_low_end");
 }
 
 void gui_init(dt_iop_module_t *self)
@@ -1244,6 +1388,8 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_pivot_x_shift = 0.0;
   p.curve_pivot_y_linear = 0.18;
 
+  p.compensate_low_end = TRUE;
+
   // Base preset
   p.look_power = 1.0f;
   p.look_offset = 0.0f;
@@ -1273,7 +1419,7 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
   if(picker == g->range_black_picker) apply_auto_black_exposure(self);
   else if(picker == g->range_white_picker) apply_auto_white_exposure(self);
   else if(picker == g->auto_tune_picker) apply_auto_tune_exposure(self);
-  else if(picker == g->pivot_x_picker) apply_auto_pivot_x(self);
+  else if(picker == g->pivot_x_picker) apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
 }
 
 /*
