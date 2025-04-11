@@ -318,7 +318,7 @@ static float _calculate_curve(const float x, const curve_and_look_params_t *curv
       _exponential_curve(x, curve_params->shoulder_scale, curve_params->slope, curve_params->shoulder_power, curve_params->shoulder_transition_x, curve_params->shoulder_transition_y);
   }
 
-  return fmaxf(curve_params->target_black, fminf(curve_params->target_white, result));
+  return CLAMP(result, curve_params->target_black, curve_params->target_white);
 }
 
 // 'lerp', but take care of the boundary: hue wraps around 1 -> 0
@@ -410,9 +410,9 @@ static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, f
   v.b = (v.b - minEv) / range_in_ev;
 
   // Clamp result to [0, 1] - this is the input domain for the curve
-  v.r = fminf(fmaxf(v.r, 0.0f), 1.0f);
-  v.g = fminf(fmaxf(v.g, 0.0f), 1.0f);
-  v.b = fminf(fmaxf(v.b, 0.0f), 1.0f);
+  v.r = CLAMP(v.r, 0.0f, 1.0f);
+  v.g = CLAMP(v.g, 0.0f, 1.0f);
+  v.b = CLAMP(v.b, 0.0f, 1.0f);
 
   return v;
 }
@@ -615,9 +615,9 @@ static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * para
   out = _mat3f_mul_float3(AgXInsetMatrixInverse, out);
 
   // Clamp final output to display range [0, 1]
-  out.r = fmaxf(0.0f, fminf(1.0f, out.r));
-  out.g = fmaxf(0.0f, fminf(1.0f, out.g));
-  out.b = fmaxf(0.0f, fminf(1.0f, out.b));
+  out.r = CLAMP(out.r, 0.0f, 1.0f);
+  out.g = CLAMP(out.g, 0.0f, 1.0f);
+  out.b = CLAMP(out.b, 0.0f, 1.0f);
 
   return out;
 }
@@ -629,6 +629,13 @@ static inline float _agx_get_pixel_norm_max_rgb(const dt_aligned_pixel_t pixel)
   return fmaxf(fmaxf(pixel[0], pixel[1]), pixel[2]);
 }
 
+// Get pixel norm using min RGB method (for black)
+DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
+static inline float _agx_get_pixel_norm_min_rgb(const dt_aligned_pixel_t pixel)
+{
+  return fminf(fminf(pixel[0], pixel[1]), pixel[2]);
+}
+
 // Apply logic for black point picker
 static void apply_auto_black_exposure(dt_iop_module_t *self)
 {
@@ -636,7 +643,7 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
   dt_iop_agx_user_params_t *p = self->params;
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
-  const float black_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_min);
+  const float black_norm = _agx_get_pixel_norm_min_rgb(self->picked_color_min);
   p->range_black_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   ++darktable.gui->reset;
@@ -673,7 +680,7 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
   // Black point
-  const float black_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_min);
+  const float black_norm = _agx_get_pixel_norm_min_rgb(self->picked_color_min);
   p->range_black_relative_exposure = CLAMP(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   // White point
