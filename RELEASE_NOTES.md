@@ -77,7 +77,8 @@ changes (where available).
 - Allow reading of files in Cineon format (developed by Kodak) and DPX
   format (developed by SMPTE) with .cin and .dpx file extensions.
 
-- Removed prefer performance over quality preference setting.
+- The "prefer performance over quality" preference setting has been
+  removed.
 
 - A workaround for old broken AMD opencl drivers that has been in
   place for 12 years has been disabled by default. Hopefully more
@@ -124,6 +125,15 @@ changes (where available).
   entered name matches the lensfun name, which can be seen in the lens
   selection drop down list.
 
+- Raster masks got internal improvements and now support the same refinement
+  tools as all other masks including details threshold, feathering guide and
+  radius, blurring radius and contrast.
+
+- The highlights module offers a raster mask with information about level above
+  clip level.
+
+- Changing orientation (via the flip module) respects changes done in crop module.
+
 ## Bug Fixes
 
 - Fixed sidecar writing if quitting from darkroom.
@@ -138,6 +148,9 @@ changes (where available).
 
 - Fixed a bug that allowed NULL pointer dereference in tethering mode
   under certain conditions, which resulted in a crash.
+
+- Fixed darktable shutdown code so pending backgriund jobs are properly finished
+  and give a control log if there is pending work.
 
 ## Lua
 
