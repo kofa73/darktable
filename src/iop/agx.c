@@ -70,9 +70,6 @@ typedef struct dt_iop_agx_gui_data_t
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
-  // Slider widgets for pickers
-  GtkWidget *range_black_slider;
-  GtkWidget *range_white_slider;
   float line_height;
   float sign_width;
   float zero_width;
@@ -89,6 +86,13 @@ typedef struct dt_iop_agx_gui_data_t
   GtkWidget *range_black_picker;
   GtkWidget *range_white_picker;
   GtkWidget *auto_tune_picker;
+  GtkWidget *pivot_x_picker;
+
+  // Slider widgets for pickers
+  GtkWidget *range_black_slider;
+  GtkWidget *range_white_slider;
+  GtkWidget *curve_pivot_x_shift_slider;
+  GtkWidget *curve_pivot_y_linear_slider;
 } dt_iop_agx_gui_data_t;
 
 typedef struct curve_and_look_params_t
@@ -685,6 +689,64 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
+// Apply logic for pivot x picker
+static void apply_auto_pivot_x(dt_iop_module_t *self)
+{
+  if(darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *p = self->params;
+  dt_iop_agx_gui_data_t *g = self->gui_data;
+
+  // Calculate norm and EV of the picked color
+  const float norm = _agx_get_pixel_norm_max_rgb(self->picked_color);
+  const float picked_ev = log2f(fmaxf(_epsilon, norm) / 0.18f);
+
+  // Calculate the target pivot_x based on the picked EV and the current EV range
+  const float min_ev = p->range_black_relative_exposure;
+  const float max_ev = p->range_white_relative_exposure;
+  const float range_in_ev = fmaxf(_epsilon, max_ev - min_ev);
+  const float target_pivot_x = CLAMP((picked_ev - min_ev) / range_in_ev, 0.0f, 1.0f);
+
+  // Calculate the required pivot_x_shift to achieve the target_pivot_x
+  const float base_pivot_x = fabsf(min_ev / range_in_ev); // Pivot representing 0 EV (mid-gray)
+  float s = 0.0f; // curve_pivot_x_shift
+
+  curve_and_look_params_t curve_and_look_params = _calculate_curve_params(p);
+  // see where the target_pivot is currently mapped
+  float target_y = _calculate_curve(target_pivot_x, &curve_and_look_params);
+  // try to avoid changing the brightness of the pivot
+  float target_y_linearised = powf(target_y, p->curve_gamma);
+  p->curve_pivot_y_linear = target_y_linearised;
+
+  if(fabsf(target_pivot_x - base_pivot_x) < _epsilon)
+  {
+    s = 0.0f;
+  }
+  else if(target_pivot_x < base_pivot_x)
+  {
+    // Solve target_pivot_x = (1 + s) * base_pivot_x for s
+    s = (base_pivot_x > _epsilon) ? (target_pivot_x / base_pivot_x) - 1.0f : -1.0f;
+  }
+  else // target_pivot_x > base_pivot_x
+  {
+    // Solve target_pivot_x = base_pivot_x * (1 - s) + s for s
+    const float denominator = 1.0f - base_pivot_x;
+    s = (denominator > _epsilon) ? (target_pivot_x - base_pivot_x) / denominator : 1.0f;
+  }
+
+  // Clamp and set the parameter
+  p->curve_pivot_x_shift = CLAMP(s, -1.0f, 1.0f);
+
+  // Update the slider visually
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->curve_pivot_x_shift_slider, p->curve_pivot_x_shift);
+  dt_bauhaus_slider_set(g->curve_pivot_y_linear_slider, p->curve_pivot_y_linear);
+  --darktable.gui->reset;
+
+  // Redraw and add history
+  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
 void _print_curve(curve_and_look_params_t *curve_params)
 {
   const int steps = 100;
@@ -1033,7 +1095,6 @@ static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   gui_data->range_black_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
   gtk_widget_set_tooltip_text(slider, _("minimum relative exposure (black point)"));
 
-
   // Create white point slider and associate picker
   gui_data->range_white_slider = dt_bauhaus_slider_from_params(self, "range_white_relative_exposure");
   slider = gui_data->range_white_slider;
@@ -1060,10 +1121,15 @@ static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   slider = dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift");
   dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("Pivot x shift"));
+  gui_data->curve_pivot_x_shift_slider = slider; // Store the slider widget
+  gui_data->pivot_x_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
+  gtk_widget_set_tooltip_text(gui_data->pivot_x_picker, _("pick image neutral point to map to pivot x"));
+
 
   slider = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
+  gui_data->curve_pivot_y_linear_slider = slider;
 
   slider = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
@@ -1191,6 +1257,7 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
   if(picker == g->range_black_picker) apply_auto_black_exposure(self);
   else if(picker == g->range_white_picker) apply_auto_white_exposure(self);
   else if(picker == g->auto_tune_picker) apply_auto_tune_exposure(self);
+  else if(picker == g->pivot_x_picker) apply_auto_pivot_x(self);
 }
 
 /*
