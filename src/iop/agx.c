@@ -62,6 +62,7 @@ typedef struct dt_iop_agx_user_params_t
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
 
   gboolean compensate_low_end;     // $MIN: FALSE $MAX: TRUE $DEFAULT: FALSE $DESCRIPTION: "Try to compensate negative values"
+  float highlight_compression_factor; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "Highlight compression factor"
 } dt_iop_agx_user_params_t;
 
 
@@ -483,6 +484,41 @@ static void _compensate_low_side(dt_aligned_pixel_t pixel_in_out, const dt_iop_o
   }
 }
 
+static void _compensate_high_side(dt_aligned_pixel_t rgb_in_out, const dt_iop_order_iccprofile_info_t *const profile, const float compensation_factor)
+{
+  const float upper_bound = 1.0f;
+  float luminance = _luminance(rgb_in_out, profile);
+
+  // zero-luminance "colour" part of input signal
+  dt_aligned_pixel_t rgb_chrominance;
+
+  for_three_channels(k, aligned(rgb_chrominance, rgb_in_out : 16))
+  {
+    rgb_chrominance[k] = rgb_in_out[k] - luminance;
+  }
+
+  // Chrominance is max(rgb) - luminance
+  const float chrominance = fmaxf(rgb_chrominance[0], fmaxf(rgb_chrominance[1], rgb_chrominance[2]));
+
+  const float relative_luminance = fmaxf(rgb_in_out[0], fmaxf(rgb_in_out[1], rgb_in_out[2]));
+
+  // Coefficient by how much the chrominance deviates from
+  // the line relative_luminance = relative_chrominance
+  const float chrominance_coefficient = (relative_luminance > upper_bound)
+                                      ? powf(upper_bound / relative_luminance, compensation_factor)
+                                      : 1.0f;
+
+  // Adjust chrominance by the calculated coefficient and calculate the max RGB that would result from this.
+  const float new_max_rgb = luminance + chrominance_coefficient * chrominance;
+
+  // Calculate scaling of the RGB triplet that must be done to bring the greatest component to upper_bound.
+  const float scale = (new_max_rgb > upper_bound) ? (upper_bound / new_max_rgb) : 1.0f;
+
+  rgb_in_out[0] = scale * (luminance + rgb_chrominance[0] * chrominance_coefficient);
+  rgb_in_out[1] = scale * (luminance + rgb_chrominance[1] * chrominance_coefficient);
+  rgb_in_out[2] = scale * (luminance + rgb_chrominance[2] * chrominance_coefficient);
+}
+
 static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
 {
   curve_and_look_params_t params;
@@ -829,7 +865,10 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
 
-  if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out)) return;
+  if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out))
+  {
+    return;
+  }
 
   printf("================== start ==================\n");
   printf("range_black_relative_exposure = %f\n", p->range_black_relative_exposure);
@@ -844,7 +883,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("curve_target_display_white_y = %f\n", p->curve_target_display_white_y);
 
   // Calculate curve parameters once
-  curve_and_look_params_t curve_params = _calculate_curve_params(p);
+  const curve_and_look_params_t curve_params = _calculate_curve_params(p);
 
   DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
@@ -856,27 +895,10 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     {
       dt_aligned_pixel_t rgb = { in[0], in[1], in[2], in[3] };
 
-      // float in_r = in[0];
-      // float in_g = in[1];
-      // float in_b = in[2];
-
-      /*
-      if (p->compensate_low_end)
-      {
-        rgb = _compensate_low_side(rgb, work_profile);
-      }
-      */
-      // float compensated_in_r = rgb.r;
-      // float compensated_in_g = rgb.g;
-      // float compensated_in_b = rgb.b;
-
       _agx_tone_mapping(rgb, &curve_params, p->compensate_low_end); // Operates in-place (passes rgb as input and output)
 
-      // float agx_r = rgb_pixel[0];
-      // float agx_g = rgb_pixel[1];
-      // float agx_b = rgb_pixel[2];
-
-      if (p->compensate_low_end)
+      gboolean compensate_high_side = p->highlight_compression_factor >= 0.001;
+      if (p->compensate_low_end || compensate_high_side)
       {
         dt_aligned_pixel_t xyz_pixel;
 
@@ -889,17 +911,17 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
                                  output_profile->lutsize,
                                  output_profile->nonlinearlut);
 
-        // float agx_outspace_r = rgb_pixel[0];
-        // float agx_outspace_g = rgb_pixel[1];
-        // float agx_outspace_b = rgb_pixel[2];
-        // rgb now has the components in the output profile
+        // now the RGB pixel holds output-profile values
 
-        // protect the output gamut
-        _compensate_low_side(rgb, output_profile);
+        if (p->compensate_low_end)
+        {
+          _compensate_low_side(rgb, output_profile);
+        }
 
-        // float compensated_agx_outspace_r = rgb_pixel[0];
-        // float compensated_agx_outspace_g = rgb_pixel[1];
-        // float compensated_agx_outspace_b = rgb_pixel[2];
+        if (compensate_high_side)
+        {
+          _compensate_high_side(rgb, output_profile, p->highlight_compression_factor);
+        }
 
         // bring back to working space
         // Convert compensated output space pixel back to XYZ
@@ -911,24 +933,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
                               work_profile->unbounded_coeffs_out,
                               work_profile->lutsize,
                               work_profile->nonlinearlut);
-
-        // float compensated_agx_workspace_r = rgb_pixel[0];
-        // float compensated_agx_workspace_g = rgb_pixel[1];
-        // float compensated_agx_workspace_b = rgb_pixel[2];
-
-        // printf("in: [%f, %f, %f]"
-        //   " -> compensated in: [%f, %f, %f]"
-        //   " -> agx: [%f, %f, %f]"
-        //   "-> agx_out: [%f, %f, %f]"
-        //   "-> compensated_agx_out: [%f, %f, %f]"
-        //   "-> compensated_agx_work: [%f, %f, %f]\n"
-        //   , in_r, in_g, in_b,
-        //   compensated_in_r, compensated_in_g, compensated_in_b,
-        //   agx_r, agx_g, agx_b,
-        //   agx_outspace_r, agx_outspace_g, agx_outspace_b,
-        //   compensated_agx_outspace_r, compensated_agx_outspace_g, compensated_agx_outspace_b,
-        //   compensated_agx_workspace_r, compensated_agx_workspace_g, compensated_agx_workspace_b
-        //   );
       }
 
       // Copy final result (which is in rgb) to output buffer
@@ -1292,6 +1296,11 @@ static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
 
   dt_bauhaus_toggle_from_params(self, "compensate_low_end");
+
+  // High end compensation controls
+  slider = dt_bauhaus_slider_from_params(self, "highlight_compression_factor");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("highlight compression strength"));
 }
 
 void gui_init(dt_iop_module_t *self)
@@ -1356,6 +1365,7 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_pivot_y_linear = 0.18;
 
   p.compensate_low_end = FALSE;
+  p.highlight_compression_factor = 0.0f;
 
   // Base preset
   p.look_power = 1.0f;
