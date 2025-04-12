@@ -782,10 +782,15 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_in
 
   // Calculate the required pivot_x_shift to achieve the target_pivot_x
   const float base_pivot_x = fabsf(min_ev / range_in_ev); // Pivot representing 0 EV (mid-gray)
-  float s = 0.0f; // curve_pivot_x_shift
 
-  curve_and_look_params_t curve_and_look_params = _calculate_curve_params(p);
-  // see where the target_pivot is currently mapped
+  float shift; // curve_pivot_x_shift
+
+  dt_iop_agx_user_params_t params_with_mid_gray = *p;
+  params_with_mid_gray.curve_pivot_y_linear = 0.18;
+  params_with_mid_gray.curve_pivot_x_shift = 0;
+
+  curve_and_look_params_t curve_and_look_params = _calculate_curve_params(&params_with_mid_gray);
+  // see where the target_pivot would be mapped with defaults of mid-gray to mid-gray mapped
   float target_y = _calculate_curve(target_pivot_x, &curve_and_look_params);
   // try to avoid changing the brightness of the pivot
   float target_y_linearised = powf(target_y, p->curve_gamma);
@@ -793,22 +798,22 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_in
 
   if(fabsf(target_pivot_x - base_pivot_x) < _epsilon)
   {
-    s = 0.0f;
+    shift = 0.0f;
   }
-  else if(target_pivot_x < base_pivot_x)
+  else if(base_pivot_x > target_pivot_x)
   {
     // Solve target_pivot_x = (1 + s) * base_pivot_x for s
-    s = (base_pivot_x > _epsilon) ? (target_pivot_x / base_pivot_x) - 1.0f : -1.0f;
+    shift = (base_pivot_x > _epsilon) ? (target_pivot_x / base_pivot_x) - 1.0f : -1.0f;
   }
   else // target_pivot_x > base_pivot_x
   {
     // Solve target_pivot_x = base_pivot_x * (1 - s) + s for s
     const float denominator = 1.0f - base_pivot_x;
-    s = (denominator > _epsilon) ? (target_pivot_x - base_pivot_x) / denominator : 1.0f;
+    shift = (denominator > _epsilon) ? (target_pivot_x - base_pivot_x) / denominator : 1.0f;
   }
 
   // Clamp and set the parameter
-  p->curve_pivot_x_shift = CLAMPF(s, -1.0f, 1.0f);
+  p->curve_pivot_x_shift = CLAMPF(shift, -1.0f, 1.0f);
 
   // Update the slider visually
   ++darktable.gui->reset;
@@ -877,10 +882,12 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       // float in_g = in[1];
       // float in_b = in[2];
 
+      /*
       if (p->compensate_low_end)
       {
         rgb = _compensate_low_side(rgb, work_profile);
       }
+      */
       // float compensated_in_r = rgb.r;
       // float compensated_in_g = rgb.g;
       // float compensated_in_b = rgb.b;
