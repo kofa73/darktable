@@ -146,23 +146,17 @@ typedef struct curve_and_look_params_t
 
 typedef struct
 {
-  float r, g, b;
-} float3;
-
-typedef struct
-{
   float m[3][3];
 } mat3f;
 
 
 // Helper function: matrix multiplication
-static float3 _mat3f_mul_float3(const mat3f m, const float3 v)
+static inline void _mat3f_mul_aligned_pixel(dt_aligned_pixel_t result, const mat3f m, const dt_aligned_pixel_t v)
 {
-  float3 result;
-  result.r = m.m[0][0] * v.r + m.m[0][1] * v.g + m.m[0][2] * v.b;
-  result.g = m.m[1][0] * v.r + m.m[1][1] * v.g + m.m[1][2] * v.b;
-  result.b = m.m[2][0] * v.r + m.m[2][1] * v.g + m.m[2][2] * v.b;
-  return result;
+  result[0] = m.m[0][0] * v[0] + m.m[0][1] * v[1] + m.m[0][2] * v[2];
+  result[1] = m.m[1][0] * v[0] + m.m[1][1] * v[1] + m.m[1][2] * v[2];
+  result[2] = m.m[2][0] * v[0] + m.m[2][1] * v[1] + m.m[2][2] * v[2];
+  result[3] = v[3]; // Preserve alpha
 }
 
 // Translatable name
@@ -232,16 +226,6 @@ static float _luminance(const dt_aligned_pixel_t pixel, const dt_iop_order_iccpr
     errors++;
   }
   return lum;
-}
-
-static float _luminance3(const float3 pixel, const dt_iop_order_iccprofile_info_t *const profile)
-{
-  dt_aligned_pixel_t aligned_pixel;
-  aligned_pixel[0] = pixel.r;
-  aligned_pixel[1] = pixel.g;
-  aligned_pixel[2] = pixel.b;
-  aligned_pixel[3] = 1;
-  return _luminance(aligned_pixel, profile);
 }
 
 static float _line(const float x, const float slope, const float intercept)
@@ -323,7 +307,7 @@ static float _fallback_shoulder(const float x, const curve_and_look_params_t *cu
 }
 
 // the commented values (t_tx, etc) are references to https://www.desmos.com/calculator/yrysofmx8h
-static float _calculate_curve(const float x, const curve_and_look_params_t *curve_params)
+static float _apply_curve(const float x, const curve_and_look_params_t *curve_params)
 {
   float result;
 
@@ -394,58 +378,60 @@ static float apply_slope_offset(float x, float slope, float offset)
 }
 
 // https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
-static float3 _agxLook(float3 val, const curve_and_look_params_t *params)
+DT_OMP_DECLARE_SIMD(aligned(pixel_in_out: 16))
+static inline void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_params_t *params)
 {
-  // Default
+  // Default parameters from the curve_and_look_params_t struct
   const float slope = params->look_slope;
   const float offset = params->look_offset;
+  const float power = params->look_power;
   const float sat = params->look_saturation;
 
-  // ASC CDL
-  const float slope_and_offset_r = apply_slope_offset(val.r, slope, offset);
-  const float slope_and_offset_g = apply_slope_offset(val.g, slope, offset);
-  const float slope_and_offset_b = apply_slope_offset(val.b, slope, offset);
+  // Apply ASC CDL (Slope, Offset, Power) per channel
+  for_three_channels(k, aligned(pixel_in_out: 16))
+  {
+    // Apply slope and offset
+    const float slope_and_offset_val = apply_slope_offset(pixel_in_out[k], slope, offset);
+    // Apply power
+    pixel_in_out[k] = slope_and_offset_val > 0.0f ? powf(slope_and_offset_val, power) : slope_and_offset_val;
+  }
 
-  const float out_r = slope_and_offset_r > 0 ? powf(slope_and_offset_r, params->look_power) : slope_and_offset_r;
-  const float out_g = slope_and_offset_r > 0 ? powf(slope_and_offset_g, params->look_power) : slope_and_offset_g;
-  const float out_b = slope_and_offset_r > 0 ? powf(slope_and_offset_b, params->look_power) : slope_and_offset_b;
+  // FIXME: Using Rec 2020 Y coefficients (we use insetting, so this is probably incorrect)
+  const float luma = 0.2626983389565561f * pixel_in_out[0] + // R
+                     0.6780087657728164f * pixel_in_out[1] + // G
+                     0.05929289527062728f * pixel_in_out[2];  // B
 
-  // Using Rec 2020 Y coefficients (we use insetting, so this is probably incorrect)
-  const float luma = 0.2626983389565561f * out_r + 0.6780087657728164f * out_g + 0.05929289527062728f * out_b;
-
-  float3 result;
-  result.r = luma + sat * (out_r - luma);
-  result.g = luma + sat * (out_g - luma);
-  result.b = luma + sat * (out_b - luma);
-
-  return result;
+  // saturation
+  for_three_channels(k, aligned(pixel_in_out: 16))
+  {
+    pixel_in_out[k] = luma + sat * (pixel_in_out[k] - luma);
+  }
 }
 
-static float3 _apply_log_encoding(dt_aligned_pixel_t pixel, float range_in_ev, float minEv)
+DT_OMP_DECLARE_SIMD(aligned(result, pixel: 16))
+static inline void _apply_log_encoding(dt_aligned_pixel_t result, const dt_aligned_pixel_t pixel, float range_in_ev, float minEv)
 {
   // Assume input is linear Rec2020 relative to 0.18 mid gray
   // Ensure all values are > 0 before log
-  float3 v = { fmaxf(_epsilon, pixel[0] / 0.18f),
-               fmaxf(_epsilon, pixel[1] / 0.18f),
-               fmaxf(_epsilon, pixel[2] / 0.18f)
+  dt_aligned_pixel_t v = {
+    fmaxf(_epsilon, pixel[0] / 0.18f),
+    fmaxf(_epsilon, pixel[1] / 0.18f),
+    fmaxf(_epsilon, pixel[2] / 0.18f),
+    pixel[3] // Carry alpha if needed, though it's not used in log
   };
 
-  // Log2 encoding
-  v.r = log2f(v.r);
-  v.g = log2f(v.g);
-  v.b = log2f(v.b);
+  for_three_channels(k, aligned(v : 16))
+  {
+    // Log2 encoding
+    v[k] = log2f(v[k]);
+    // normalise to [0, 1] based on minEv and range_in_ev
+    v[k] = (v[k] - minEv) / range_in_ev;
+    // Clamp result to [0, 1] - this is the input domain for the curve
+    v[k] = CLAMPF(v[k], 0.0f, 1.0f);
+  }
+  v[3] = pixel[3]; // Ensure alpha is preserved if it was carried
 
-  // normalise to [0, 1] based on minEv and range_in_ev
-  v.r = (v.r - minEv) / range_in_ev;
-  v.g = (v.g - minEv) / range_in_ev;
-  v.b = (v.b - minEv) / range_in_ev;
-
-  // Clamp result to [0, 1] - this is the input domain for the curve
-  v.r = CLAMPF(v.r, 0.0f, 1.0f);
-  v.g = CLAMPF(v.g, 0.0f, 1.0f);
-  v.b = CLAMPF(v.b, 0.0f, 1.0f);
-
-  return v;
+  for_four_channels(k, aligned(result, v: 16)) result[k] = v[k];
 }
 
 
@@ -460,42 +446,43 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
   return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
 
-static float3 _compensate_low_side(const float3 pixel, const dt_iop_order_iccprofile_info_t *const profile)
+static void _compensate_low_side(dt_aligned_pixel_t pixel_in_out, const dt_iop_order_iccprofile_info_t *const profile)
 {
-  if(pixel.r >= 0 && pixel.g >= 0 && pixel.b >= 0)
+  if(pixel_in_out[0] >= 0.0f && pixel_in_out[1] >= 0.0f && pixel_in_out[2] >= 0.0f)
   {
-    return pixel;
+    // No compensation needed
+    return;
   }
 
-  float original_luminance = _luminance3(pixel, profile);
+  float original_luminance = _luminance(pixel_in_out, profile);
   if (original_luminance < _epsilon)
   {
-    float3 black_pixel;
-    black_pixel.r = 0;
-    black_pixel.g = 0;
-    black_pixel.b = 0;
-    return black_pixel;
+    // Set result to black
+    for_three_channels(k, aligned(pixel_in_out: 16))
+    {
+      pixel_in_out[k] = 0.0f;
+    }
+    return;
   }
 
-  const float most_negative_component = fminf(pixel.r, fminf(pixel.g, pixel.b));
-  // offset, so no component remains negative
-  float3 offset_pixel;
-  offset_pixel.r = pixel.r - most_negative_component;
-  offset_pixel.g = pixel.g - most_negative_component;
-  offset_pixel.b = pixel.b - most_negative_component;
+  const float most_negative_component = fminf(pixel_in_out[0], fminf(pixel_in_out[1], pixel_in_out[2]));
 
-  const float offset_luminance = _luminance3(offset_pixel, profile);
+  // offset, so no component remains negative
+  for_three_channels(k, aligned(pixel_in_out : 16))
+  {
+    pixel_in_out[k] -= most_negative_component;
+  }
+
+  const float offset_luminance = _luminance(pixel_in_out, profile);
 
   const float luminance_correction = original_luminance / offset_luminance;
 
-  offset_pixel.r *= luminance_correction;
-  offset_pixel.g *= luminance_correction;
-  offset_pixel.b *= luminance_correction;
-
-  return offset_pixel;
+  for_three_channels(k, aligned(pixel_in_out : 16))
+  {
+    pixel_in_out[k] *= luminance_correction;
+  }
 }
 
-// Helper to calculate curve parameters based on module params
 static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
 {
   curve_and_look_params_t params;
@@ -630,40 +617,37 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
 }
 
 
-static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * params)
+static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params, gboolean compensate_low_end)
 {
-
   // Apply Inset Matrix
-  rgb = _mat3f_mul_float3(AgXInsetMatrix, rgb);
-
-  dt_aligned_pixel_t rgb_pixel;
-  rgb_pixel[0] = rgb.r;
-  rgb_pixel[1] = rgb.g;
-  rgb_pixel[2] = rgb.b;
-  rgb_pixel[3] = 0.0f; // Alpha if needed
+  dt_aligned_pixel_t inset_rgb = {0.0f}; // Temp storage
+  _mat3f_mul_aligned_pixel(inset_rgb, AgXInsetMatrix, rgb_in_out);
 
   // record current chromaticity angle
-  dt_aligned_pixel_t hsv_pixel;
-  dt_RGB_2_HSV(rgb_pixel, hsv_pixel);
+  dt_aligned_pixel_t hsv_pixel = {0.0f};
+  dt_RGB_2_HSV(inset_rgb, hsv_pixel);
   const float h_before = hsv_pixel[0];
 
-  float3 log_pixel = _apply_log_encoding(rgb_pixel, params->range_in_ev, params->min_ev);
+  dt_aligned_pixel_t transformed_pixel = {0.0f};
+  _apply_log_encoding(transformed_pixel, inset_rgb, params->range_in_ev, params->min_ev);
 
   // Apply curve using cached parameters
-  log_pixel.r = _calculate_curve(log_pixel.r, params);
-  log_pixel.g = _calculate_curve(log_pixel.g, params);
-  log_pixel.b = _calculate_curve(log_pixel.b, params);
+  for_three_channels(k, aligned(transformed_pixel: 16))
+  {
+    transformed_pixel[k] = _apply_curve(transformed_pixel[k], params);
+  }
 
   // Apply AgX look
-  log_pixel = _agxLook(log_pixel, params);
+  _agxLook(transformed_pixel, params);
 
   // Linearize
-  rgb_pixel[0] = powf(fmaxf(0.0f, log_pixel.r), params->curve_gamma);
-  rgb_pixel[1] = powf(fmaxf(0.0f, log_pixel.g), params->curve_gamma);
-  rgb_pixel[2] = powf(fmaxf(0.0f, log_pixel.b), params->curve_gamma);
+  for_three_channels(k, aligned(transformed_pixel: 16))
+  {
+    transformed_pixel[k] = powf(fmaxf(0.0f, transformed_pixel[k]), params->curve_gamma);
+  }
 
   // record post-curve chroma angle
-  dt_RGB_2_HSV(rgb_pixel, hsv_pixel);
+  dt_RGB_2_HSV(transformed_pixel, hsv_pixel);
 
   float h_after = hsv_pixel[0];
 
@@ -671,22 +655,19 @@ static float3 _agx_tone_mapping(float3 rgb, const curve_and_look_params_t * para
   h_after = _lerp_hue(h_before, h_after, params->look_original_hue_mix_ratio);
 
   hsv_pixel[0] = h_after;
-  dt_HSV_2_RGB(hsv_pixel, rgb_pixel);
-
-  float3 out;
-  out.r = rgb_pixel[0];
-  out.g = rgb_pixel[1];
-  out.b = rgb_pixel[2];
+  dt_HSV_2_RGB(hsv_pixel, transformed_pixel); // Convert back in-place
 
   // Apply Outset Matrix
-  out = _mat3f_mul_float3(AgXInsetMatrixInverse, out);
+  _mat3f_mul_aligned_pixel(rgb_in_out, AgXInsetMatrixInverse, transformed_pixel);
 
-  // Clamp final output to display range [0, 1]
-  out.r = CLAMPF(out.r, 0.0f, 1.0f);
-  out.g = CLAMPF(out.g, 0.0f, 1.0f);
-  out.b = CLAMPF(out.b, 0.0f, 1.0f);
-
-  return out;
+  if (!compensate_low_end)
+  {
+    // Clamp final output to display range [0, 1]
+    for_three_channels(k, aligned(rgb_in_out: 16))
+    {
+      rgb_in_out[k] = CLAMPF(rgb_in_out[k], 0.0f, 1.0f);
+    }
+  }
 }
 
 // Get pixel norm using max RGB method (similar to filmic's choice for black/white)
@@ -791,7 +772,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_in
 
   curve_and_look_params_t curve_and_look_params = _calculate_curve_params(&params_with_mid_gray);
   // see where the target_pivot would be mapped with defaults of mid-gray to mid-gray mapped
-  float target_y = _calculate_curve(target_pivot_x, &curve_and_look_params);
+  float target_y = _apply_curve(target_pivot_x, &curve_and_look_params);
   // try to avoid changing the brightness of the pivot
   float target_y_linearised = powf(target_y, p->curve_gamma);
   p->curve_pivot_y_linear = target_y_linearised;
@@ -833,7 +814,7 @@ void _print_curve(curve_and_look_params_t *curve_params)
   for (int i = 0; i <= steps; i++)
   {
     float x = i / (float)steps;
-    const float y = _calculate_curve(x, curve_params);
+    const float y = _apply_curve(x, curve_params);
     printf("%f\t%f\n", x, y);
   }
   printf("\n");
@@ -873,10 +854,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     for(int i = 0; i < roi_out->width; i++)
     {
-      float3 rgb;
-      rgb.r = in[0];
-      rgb.g = in[1];
-      rgb.b = in[2];
+      dt_aligned_pixel_t rgb = { in[0], in[1], in[2], in[3] };
 
       // float in_r = in[0];
       // float in_g = in[1];
@@ -892,27 +870,20 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       // float compensated_in_g = rgb.g;
       // float compensated_in_b = rgb.b;
 
-      const float3 agx_rgb = _agx_tone_mapping(rgb, &curve_params);
-
-      dt_aligned_pixel_t rgb_pixel;
+      _agx_tone_mapping(rgb, &curve_params, p->compensate_low_end); // Operates in-place (passes rgb as input and output)
 
       // float agx_r = rgb_pixel[0];
       // float agx_g = rgb_pixel[1];
       // float agx_b = rgb_pixel[2];
 
-      rgb_pixel[0] = agx_rgb.r;
-      rgb_pixel[1] = agx_rgb.g;
-      rgb_pixel[2] = agx_rgb.b;
-      rgb_pixel[3] = in[3];
-
       if (p->compensate_low_end)
       {
         dt_aligned_pixel_t xyz_pixel;
 
-        dt_ioppr_rgb_matrix_to_xyz(rgb_pixel, xyz_pixel, work_profile->matrix_in_transposed, work_profile->lut_in,
+        dt_ioppr_rgb_matrix_to_xyz(rgb, xyz_pixel, work_profile->matrix_in_transposed, work_profile->lut_in,
                                work_profile->unbounded_coeffs_in, work_profile->lutsize,
                                work_profile->nonlinearlut);
-        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb_pixel, output_profile->matrix_out_transposed,
+        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb, output_profile->matrix_out_transposed,
                                  output_profile->lut_out,
                                  output_profile->unbounded_coeffs_out,
                                  output_profile->lutsize,
@@ -921,28 +892,21 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
         // float agx_outspace_r = rgb_pixel[0];
         // float agx_outspace_g = rgb_pixel[1];
         // float agx_outspace_b = rgb_pixel[2];
-
-        // rgb_pixel now has the components in the output profile
-        rgb.r = rgb_pixel[0];
-        rgb.g = rgb_pixel[1];
-        rgb.b = rgb_pixel[2];
+        // rgb now has the components in the output profile
 
         // protect the output gamut
-        rgb = _compensate_low_side(rgb, output_profile);
+        _compensate_low_side(rgb, output_profile);
 
         // float compensated_agx_outspace_r = rgb_pixel[0];
         // float compensated_agx_outspace_g = rgb_pixel[1];
         // float compensated_agx_outspace_b = rgb_pixel[2];
 
-        rgb_pixel[0] = rgb.r;
-        rgb_pixel[1] = rgb.g;
-        rgb_pixel[2] = rgb.b;
-
         // bring back to working space
-        dt_ioppr_rgb_matrix_to_xyz(rgb_pixel, xyz_pixel, output_profile->matrix_in_transposed, output_profile->lut_in,
+        // Convert compensated output space pixel back to XYZ
+        dt_ioppr_rgb_matrix_to_xyz(rgb, xyz_pixel, output_profile->matrix_in_transposed, output_profile->lut_in,
                                output_profile->unbounded_coeffs_in, output_profile->lutsize,
                                output_profile->nonlinearlut);
-        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb_pixel, work_profile->matrix_out_transposed,
+        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb, work_profile->matrix_out_transposed,
                               work_profile->lut_out,
                               work_profile->unbounded_coeffs_out,
                               work_profile->lutsize,
@@ -967,13 +931,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
         //   );
       }
 
-      out[0] = rgb_pixel[0];
-      out[1] = rgb_pixel[1];
-      out[2] = rgb_pixel[2];
-
-
-      if(ch == 4)
-      {
+      // Copy final result (which is in rgb) to output buffer
+      for_three_channels(k, aligned(out, rgb : 16)) out[k] = rgb[k];
+      if(ch == 4) {
         out[3] = in[3]; // Copy alpha if it exists
       }
 
@@ -1064,7 +1024,7 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   for (int k = 0; k <= steps; k++)
   {
     float x_norm = (float)k / steps; // Input to the curve [0, 1]
-    float y_norm = _calculate_curve(x_norm, &curve_params);
+    float y_norm = _apply_curve(x_norm, &curve_params);
 
     // Map normalized coords [0,1] to graph pixel coords
     const float x_graph = x_norm * g->graph_width;
