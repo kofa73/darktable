@@ -55,7 +55,7 @@ typedef struct dt_iop_agx_user_params_t
   // we don't have a parameter for pivot_x, it's set to the x value representing mid-gray, splitting [0..1] in the ratio
   // range_black_relative_exposure : range_white_relative_exposure
   // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
-  float curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
+  float curve_gamma;                // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
   // t_ly
   float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
@@ -1158,7 +1158,7 @@ void gui_update(dt_iop_module_t *self)
 static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
-  // Look Sektion
+  // Look Section
   dt_gui_new_collapsible_section(&gui_data->look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(box), DT_ACTION(self));
   
   self->widget = GTK_WIDGET(gui_data->look_section.container);
@@ -1167,17 +1167,17 @@ static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   
   // look_offset
   slider = dt_bauhaus_slider_from_params(self, "look_offset");
-  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
+  dt_bauhaus_slider_set_soft_range(slider, -0.5f, 0.5f);
   gtk_widget_set_tooltip_text(slider, _("deepen or lift shadows"));  // Tooltip text for look_offset
   
   // look_slope
   slider = dt_bauhaus_slider_from_params(self, "look_slope");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("decrease or increase contrast and brightness"));  
   
   // look_power
   slider = dt_bauhaus_slider_from_params(self, "look_power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
+  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("increase or decrease brightness"));
   
   // look_saturation
@@ -1200,7 +1200,7 @@ static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   GtkWidget *base_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(box), base_box, TRUE, TRUE, 0);
 
-  // Area-Sektion – wird als erstes hinzugefügt, damit sie ganz oben ist
+  // Area section – is added first so that it is at the top
   dt_gui_new_collapsible_section(&gui_data->area_section, "plugins/darkroom/agx/expand_area_params",
     _("show curve"), GTK_BOX(base_box), DT_ACTION(self));
 
@@ -1247,7 +1247,6 @@ static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   gtk_box_pack_start(GTK_BOX(box), curve_box, TRUE, TRUE, 0);
   self->widget = curve_box;
 
-  // Kurvenparameter-Label
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "curve parameters")));
 
   // Reuse slider variable for all sliders that use _add_slider_with_tooltip
@@ -1260,12 +1259,12 @@ static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
 
   // curve_pivot_x_shift with picker
   gui_data->curve_pivot_x_shift = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
-  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_x_shift, -1.0f, 1.0f);
+  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_x_shift, -0.4f, 0.4f);
   gtk_widget_set_tooltip_text(gui_data->curve_pivot_x_shift, _("Pivot x shift towards black(-) or white(+)"));
 
   // curve_pivot_y_linear
   gui_data->curve_pivot_y_linear = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
-  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_y_linear, 0.0f, 1.0f);
+  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_y_linear, 0.0f, 0.5f);
   gtk_widget_set_tooltip_text(gui_data->curve_pivot_y_linear, _("Pivot y (linear output)"));
 
   // curve_contrast_around_pivot
@@ -1285,6 +1284,7 @@ static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
 
   self->widget = main_box;
 }
+
 static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
@@ -1344,7 +1344,7 @@ void gui_init(dt_iop_module_t *self)
   // so we can restore it later
   GtkWidget *self_widget = self->widget;
 
-  //3 Boxen definieren
+  // define the 3 boxes
   GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
   GtkWidget *tonemap_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
