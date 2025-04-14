@@ -1009,9 +1009,6 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(0.5));
   cairo_stroke(cr);
 
-  // Draw grid
-  dt_draw_grid(cr, 4, 0, 0, g->graph_width, g->graph_height);
-
   // Draw identity line (y=x)
   cairo_save(cr);
   cairo_set_source_rgba(cr, darktable.bauhaus->graph_border.red, darktable.bauhaus->graph_border.green, darktable.bauhaus->graph_border.blue, 0.5);
@@ -1019,6 +1016,58 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   cairo_line_to(cr, g->graph_width, g->graph_height);
   cairo_stroke(cr);
   cairo_restore(cr);
+
+  // --- Draw Gamma Guide Lines ---
+  cairo_save(cr);
+  // Use a distinct style for guides, e.g., dashed and semi-transparent
+  set_color(cr, darktable.bauhaus->graph_fg); // Use foreground color for now
+  cairo_set_source_rgba(cr,
+                        darktable.bauhaus->graph_fg.red,
+                        darktable.bauhaus->graph_fg.green,
+                        darktable.bauhaus->graph_fg.blue, 0.4); // Make it semi-transparent
+  double dashes[] = {4.0 / darktable.gui->ppd, 4.0 / darktable.gui->ppd}; // 4px dash, 4px gap
+  cairo_set_dash(cr, dashes, 2, 0);
+  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(0.5));
+
+  const float linear_y_guides[] = {0.18f / 16, 0.18f / 8, 0.18f / 4, 0.18f / 2, 0.18f, 0.18f * 2, 0.18f * 4 };
+  const int num_guides = sizeof(linear_y_guides) / sizeof(linear_y_guides[0]);
+
+  for (int i = 0; i < num_guides; ++i)
+  {
+      const float y_linear = linear_y_guides[i];
+      const float y_pre_gamma = powf(y_linear, 1.0f / curve_params.curve_gamma);
+
+      const float y_graph = y_pre_gamma * g->graph_height;
+
+      cairo_move_to(cr, 0, y_graph);
+      cairo_line_to(cr, g->graph_width, y_graph);
+      cairo_stroke(cr);
+
+      // Draw label for the guide line
+      cairo_save(cr);
+      cairo_identity_matrix(cr); // Reset transformations for text
+      set_color(cr, darktable.bauhaus->graph_fg); // Use standard text color
+
+      snprintf(text, sizeof(text), "%.2f", y_linear); // Format the linear value
+      pango_layout_set_text(layout, text, -1);
+      pango_layout_get_pixel_extents(layout, &g->ink, NULL);
+
+      // Position label slightly to the left of the graph
+      float label_x = margin_left - g->ink.width - g->inset / 2.0f;
+      // Vertically center label on the guide line (remember Y is flipped)
+      float label_y = margin_top + g->graph_height - y_graph - g->ink.height / 2.0f - g->ink.y;
+
+      // Ensure label stays within vertical bounds of the graph area
+      label_y = CLAMPF(label_y, margin_top - g->ink.height / 2.0f - g->ink.y, margin_top + g->graph_height - g->ink.height / 2.0f - g->ink.y);
+
+      cairo_move_to(cr, label_x, label_y);
+      pango_cairo_show_layout(cr, layout);
+      cairo_restore(cr);
+  }
+
+  // Restore original drawing state (solid line, etc.)
+  cairo_restore(cr); // Matches cairo_save(cr) at the beginning of this block
+  // --- End Draw Gamma Guide Lines ---
 
   // Draw the curve
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));
