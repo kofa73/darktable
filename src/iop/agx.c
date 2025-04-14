@@ -27,49 +27,49 @@ const float _epsilon = 1E-6f;
 typedef struct dt_iop_agx_user_params_t
 {
   // look params
-  float look_offset;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Offset"
-  float look_slope;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Slope"
-  float look_power;       // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Power"
-  float look_saturation;  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "Saturation"
-  float look_original_hue_mix_ratio;    // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "Restore original hue"
+  float look_offset; // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "offset"
+  float look_slope; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
+  float look_power; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "power"
+  float look_saturation;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "saturation"
+  float look_original_hue_mix_ratio; // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "preserve hue"
 
   // log mapping params
-  float range_black_relative_exposure;  // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "Black relative exposure (below mid-gray)"
-  float range_white_relative_exposure;  // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "White relative exposure (above mid-gray)"
+  float range_black_relative_exposure;  // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "black relative exposure"
+  float range_white_relative_exposure;  // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "white relative exposure"
 
   // curve params - comments indicate the original variables from https://www.desmos.com/calculator/yrysofmx8h
   // Corresponds to p_x, but not directly -- allows shifting the default 0.18 towards black or white relative exposure
-  float curve_pivot_x_shift;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0 $DESCRIPTION: "Pivot x shift towards black(-) or white(+)"
+  float curve_pivot_x_shift;      // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0 $DESCRIPTION: "pivot x shift"
   // Corresponds to p_y, but not directly -- needs application of gamma
-  float curve_pivot_y_linear;            // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.18 $DESCRIPTION: "Pivot y (linear)"
+  float curve_pivot_y_linear;            // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.18 $DESCRIPTION: "pivot y (linear)"
   // P_slope
-  float curve_contrast_around_pivot;      // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "Contrast around the pivot"
+  float curve_contrast_around_pivot;      // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "contrast around the pivot"
   // P_tlength
-  float curve_linear_percent_below_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Toe start %, below the pivot"
+  float curve_linear_percent_below_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "toe start %"
   // P_slength
-  float curve_linear_percent_above_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "Shoulder start %, above the pivot"
+  float curve_linear_percent_above_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "shoulder start %"
   // t_p
-  float curve_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Toe power; contrast in shadows"
+  float curve_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "toe power"
   // s_p -> Renamed from curve_shoulder_power for clarity
-  float curve_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "Shoulder power; contrast in highlights"
+  float curve_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "shoulder power;"
   // we don't have a parameter for pivot_x, it's set to the x value representing mid-gray, splitting [0..1] in the ratio
   // range_black_relative_exposure : range_white_relative_exposure
   // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
-  float curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "Curve y gamma"
+  float curve_gamma;                // $MIN: 1.0 $MAX: 5.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
   // t_ly
-  float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "Target display black"
+  float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
-  float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "Target display white"
-
-  gboolean compensate_low_end;     // $MIN: FALSE $MAX: TRUE $DEFAULT: FALSE $DESCRIPTION: "Try to compensate negative values"
-  float highlight_compression_factor; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "Highlight compression factor"
+  float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
+  gboolean compensate_low_end;     // $MIN: FALSE $MAX: TRUE $DEFAULT: FALSE $DESCRIPTION: "try to compensate negative values"
+  float highlight_compression_factor; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "highlight compression factor"
 } dt_iop_agx_user_params_t;
 
 
 typedef struct dt_iop_agx_gui_data_t
 {
-  dt_gui_collapsible_section_t tone_mapping_section;
   dt_gui_collapsible_section_t advanced_section;
+  dt_gui_collapsible_section_t area_section;
+  dt_gui_collapsible_section_t look_section;
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -92,10 +92,10 @@ typedef struct dt_iop_agx_gui_data_t
   GtkWidget *pivot_x_picker;
 
   // Slider widgets for pickers
-  GtkWidget *range_black_slider;
-  GtkWidget *range_white_slider;
-  GtkWidget *curve_pivot_x_shift_slider;
-  GtkWidget *curve_pivot_y_linear_slider;
+  GtkWidget *range_black_exposure;
+  GtkWidget *range_white_exposure;
+  GtkWidget *curve_pivot_x_shift;
+  GtkWidget *curve_pivot_y_linear;
 
 } dt_iop_agx_gui_data_t;
 
@@ -731,7 +731,7 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
   p->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->range_black_slider, p->range_black_relative_exposure);
+  dt_bauhaus_slider_set(g->range_black_exposure, p->range_black_relative_exposure);
   --darktable.gui->reset;
 
   gtk_widget_queue_draw(GTK_WIDGET(g->area));
@@ -749,7 +749,7 @@ static void apply_auto_white_exposure(dt_iop_module_t *self)
   p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->range_white_slider, p->range_white_relative_exposure);
+  dt_bauhaus_slider_set(g->range_white_exposure, p->range_white_relative_exposure);
   --darktable.gui->reset;
 
   gtk_widget_queue_draw(GTK_WIDGET(g->area));
@@ -772,8 +772,8 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
   p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->range_black_slider, p->range_black_relative_exposure);
-  dt_bauhaus_slider_set(g->range_white_slider, p->range_white_relative_exposure);
+  dt_bauhaus_slider_set(g->range_black_exposure, p->range_black_relative_exposure);
+  dt_bauhaus_slider_set(g->range_white_exposure, p->range_white_relative_exposure);
   --darktable.gui->reset;
 
   gtk_widget_queue_draw(GTK_WIDGET(g->area));
@@ -800,7 +800,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_in
   // Calculate the required pivot_x_shift to achieve the target_pivot_x
   const float base_pivot_x = fabsf(min_ev / range_in_ev); // Pivot representing 0 EV (mid-gray)
 
-  float shift; // curve_pivot_x_shift
+  float shift = 0.0f; // curve_pivot_x_shift
 
   dt_iop_agx_user_params_t params_with_mid_gray = *p;
   params_with_mid_gray.curve_pivot_y_linear = 0.18;
@@ -834,8 +834,8 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_in
 
   // Update the slider visually
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->curve_pivot_x_shift_slider, p->curve_pivot_x_shift);
-  dt_bauhaus_slider_set(g->curve_pivot_y_linear_slider, p->curve_pivot_y_linear);
+  dt_bauhaus_slider_set(g->curve_pivot_x_shift, p->curve_pivot_x_shift);
+  dt_bauhaus_slider_set(g->curve_pivot_y_linear, p->curve_pivot_y_linear);
   --darktable.gui->reset;
 
   // Redraw and add history
@@ -1155,50 +1155,56 @@ void gui_update(dt_iop_module_t *self)
   }
 }
 
-static void _add_look_box(dt_iop_module_t *self)
+static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
-  // look: saturation, slope, offset, power, original hue mix ratio (hue restoration)
-  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
-  GtkWidget *label = gtk_label_new(_("Look"));
-  gtk_box_pack_start(GTK_BOX(look_box), label, FALSE, FALSE, 0);
+  GtkWidget *main_box = self->widget;
+  // Look Sektion
+  dt_gui_new_collapsible_section(&gui_data->look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(box), DT_ACTION(self));
+  
+  self->widget = GTK_WIDGET(gui_data->look_section.container);
+  // Reuse the slider variable for all sliders instead of creating new ones in each scope
   GtkWidget *slider;
-
+  
+  // look_offset
   slider = dt_bauhaus_slider_from_params(self, "look_offset");
   dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("deepen or lift shadows"));  // Tooltip text for look_offset
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
+  
+  // look_slope
   slider = dt_bauhaus_slider_from_params(self, "look_slope");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("decrease or increase contrast and brightness"));
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
+  gtk_widget_set_tooltip_text(slider, _("decrease or increase contrast and brightness"));  
+  
+  // look_power
   slider = dt_bauhaus_slider_from_params(self, "look_power");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
   gtk_widget_set_tooltip_text(slider, _("increase or decrease brightness"));
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
+  
+  // look_saturation
   slider = dt_bauhaus_slider_from_params(self, "look_saturation");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
-
+  gtk_widget_set_tooltip_text(slider, _("decrease or increase saturation "));
+  
+  // look_original_hue_mix_ratio
   slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_box_pack_start(GTK_BOX(look_box), slider, TRUE, TRUE, 0);
+  gtk_widget_set_tooltip_text(slider, _("Hue mix ratio adjustment"));
+  
+  self->widget = main_box;
 }
 
-static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
-  GtkWidget *label;
-  GtkWidget *slider;
-  GtkWidget *main_box = self->widget;
-  dt_gui_new_collapsible_section(&gui_data->tone_mapping_section, "plugins/darkroom/agx/expand_tonemapping_params",
-                                 _("Tone mapping"), GTK_BOX(main_box), DT_ACTION(self));
+  GtkWidget *main_box = self->widget; // save
+   
+  GtkWidget *base_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(box), base_box, TRUE, TRUE, 0);
 
-  self->widget = GTK_WIDGET(gui_data->tone_mapping_section.container);
+  // Area-Sektion – wird als erstes hinzugefügt, damit sie ganz oben ist
+  dt_gui_new_collapsible_section(&gui_data->area_section, "plugins/darkroom/agx/expand_area_params",
+    _("show curve"), GTK_BOX(base_box), DT_ACTION(self));
 
-
+  GtkWidget *area_container = GTK_WIDGET(gui_data->area_section.container);
   gui_data->area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
                                                       0, // Initial height factor
                                                       "plugins/darkroom/agx/graphheight")); // Conf key
@@ -1209,98 +1215,114 @@ static void _add_tone_mapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->area), _("tone mapping curve"));
 
   // Pack drawing area at the top
-  gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(gui_data->area), TRUE, TRUE, 0);
-
-  // black/white relative exposure
-  label = gtk_label_new(_("Input exposure range"));
-  gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(area_container), GTK_WIDGET(gui_data->area), TRUE, TRUE, 0);
+  
+  //separated picker box for black/white  relative exposure
+  GtkWidget *picker_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(box), picker_box, TRUE, TRUE, 0);
+  self->widget = picker_box;
+ 
+  // Create section label
+  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "Input exposure range")));
 
   // Create black point slider and associate picker
-  gui_data->range_black_slider = dt_bauhaus_slider_from_params(self, "range_black_relative_exposure");
-  slider = gui_data->range_black_slider;
-  dt_bauhaus_slider_set_soft_range(slider, -20.0f, -1.0f);
-  gui_data->range_black_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
-  gtk_widget_set_tooltip_text(slider, _("minimum relative exposure (black point)"));
+  gui_data->range_black_exposure = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "range_black_relative_exposure"));
+  dt_bauhaus_slider_set_soft_range(gui_data->range_black_exposure, -20.0f, -1.0f);
+  dt_bauhaus_slider_set_format(gui_data->range_black_exposure, _(" EV"));
+  gtk_widget_set_tooltip_text(gui_data->range_black_exposure, _("relative exposure below mid-grey (black point)"));
 
   // Create white point slider and associate picker
-  gui_data->range_white_slider = dt_bauhaus_slider_from_params(self, "range_white_relative_exposure");
-  slider = gui_data->range_white_slider;
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 20.0f);
-  gui_data->range_white_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
-  gtk_widget_set_tooltip_text(gui_data->range_white_picker, _("pick white exposure")); // Tooltip for picker icon
-  gtk_widget_set_tooltip_text(slider, _("maximum relative exposure (white point)"));
+  gui_data->range_white_exposure = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "range_white_relative_exposure"));
+  dt_bauhaus_slider_set_soft_range(gui_data->range_white_exposure, 1.0f, 20.0f);
+  dt_bauhaus_slider_set_format(gui_data->range_white_exposure, _(" EV"));
+  gtk_widget_set_tooltip_text(gui_data->range_white_exposure, _("relative exposure above mid-grey (white point)"));
 
   // Auto tune slider (similar to filmic's)
-  gui_data->auto_tune_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
-                                                  dt_bauhaus_combobox_new(self));
+  gui_data->auto_tune_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_combobox_new(self));
   dt_bauhaus_widget_set_label(gui_data->auto_tune_picker, NULL, N_("auto tune levels"));
   gtk_widget_set_tooltip_text(gui_data->auto_tune_picker, _("pick image area to automatically set black and white exposure"));
   gtk_box_pack_start(GTK_BOX(self->widget), gui_data->auto_tune_picker, TRUE, TRUE, 0);
 
-  label = gtk_label_new(_("curve parameters"));
-  gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
+  GtkWidget *curve_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(box), curve_box, TRUE, TRUE, 0);
+  self->widget = curve_box;
 
-  // Internal 'gamma'
+  // Kurvenparameter-Label
+  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "curve parameters")));
+
+  // Reuse slider variable for all sliders that use _add_slider_with_tooltip
+  GtkWidget *slider;
+  
+  // curve_gamma
   slider = dt_bauhaus_slider_from_params(self, "curve_gamma");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
   gtk_widget_set_tooltip_text(slider, _("Fine-tune contrast, shifts representation of pivot along the y axis"));
 
-  slider = dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift");
-  dt_bauhaus_slider_set_soft_range(slider, -1.0f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot x shift"));
-  gui_data->curve_pivot_x_shift_slider = slider; // Store the slider widget
-  gui_data->pivot_x_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, slider);
-  gtk_widget_set_tooltip_text(gui_data->pivot_x_picker, _("pick range to serve as contrast pivot"));
+  // curve_pivot_x_shift with picker
+  gui_data->curve_pivot_x_shift = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
+  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_x_shift, -1.0f, 1.0f);
+  gtk_widget_set_tooltip_text(gui_data->curve_pivot_x_shift, _("Pivot x shift towards black(-) or white(+)"));
 
+  // curve_pivot_y_linear
+  gui_data->curve_pivot_y_linear = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
+  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_y_linear, 0.0f, 1.0f);
+  gtk_widget_set_tooltip_text(gui_data->curve_pivot_y_linear, _("Pivot y (linear output)"));
 
-  slider = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
-  gui_data->curve_pivot_y_linear_slider = slider;
-
+  // curve_contrast_around_pivot
   slider = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
   gtk_widget_set_tooltip_text(slider, _("linear section slope"));
 
+  // curve_toe_power
   slider = dt_bauhaus_slider_from_params(self, "curve_toe_power");
   dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("toe power"));
+  gtk_widget_set_tooltip_text(slider, _("contrast in shadows"));
 
+  // curve_shoulder_power
   slider = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
   dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("shoulder power"));
+  gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
 
-  // Create a nested collapsible section for additional parameters
-  GtkWidget *parent_box = self->widget;
+  self->widget = main_box;
+}
+static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget *main_box = self->widget;
+
+  // Tone Mapping Section advanced
   dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
-                                 _("advanced"), GTK_BOX(parent_box), DT_ACTION(self));
-
+                                 _("advanced"), GTK_BOX(box), DT_ACTION(self));
   self->widget = GTK_WIDGET(gui_data->advanced_section.container);
-
-  // Toe
+   // Reuse the slider variable for all sliders
+  GtkWidget *slider;
+  
+  // Toe length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_below_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
   gtk_widget_set_tooltip_text(slider, _("toe length"));
-
+  
+  // Toe intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_y");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
-
-  // Shoulder
+  
+  // Shoulder length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
   gtk_widget_set_tooltip_text(slider, _("shoulder length"));
-
+  
+  // Shoulder intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
-
+  
   dt_bauhaus_toggle_from_params(self, "compensate_low_end");
 
   // High end compensation controls
   slider = dt_bauhaus_slider_from_params(self, "highlight_compression_factor");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
   gtk_widget_set_tooltip_text(slider, _("highlight compression strength"));
+  self->widget = main_box;
 }
 
 void gui_init(dt_iop_module_t *self)
@@ -1322,10 +1344,18 @@ void gui_init(dt_iop_module_t *self)
   // so we can restore it later
   GtkWidget *self_widget = self->widget;
 
-  _add_look_box(self);
-  _add_tone_mapping_box(self, gui_data);
+  //3 Boxen definieren
+  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
+  GtkWidget *tonemap_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(self->widget), tonemap_box, TRUE, TRUE, 0);
+  GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(self->widget), advanced_box, TRUE, TRUE, 0);
 
-  // restore
+   _add_look_box(self, look_box, gui_data);
+   _add_base_box(self, tonemap_box, gui_data);
+   _add_advanced_box(self, advanced_box, gui_data);
+   
   self->widget = self_widget;
 }
 
@@ -1393,10 +1423,10 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
 {
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
-  if(picker == g->range_black_picker) apply_auto_black_exposure(self);
-  else if(picker == g->range_white_picker) apply_auto_white_exposure(self);
+  if(picker == g->range_black_exposure) apply_auto_black_exposure(self);
+  else if(picker == g->range_white_exposure) apply_auto_white_exposure(self);
   else if(picker == g->auto_tune_picker) apply_auto_tune_exposure(self);
-  else if(picker == g->pivot_x_picker) apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
+  else if(picker == g->curve_pivot_x_shift) apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
 }
 
 /*
