@@ -62,20 +62,8 @@ typedef struct dt_iop_agx_user_params_t
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
 
-  float gamut_compression_threshold_in_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression R threshold"
-  float gamut_compression_threshold_in_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression G threshold"
-  float gamut_compression_threshold_in_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression B threshold"
-
-  float gamut_compression_threshold_out_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression R threshold"
-  float gamut_compression_threshold_out_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression G threshold"
-  float gamut_compression_threshold_out_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression B threshold"
-
-  float gamut_compression_distance_limit_in_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression C distance limit"
-  float gamut_compression_distance_limit_in_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression M distance limit"
-  float gamut_compression_distance_limit_in_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2  $DESCRIPTION: "input gamut compression Y distance limit"
-  float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression C distance limit"
-  float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression M distance limit"
-  float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression Y distance limit"
+  float gamut_compression_distance_limit_in; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression"
+  float gamut_compression_distance_limit_out; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression"
 } dt_iop_agx_user_params_t;
 
 
@@ -463,60 +451,23 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
 
 static void _compensate_low_side(
   dt_aligned_pixel_t pixel_in_out,
-  const curve_and_look_params_t *curve_params,
-  const dt_iop_order_iccprofile_info_t *const profile,
-  dt_aligned_pixel_t const threshold,
-  dt_aligned_pixel_t const distance_limit,
+  const float distance_limit,
   int in_out)
 {
-
-/*
-  if(pixel_in_out[0] >= 0.0f && pixel_in_out[1] >= 0.0f && pixel_in_out[2] >= 0.0f)
-  {
-    // No compensation needed
-    return;
-  }
-  float original_luminance = _luminance(pixel_in_out, profile);
-  if (original_luminance < _epsilon)
-  {
-    // Set result to black
-    for_three_channels(k, aligned(pixel_in_out: 16))
-    {
-      pixel_in_out[k] = 0.0f;
-    }
-    return;
-  }
-
-  const float most_negative_component = fminf(pixel_in_out[0], fminf(pixel_in_out[1], pixel_in_out[2]));
-
-  // offset, so no component remains negative
-  for_three_channels(k, aligned(pixel_in_out : 16))
-  {
-    pixel_in_out[k] -= most_negative_component;
-  }
-
-  const float offset_luminance = _luminance(pixel_in_out, profile);
-
-  const float luminance_correction = original_luminance / offset_luminance;
-
-  for_three_channels(k, aligned(pixel_in_out : 16))
-  {
-    pixel_in_out[k] *= luminance_correction;
-  }
-  */
-
   // Achromatic axis
   const float achromatic = fmaxf(pixel_in_out[0], fmaxf(pixel_in_out[1], pixel_in_out[2]));
+  // leave the bottom 80% of the gamut alone
+  const float threshold = 0.8f;
 
-  for_three_channels(k, aligned(pixel_in_out, threshold, distance_limit: 16))
+  for_three_channels(k, aligned(pixel_in_out: 16))
   {
     // Inverse RGB Ratios: distance from achromatic axis
     const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - pixel_in_out[k]) / fabs(achromatic);
     // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
-    const float scale = (1.0f - threshold[k]) / sqrtf(fmaxf(1.001f, distance_limit[k]) - 1.0f);
+    const float scale = (1.0f - threshold) / sqrtf(fmaxf(1.001f, distance_limit) - 1.0f);
     // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
-    const float compressed_distance = distance_from_achromatic < threshold[k] ? distance_from_achromatic :
-            scale * sqrtf(distance_from_achromatic - threshold[k] + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + threshold[k];
+    const float compressed_distance = distance_from_achromatic < threshold ? distance_from_achromatic :
+            scale * sqrtf(distance_from_achromatic - threshold + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + threshold;
     // Inverse RGB Ratios to RGB
     // float was = pixel_in_out[k];
     pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
@@ -896,20 +847,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   mat3SSEinv(processing_to_pipe, pipe_to_processing);
 
 
-  // const dt_aligned_pixel_t threshold_in = {p->gamut_compression_threshold_in_r, p->gamut_compression_threshold_in_g, p->gamut_compression_threshold_in_b, 0};
-  // const dt_aligned_pixel_t distance_limit_in = {p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_m, p->gamut_compression_distance_limit_in_y, 0};
-  // const dt_aligned_pixel_t threshold_out = {p->gamut_compression_threshold_out_r, p->gamut_compression_threshold_out_g, p->gamut_compression_threshold_out_b, 0};
-  // const dt_aligned_pixel_t distance_limit_out = {p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_m, p->gamut_compression_distance_limit_out_y, 0};
-  const dt_aligned_pixel_t threshold_in = {0.8, 0.8, 0.8, 0};
-  const dt_aligned_pixel_t distance_limit_in = {p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_c, 0};
-  const dt_aligned_pixel_t threshold_out = {0.8, 0.8, 0.8, 0};
-  const dt_aligned_pixel_t distance_limit_out = {p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_c, 0};
+  const float distance_limit_in = p->gamut_compression_distance_limit_in;
+  const float distance_limit_out = p->gamut_compression_distance_limit_out;
 
-  printf("threshold_in: %f, %f, %f\n", threshold_in[0], threshold_in[1], threshold_in[2]);
-  printf("distance_limit_in: %f, %f, %f\n", distance_limit_in[0], distance_limit_in[1], distance_limit_in[2]);
-  printf("threshold_out: %f, %f, %f\n", threshold_out[0], threshold_out[1], threshold_out[2]);
-  printf("distance_limit_out: %f, %f, %f\n", distance_limit_out[0], distance_limit_out[1], distance_limit_out[2]);
-  
   DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
   {
@@ -925,9 +865,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
       _compensate_low_side(
         output_rgb_pixel,
-        &curve_params,
-        output_profile,
-        threshold_in,
         distance_limit_in,
         0
       );
@@ -939,9 +876,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 	    // fix any negative we may have introduced
       _compensate_low_side(
         output_rgb_pixel,
-        &curve_params,
-        output_profile,
-        threshold_out,
         distance_limit_out,
         1
       );
@@ -1378,70 +1312,14 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
-/*
-  float gamut_compression_threshold_in_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression R threshold"
-  float gamut_compression_threshold_in_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression G threshold"
-  float gamut_compression_threshold_in_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression R threshold"
 
-  float gamut_compression_threshold_out_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression R threshold"
-  float gamut_compression_threshold_out_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression G threshold"
-  float gamut_compression_threshold_out_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression B threshold"
-
-  float gamut_compression_distance_limit_in_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression C distance limit"
-  float gamut_compression_distance_limit_in_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression M distance limit"
-  float gamut_compression_distance_limit_in_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2  $DESCRIPTION: "input gamut compression Y distance limit"
-  float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression C distance limit"
-  float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression M distance limit"
-  float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression Y distance limit"
-*/
-  
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_r");
-  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for input R channel"));
-
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_c");
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum input C distance to handle"));
-  
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_g");
-  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for input G channel"));
+  gtk_widget_set_tooltip_text(slider, _("maximum input distance to handle"));
 
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_m");
-  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  // gtk_widget_set_tooltip_text(slider, _("maximum input M distance to handle"));
-  
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_b");
-  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for input B channel"));
-
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_y");
-  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  // gtk_widget_set_tooltip_text(slider, _("maximum input Y distance to handle"));
-
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_r");
-  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for output R channel"));
-
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_c");
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum output C distance to handle"));
-  
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_g");
-  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for output G channel"));
-
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_m");
-  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  // gtk_widget_set_tooltip_text(slider, _("maximum output M distance to handle"));
-  
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_b");
-  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for output B channel"));
-
-  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_y");
-  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  // gtk_widget_set_tooltip_text(slider, _("maximum output Y distance to handle"));
+  gtk_widget_set_tooltip_text(slider, _("maximum output distance to handle"));
 
   self->widget = main_box;
 }
@@ -1515,13 +1393,8 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_pivot_x_shift = 0.0;
   p.curve_pivot_y_linear = 0.18;
 
-  p.gamut_compression_threshold_in_r = p.gamut_compression_threshold_in_g = p.gamut_compression_threshold_in_b = 0.8f;
-  p.gamut_compression_threshold_out_r = p.gamut_compression_threshold_out_g = p.gamut_compression_threshold_in_b = 0.8f;
-
-  p.gamut_compression_distance_limit_in_c = p.gamut_compression_distance_limit_in_m = p.gamut_compression_distance_limit_in_y = 1.2f;
-  p.gamut_compression_distance_limit_out_c = p.gamut_compression_distance_limit_out_m = p.gamut_compression_distance_limit_out_y = 1.0f;
-
-
+  p.gamut_compression_distance_limit_in = 1.0f;
+  p.gamut_compression_distance_limit_out = 1.0f;
 
   // Base preset
   p.look_power = 1.0f;
