@@ -62,8 +62,8 @@ typedef struct dt_iop_agx_user_params_t
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
 
-  float gamut_compression_distance_limit_in; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression"
-  float gamut_compression_distance_limit_out; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression"
+  float gamut_compression_distance_limit_in; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "input gamut compression"
+  float gamut_compression_distance_limit_out; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "output gamut compression"
 } dt_iop_agx_user_params_t;
 
 
