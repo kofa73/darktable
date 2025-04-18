@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2009-2024 darktable developers.
+    Copyright (C) 2009-2025 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -207,6 +207,11 @@ static dt_introspection_field_t *default_get_f(const char *name)
   return NULL;
 }
 
+void dt_iop_default_cleanup(dt_iop_module_t *module)
+{
+  default_cleanup(module);
+}
+
 void dt_iop_default_init(dt_iop_module_t *module)
 {
   size_t param_size = module->so->get_introspection()->size;
@@ -217,6 +222,7 @@ void dt_iop_default_init(dt_iop_module_t *module)
   module->default_enabled = FALSE;
   module->has_trouble = FALSE;
   module->gui_data = NULL;
+  module->data = NULL;
 
   dt_introspection_field_t *i = module->so->get_introspection_linear();
 
@@ -2198,7 +2204,7 @@ void dt_iop_gui_cleanup_module(dt_iop_module_t *module)
   module->widget_list = NULL;
   DT_CONTROL_SIGNAL_DISCONNECT_ALL(module, module->so->op);
   if(module->gui_cleanup) module->gui_cleanup(module);
-  gtk_widget_destroy(module->expander ?: module->widget);
+  gtk_widget_destroy(module->expander ? module->expander : module->widget);
   dt_iop_gui_cleanup_blending(module);
   dt_pthread_mutex_destroy(&module->gui_lock);
   dt_free_align(module->gui_data);
