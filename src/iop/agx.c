@@ -9,6 +9,7 @@
 #include "control/control.h"
 #include "develop/develop.h"
 #include "common/iop_profile.h"
+#include "common/matrices.h"
 #include <gtk/gtk.h>
 #include <math.h> // For math functions
 #include <stdlib.h>
@@ -60,8 +61,21 @@ typedef struct dt_iop_agx_user_params_t
   float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
-  gboolean compensate_low_end;     // $MIN: FALSE $MAX: TRUE $DEFAULT: FALSE $DESCRIPTION: "try to compensate negative values"
-  float highlight_compression_factor; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 0.0 $DESCRIPTION: "highlight compression factor"
+
+  float gamut_compression_threshold_in_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression R threshold"
+  float gamut_compression_threshold_in_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression G threshold"
+  float gamut_compression_threshold_in_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression B threshold"
+
+  float gamut_compression_threshold_out_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression R threshold"
+  float gamut_compression_threshold_out_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression G threshold"
+  float gamut_compression_threshold_out_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression B threshold"
+
+  float gamut_compression_distance_limit_in_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression C distance limit"
+  float gamut_compression_distance_limit_in_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression M distance limit"
+  float gamut_compression_distance_limit_in_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2  $DESCRIPTION: "input gamut compression Y distance limit"
+  float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression C distance limit"
+  float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression M distance limit"
+  float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression Y distance limit"
 } dt_iop_agx_user_params_t;
 
 
@@ -152,7 +166,7 @@ typedef struct
 
 
 // Helper function: matrix multiplication
-static inline void _mat3f_mul_aligned_pixel(dt_aligned_pixel_t result, const mat3f m, const dt_aligned_pixel_t v)
+static void _mat3f_mul_aligned_pixel(dt_aligned_pixel_t result, const mat3f m, const dt_aligned_pixel_t v)
 {
   result[0] = m.m[0][0] * v[0] + m.m[0][1] * v[1] + m.m[0][2] * v[2];
   result[1] = m.m[1][0] * v[0] + m.m[1][1] * v[1] + m.m[1][2] * v[2];
@@ -363,7 +377,7 @@ static float _lerp_hue(float hue1, float hue2, float mix)
   return hue_out;
 }
 
-static float apply_slope_offset(float x, float slope, float offset)
+static float _apply_slope_offset(float x, float slope, float offset)
 {
   // negative offset should darken the image; positive brighten it
   // without the scale: m = 1 / (1 + offset)
@@ -380,7 +394,7 @@ static float apply_slope_offset(float x, float slope, float offset)
 
 // https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
 DT_OMP_DECLARE_SIMD(aligned(pixel_in_out: 16))
-static inline void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_params_t *params)
+static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_params_t *params)
 {
   // Default parameters from the curve_and_look_params_t struct
   const float slope = params->look_slope;
@@ -392,7 +406,7 @@ static inline void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_loo
   for_three_channels(k, aligned(pixel_in_out: 16))
   {
     // Apply slope and offset
-    const float slope_and_offset_val = apply_slope_offset(pixel_in_out[k], slope, offset);
+    const float slope_and_offset_val = _apply_slope_offset(pixel_in_out[k], slope, offset);
     // Apply power
     pixel_in_out[k] = slope_and_offset_val > 0.0f ? powf(slope_and_offset_val, power) : slope_and_offset_val;
   }
@@ -410,7 +424,7 @@ static inline void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_loo
 }
 
 DT_OMP_DECLARE_SIMD(aligned(result, pixel: 16))
-static inline void _apply_log_encoding(dt_aligned_pixel_t result, const dt_aligned_pixel_t pixel, float range_in_ev, float minEv)
+static void _apply_log_encoding(dt_aligned_pixel_t result, const dt_aligned_pixel_t pixel, float range_in_ev, float minEv)
 {
   // Assume input is linear Rec2020 relative to 0.18 mid gray
   // Ensure all values are > 0 before log
@@ -447,14 +461,21 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
   return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
 
-static void _compensate_low_side(dt_aligned_pixel_t pixel_in_out, const dt_iop_order_iccprofile_info_t *const profile)
+static void _compensate_low_side(
+  dt_aligned_pixel_t pixel_in_out,
+  const curve_and_look_params_t *curve_params,
+  const dt_iop_order_iccprofile_info_t *const profile,
+  dt_aligned_pixel_t const threshold,
+  dt_aligned_pixel_t const distance_limit,
+  int in_out)
 {
+
+/*
   if(pixel_in_out[0] >= 0.0f && pixel_in_out[1] >= 0.0f && pixel_in_out[2] >= 0.0f)
   {
     // No compensation needed
     return;
   }
-
   float original_luminance = _luminance(pixel_in_out, profile);
   if (original_luminance < _epsilon)
   {
@@ -482,41 +503,27 @@ static void _compensate_low_side(dt_aligned_pixel_t pixel_in_out, const dt_iop_o
   {
     pixel_in_out[k] *= luminance_correction;
   }
-}
+  */
 
-static void _compensate_high_side(dt_aligned_pixel_t rgb_in_out, const dt_iop_order_iccprofile_info_t *const profile, const float compensation_factor)
-{
-  const float upper_bound = 1.0f;
-  float luminance = _luminance(rgb_in_out, profile);
+  // Achromatic axis
+  const float achromatic = fmaxf(pixel_in_out[0], fmaxf(pixel_in_out[1], pixel_in_out[2]));
 
-  // zero-luminance "colour" part of input signal
-  dt_aligned_pixel_t rgb_chrominance;
-
-  for_three_channels(k, aligned(rgb_chrominance, rgb_in_out : 16))
+  for_three_channels(k, aligned(pixel_in_out, threshold, distance_limit: 16))
   {
-    rgb_chrominance[k] = rgb_in_out[k] - luminance;
+    // Inverse RGB Ratios: distance from achromatic axis
+    const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - pixel_in_out[k]) / fabs(achromatic);
+    // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
+    const float scale = (1.0f - threshold[k]) / sqrtf(fmaxf(1.001f, distance_limit[k]) - 1.0f);
+    // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
+    const float compressed_distance = distance_from_achromatic < threshold[k] ? distance_from_achromatic :
+            scale * sqrtf(distance_from_achromatic - threshold[k] + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + threshold[k];
+    // Inverse RGB Ratios to RGB
+    pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
+    if (pixel_in_out[k] < 0)
+    {
+      printf("in/out: %d channel %ld = %f\n", in_out, k, pixel_in_out[k]);
+    }
   }
-
-  // Chrominance is max(rgb) - luminance
-  const float chrominance = fmaxf(rgb_chrominance[0], fmaxf(rgb_chrominance[1], rgb_chrominance[2]));
-
-  const float relative_luminance = fmaxf(rgb_in_out[0], fmaxf(rgb_in_out[1], rgb_in_out[2]));
-
-  // Coefficient by how much the chrominance deviates from
-  // the line relative_luminance = relative_chrominance
-  const float chrominance_coefficient = (relative_luminance > upper_bound)
-                                      ? powf(upper_bound / relative_luminance, compensation_factor)
-                                      : 1.0f;
-
-  // Adjust chrominance by the calculated coefficient and calculate the max RGB that would result from this.
-  const float new_max_rgb = luminance + chrominance_coefficient * chrominance;
-
-  // Calculate scaling of the RGB triplet that must be done to bring the greatest component to upper_bound.
-  const float scale = (new_max_rgb > upper_bound) ? (upper_bound / new_max_rgb) : 1.0f;
-
-  rgb_in_out[0] = scale * (luminance + rgb_chrominance[0] * chrominance_coefficient);
-  rgb_in_out[1] = scale * (luminance + rgb_chrominance[1] * chrominance_coefficient);
-  rgb_in_out[2] = scale * (luminance + rgb_chrominance[2] * chrominance_coefficient);
 }
 
 static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
@@ -653,11 +660,12 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
 }
 
 
-static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params, gboolean compensate_low_end)
+static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params)
 {
   // Apply Inset Matrix
   dt_aligned_pixel_t inset_rgb = {0.0f}; // Temp storage
   _mat3f_mul_aligned_pixel(inset_rgb, AgXInsetMatrix, rgb_in_out);
+  // dt_aligned_pixel_t inset_rgb = {rgb_in_out[0], rgb_in_out[1], rgb_in_out[2], rgb_in_out[3]}; // Temp storage
 
   // record current chromaticity angle
   dt_aligned_pixel_t hsv_pixel = {0.0f};
@@ -695,27 +703,22 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
 
   // Apply Outset Matrix
   _mat3f_mul_aligned_pixel(rgb_in_out, AgXInsetMatrixInverse, transformed_pixel);
-
-  if (!compensate_low_end)
-  {
-    // Clamp final output to display range [0, 1]
-    for_three_channels(k, aligned(rgb_in_out: 16))
-    {
-      rgb_in_out[k] = CLAMPF(rgb_in_out[k], 0.0f, 1.0f);
-    }
-  }
+  // rgb_in_out[0] = transformed_pixel[0];
+  // rgb_in_out[1] = transformed_pixel[1];
+  // rgb_in_out[2] = transformed_pixel[2];
+  // rgb_in_out[3] = transformed_pixel[3];
 }
 
 // Get pixel norm using max RGB method (similar to filmic's choice for black/white)
 DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
-static inline float _agx_get_pixel_norm_max_rgb(const dt_aligned_pixel_t pixel)
+static float _agx_get_pixel_norm_max_rgb(const dt_aligned_pixel_t pixel)
 {
   return fmaxf(fmaxf(pixel[0], pixel[1]), pixel[2]);
 }
 
 // Get pixel norm using min RGB method (for black)
 DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
-static inline float _agx_get_pixel_norm_min_rgb(const dt_aligned_pixel_t pixel)
+static float _agx_get_pixel_norm_min_rgb(const dt_aligned_pixel_t pixel)
 {
   return fminf(fminf(pixel[0], pixel[1]), pixel[2]);
 }
@@ -781,11 +784,11 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
 }
 
 // Apply logic for pivot x picker
-static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_info_t *profile)
+static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprofile_info_t *profile)
 {
   if(darktable.gui->reset) return;
   dt_iop_agx_user_params_t *p = self->params;
-  dt_iop_agx_gui_data_t *g = self->gui_data;
+  const dt_iop_agx_gui_data_t *g = self->gui_data;
 
   // Calculate norm and EV of the picked color
   const float norm = _luminance(self->picked_color, profile);
@@ -800,8 +803,6 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_in
   // Calculate the required pivot_x_shift to achieve the target_pivot_x
   const float base_pivot_x = fabsf(min_ev / range_in_ev); // Pivot representing 0 EV (mid-gray)
 
-  float shift = 0.0f; // curve_pivot_x_shift
-
   dt_iop_agx_user_params_t params_with_mid_gray = *p;
   params_with_mid_gray.curve_pivot_y_linear = 0.18;
   params_with_mid_gray.curve_pivot_x_shift = 0;
@@ -813,6 +814,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, dt_iop_order_iccprofile_in
   float target_y_linearised = powf(target_y, p->curve_gamma);
   p->curve_pivot_y_linear = target_y_linearised;
 
+  float shift;
   if(fabsf(target_pivot_x - base_pivot_x) < _epsilon)
   {
     shift = 0.0f;
@@ -862,8 +864,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 {
   const dt_iop_agx_user_params_t *p = piece->data;
   const size_t ch = piece->colors;
-  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
-  const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
 
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out))
   {
@@ -885,6 +885,21 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   // Calculate curve parameters once
   const curve_and_look_params_t curve_params = _calculate_curve_params(p);
 
+  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+  const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
+
+  dt_colormatrix_t pipe_to_processing;
+  dt_colormatrix_t processing_to_pipe;
+  dt_colormatrix_mul(pipe_to_processing, work_profile->matrix_in_transposed,
+                     output_profile->matrix_out_transposed);
+  mat3SSEinv(processing_to_pipe, pipe_to_processing);
+
+
+  const dt_aligned_pixel_t threshold_in = {p->gamut_compression_threshold_in_r, p->gamut_compression_threshold_in_g, p->gamut_compression_threshold_in_b, 0};
+  const dt_aligned_pixel_t distance_limit_in = {p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_m, p->gamut_compression_distance_limit_in_y, 0};
+  const dt_aligned_pixel_t threshold_out = {p->gamut_compression_threshold_out_r, p->gamut_compression_threshold_out_g, p->gamut_compression_threshold_out_b, 0};
+  const dt_aligned_pixel_t distance_limit_out = {p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_m, p->gamut_compression_distance_limit_out_y, 0};
+  
   DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
   {
@@ -895,45 +910,35 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     {
       dt_aligned_pixel_t rgb = { in[0], in[1], in[2], in[3] };
 
-      _agx_tone_mapping(rgb, &curve_params, p->compensate_low_end); // Operates in-place (passes rgb as input and output)
+	    dt_aligned_pixel_t output_rgb_pixel;
+      dt_apply_transposed_color_matrix(rgb, pipe_to_processing, output_rgb_pixel);
 
-      gboolean compensate_high_side = p->highlight_compression_factor >= 0.001;
-      if (p->compensate_low_end || compensate_high_side)
-      {
-        dt_aligned_pixel_t xyz_pixel;
+      _compensate_low_side(
+        output_rgb_pixel,
+        &curve_params,
+        output_profile,
+        threshold_in,
+        distance_limit_in,
+        0
+      );
 
-        dt_ioppr_rgb_matrix_to_xyz(rgb, xyz_pixel, work_profile->matrix_in_transposed, work_profile->lut_in,
-                               work_profile->unbounded_coeffs_in, work_profile->lutsize,
-                               work_profile->nonlinearlut);
-        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb, output_profile->matrix_out_transposed,
-                                 output_profile->lut_out,
-                                 output_profile->unbounded_coeffs_out,
-                                 output_profile->lutsize,
-                                 output_profile->nonlinearlut);
+      // now the RGB pixel holds output-profile values, and no negative values
 
-        // now the RGB pixel holds output-profile values
+      _agx_tone_mapping(output_rgb_pixel, &curve_params); // Operates in-place (passes rgb as input and output)
 
-        if (p->compensate_low_end)
-        {
-          _compensate_low_side(rgb, output_profile);
-        }
+	    // fix any negative we may have introduced
+      _compensate_low_side(
+        output_rgb_pixel,
+        &curve_params,
+        output_profile,
+        threshold_out,
+        distance_limit_out,
+        1
+      );
 
-        if (compensate_high_side)
-        {
-          _compensate_high_side(rgb, output_profile, p->highlight_compression_factor);
-        }
-
-        // bring back to working space
-        // Convert compensated output space pixel back to XYZ
-        dt_ioppr_rgb_matrix_to_xyz(rgb, xyz_pixel, output_profile->matrix_in_transposed, output_profile->lut_in,
-                               output_profile->unbounded_coeffs_in, output_profile->lutsize,
-                               output_profile->nonlinearlut);
-        dt_ioppr_xyz_to_rgb_matrix(xyz_pixel, rgb, work_profile->matrix_out_transposed,
-                              work_profile->lut_out,
-                              work_profile->unbounded_coeffs_out,
-                              work_profile->lutsize,
-                              work_profile->nonlinearlut);
-      }
+      // bring back to working space
+      // Convert compensated output space pixel back to XYZ
+      dt_apply_transposed_color_matrix(output_rgb_pixel, processing_to_pipe, rgb);
 
       // Copy final result (which is in rgb) to output buffer
       for_three_channels(k, aligned(out, rgb : 16)) out[k] = rgb[k];
@@ -1029,7 +1034,7 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   cairo_set_dash(cr, dashes, 2, 0);
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(0.5));
 
-  const float linear_y_guides[] = {0.18f / 16, 0.18f / 8, 0.18f / 4, 0.18f / 2, 0.18f, 0.18f * 2, 0.18f * 4 };
+  const float linear_y_guides[] = {0.18f / 16, 0.18f / 8, 0.18f / 4, 0.18f / 2, 0.18f, 0.18f * 2, 0.18f * 4, 1.0f };
   const int num_guides = sizeof(linear_y_guides) / sizeof(linear_y_guides[0]);
 
   for (int i = 0; i < num_guides; ++i)
@@ -1069,6 +1074,57 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   cairo_restore(cr); // Matches cairo_save(cr) at the beginning of this block
   // --- End Draw Gamma Guide Lines ---
 
+  // --- Draw Vertical EV Guide Lines ---
+  cairo_save(cr);
+  // Use the same style as horizontal guides
+  set_color(cr, darktable.bauhaus->graph_fg);
+  cairo_set_source_rgba(cr,
+                        darktable.bauhaus->graph_fg.red,
+                        darktable.bauhaus->graph_fg.green,
+                        darktable.bauhaus->graph_fg.blue, 0.4);
+  cairo_set_dash(cr, dashes, 2, 0); // Use the same dash pattern
+  cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(0.5));
+
+  float min_ev = curve_params.min_ev;
+  float max_ev = curve_params.max_ev;
+  float range_in_ev = curve_params.range_in_ev;
+
+  if (range_in_ev > _epsilon) // Avoid division by zero or tiny ranges
+  {
+    for (int ev = ceilf(min_ev); ev <= floorf(max_ev); ++ev)
+    {
+      float x_norm = (ev - min_ev) / range_in_ev;
+      // Clamp to ensure it stays within the graph bounds if min/max_ev aren't exactly integers
+      x_norm = CLAMPF(x_norm, 0.0f, 1.0f);
+      float x_graph = x_norm * g->graph_width;
+
+      cairo_move_to(cr, x_graph, 0);
+      cairo_line_to(cr, x_graph, g->graph_height);
+      cairo_stroke(cr);
+
+      // Draw label for the EV guide line
+      if (ev % 5 == 0 || ev == ceilf(min_ev) || ev == floorf(max_ev))
+      {
+        cairo_save(cr);
+        cairo_identity_matrix(cr); // Reset transformations for text
+        set_color(cr, darktable.bauhaus->graph_fg);
+        snprintf(text, sizeof(text), "%d", ev); // Format the EV value
+        pango_layout_set_text(layout, text, -1);
+        pango_layout_get_pixel_extents(layout, &g->ink, NULL);
+        // Position label slightly below the x-axis, centered horizontally
+        float label_x = margin_left + x_graph - g->ink.width / 2.0f - g->ink.x;
+        float label_y = margin_top + g->graph_height + g->inset / 2.0f;
+        // Ensure label stays within horizontal bounds
+        label_x = CLAMPF(label_x, margin_left - g->ink.width / 2.0f - g->ink.x, margin_left + g->graph_width - g->ink.width / 2.0f - g->ink.x);
+        cairo_move_to(cr, label_x, label_y);
+        pango_cairo_show_layout(cr, layout);
+        cairo_restore(cr);
+      }
+    }
+  }
+  cairo_restore(cr); // Matches cairo_save(cr) at the beginning of this block
+  // --- End Draw Vertical EV Guide Lines ---
+
   // Draw the curve
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.));
   set_color(cr, darktable.bauhaus->graph_fg);
@@ -1103,58 +1159,6 @@ static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t 
   cairo_fill(cr);
   cairo_stroke(cr);
   cairo_restore(cr);
-
-  // Draw Axis Labels (Simplified)
-  cairo_save(cr);
-  cairo_identity_matrix(cr); // Reset transformations for text
-  set_color(cr, darktable.bauhaus->graph_fg);
-
-  // Y-axis label (Output)
-  snprintf(text, sizeof(text), "1.0");
-  pango_layout_set_text(layout, text, -1);
-  pango_layout_get_pixel_extents(layout, &g->ink, NULL);
-  cairo_move_to(cr, margin_left - g->ink.width - g->inset, margin_top - g->ink.height / 2.0 - g->ink.y);
-  pango_cairo_show_layout(cr, layout);
-
-  snprintf(text, sizeof(text), "0.0");
-  pango_layout_set_text(layout, text, -1);
-  pango_layout_get_pixel_extents(layout, &g->ink, NULL);
-  cairo_move_to(cr, margin_left - g->ink.width - g->inset, margin_top + g->graph_height - g->ink.height / 2.0 - g->ink.y);
-  pango_cairo_show_layout(cr, layout);
-
-  // X-axis label (Input - Log Encoded)
-  snprintf(text, sizeof(text), "0.0");
-  pango_layout_set_text(layout, text, -1);
-  pango_layout_get_pixel_extents(layout, &g->ink, NULL);
-  cairo_move_to(cr, margin_left - g->ink.width / 2.0 - g->ink.x, margin_top + g->graph_height + g->inset);
-  pango_cairo_show_layout(cr, layout);
-
-  snprintf(text, sizeof(text), "1.0");
-  pango_layout_set_text(layout, text, -1);
-  pango_layout_get_pixel_extents(layout, &g->ink, NULL);
-  cairo_move_to(cr, margin_left + g->graph_width - g->ink.width / 2.0 - g->ink.x, margin_top + g->graph_height + g->inset);
-  pango_cairo_show_layout(cr, layout);
-
-  // Axis titles
-  snprintf(text, sizeof(text), _("Output"));
-  pango_layout_set_text(layout, text, -1);
-  pango_layout_get_pixel_extents(layout, &g->ink, NULL);
-  // Rotate and position Y axis title
-  cairo_save(cr);
-  cairo_translate(cr, g->inset, margin_top + g->graph_height/2.0 + g->ink.width/2.0 );
-  cairo_rotate(cr, -M_PI / 2.0);
-  cairo_move_to(cr, 0, 0);
-  pango_cairo_show_layout(cr, layout);
-  cairo_restore(cr);
-
-
-  snprintf(text, sizeof(text), _("Input (Log Encoded)"));
-  pango_layout_set_text(layout, text, -1);
-  pango_layout_get_pixel_extents(layout, &g->ink, NULL);
-  cairo_move_to(cr, margin_left + g->graph_width/2.0 - g->ink.width / 2.0 - g->ink.x, margin_top + g->graph_height + g->inset + g->line_height + g->inset/2.0);
-  pango_cairo_show_layout(cr, layout);
-
-  cairo_restore(cr); // Restore original matrix
 
   // --- Cleanup ---
   cairo_destroy(cr);
@@ -1364,13 +1368,71 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
-  
-  dt_bauhaus_toggle_from_params(self, "compensate_low_end");
+/*
+  float gamut_compression_threshold_in_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression R threshold"
+  float gamut_compression_threshold_in_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression G threshold"
+  float gamut_compression_threshold_in_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "input gamut compression R threshold"
 
-  // High end compensation controls
-  slider = dt_bauhaus_slider_from_params(self, "highlight_compression_factor");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("highlight compression strength"));
+  float gamut_compression_threshold_out_r;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression R threshold"
+  float gamut_compression_threshold_out_g;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression G threshold"
+  float gamut_compression_threshold_out_b;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "output gamut compression B threshold"
+
+  float gamut_compression_distance_limit_in_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression C distance limit"
+  float gamut_compression_distance_limit_in_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "input gamut compression M distance limit"
+  float gamut_compression_distance_limit_in_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2  $DESCRIPTION: "input gamut compression Y distance limit"
+  float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression C distance limit"
+  float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression M distance limit"
+  float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression Y distance limit"
+*/
+  
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_r");
+  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("starting point of compression for input R channel"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_c");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum input C distance to handle"));
+  
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_g");
+  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("starting point of compression for input G channel"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_m");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum input M distance to handle"));
+  
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_b");
+  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("starting point of compression for input B channel"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_y");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum input Y distance to handle"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_r");
+  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("starting point of compression for output R channel"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_c");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum output C distance to handle"));
+  
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_g");
+  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("starting point of compression for output G channel"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_m");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum output M distance to handle"));
+  
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_b");
+  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("starting point of compression for output B channel"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_y");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum output Y distance to handle"));
+
   self->widget = main_box;
 }
 
@@ -1442,9 +1504,6 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_gamma = 2.2;
   p.curve_pivot_x_shift = 0.0;
   p.curve_pivot_y_linear = 0.18;
-
-  p.compensate_low_end = FALSE;
-  p.highlight_compression_factor = 0.0f;
 
   // Base preset
   p.look_power = 1.0f;
