@@ -518,11 +518,12 @@ static void _compensate_low_side(
     const float compressed_distance = distance_from_achromatic < threshold[k] ? distance_from_achromatic :
             scale * sqrtf(distance_from_achromatic - threshold[k] + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + threshold[k];
     // Inverse RGB Ratios to RGB
+    // float was = pixel_in_out[k];
     pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
-    if (pixel_in_out[k] < 0)
-    {
-      printf("in/out: %d channel %ld = %f\n", in_out, k, pixel_in_out[k]);
-    }
+    // if (pixel_in_out[k] < 0)
+    // {
+    //   printf("in/out: %d channel %ld = %f, was: %f\n", in_out, k, pixel_in_out[k], was);
+    // }
   }
 }
 
@@ -895,10 +896,19 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   mat3SSEinv(processing_to_pipe, pipe_to_processing);
 
 
-  const dt_aligned_pixel_t threshold_in = {p->gamut_compression_threshold_in_r, p->gamut_compression_threshold_in_g, p->gamut_compression_threshold_in_b, 0};
-  const dt_aligned_pixel_t distance_limit_in = {p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_m, p->gamut_compression_distance_limit_in_y, 0};
-  const dt_aligned_pixel_t threshold_out = {p->gamut_compression_threshold_out_r, p->gamut_compression_threshold_out_g, p->gamut_compression_threshold_out_b, 0};
-  const dt_aligned_pixel_t distance_limit_out = {p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_m, p->gamut_compression_distance_limit_out_y, 0};
+  // const dt_aligned_pixel_t threshold_in = {p->gamut_compression_threshold_in_r, p->gamut_compression_threshold_in_g, p->gamut_compression_threshold_in_b, 0};
+  // const dt_aligned_pixel_t distance_limit_in = {p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_m, p->gamut_compression_distance_limit_in_y, 0};
+  // const dt_aligned_pixel_t threshold_out = {p->gamut_compression_threshold_out_r, p->gamut_compression_threshold_out_g, p->gamut_compression_threshold_out_b, 0};
+  // const dt_aligned_pixel_t distance_limit_out = {p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_m, p->gamut_compression_distance_limit_out_y, 0};
+  const dt_aligned_pixel_t threshold_in = {0.8, 0.8, 0.8, 0};
+  const dt_aligned_pixel_t distance_limit_in = {p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_c, p->gamut_compression_distance_limit_in_c, 0};
+  const dt_aligned_pixel_t threshold_out = {0.8, 0.8, 0.8, 0};
+  const dt_aligned_pixel_t distance_limit_out = {p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_c, p->gamut_compression_distance_limit_out_c, 0};
+
+  printf("threshold_in: %f, %f, %f\n", threshold_in[0], threshold_in[1], threshold_in[2]);
+  printf("distance_limit_in: %f, %f, %f\n", distance_limit_in[0], distance_limit_in[1], distance_limit_in[2]);
+  printf("threshold_out: %f, %f, %f\n", threshold_out[0], threshold_out[1], threshold_out[2]);
+  printf("distance_limit_out: %f, %f, %f\n", distance_limit_out[0], distance_limit_out[1], distance_limit_out[2]);
   
   DT_OMP_FOR()
   for(int j = 0; j < roi_out->height; j++)
@@ -1385,53 +1395,53 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
   float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.2 $DESCRIPTION: "output gamut compression Y distance limit"
 */
   
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_r");
-  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("starting point of compression for input R channel"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_r");
+  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for input R channel"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_c");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("maximum input C distance to handle"));
   
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_g");
-  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("starting point of compression for input G channel"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_g");
+  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for input G channel"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_m");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum input M distance to handle"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_m");
+  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  // gtk_widget_set_tooltip_text(slider, _("maximum input M distance to handle"));
   
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_b");
-  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("starting point of compression for input B channel"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_b");
+  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for input B channel"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_y");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum input Y distance to handle"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_y");
+  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  // gtk_widget_set_tooltip_text(slider, _("maximum input Y distance to handle"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_r");
-  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("starting point of compression for output R channel"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_r");
+  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for output R channel"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_c");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("maximum output C distance to handle"));
   
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_g");
-  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("starting point of compression for output G channel"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_g");
+  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for output G channel"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_m");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum output M distance to handle"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_m");
+  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  // gtk_widget_set_tooltip_text(slider, _("maximum output M distance to handle"));
   
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_b");
-  dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("starting point of compression for output B channel"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_b");
+  // dt_bauhaus_slider_set_soft_range(slider, 0.5f, 1.0f);
+  // gtk_widget_set_tooltip_text(slider, _("starting point of compression for output B channel"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_y");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum output Y distance to handle"));
+  // slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_y");
+  // dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  // gtk_widget_set_tooltip_text(slider, _("maximum output Y distance to handle"));
 
   self->widget = main_box;
 }
@@ -1504,6 +1514,14 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_gamma = 2.2;
   p.curve_pivot_x_shift = 0.0;
   p.curve_pivot_y_linear = 0.18;
+
+  p.gamut_compression_threshold_in_r = p.gamut_compression_threshold_in_g = p.gamut_compression_threshold_in_b = 0.8f;
+  p.gamut_compression_threshold_out_r = p.gamut_compression_threshold_out_g = p.gamut_compression_threshold_in_b = 0.8f;
+
+  p.gamut_compression_distance_limit_in_c = p.gamut_compression_distance_limit_in_m = p.gamut_compression_distance_limit_in_y = 1.2f;
+  p.gamut_compression_distance_limit_out_c = p.gamut_compression_distance_limit_out_m = p.gamut_compression_distance_limit_out_y = 1.0f;
+
+
 
   // Base preset
   p.look_power = 1.0f;
