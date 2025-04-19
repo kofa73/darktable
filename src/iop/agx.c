@@ -32,6 +32,7 @@ typedef struct dt_iop_agx_user_params_t
   float look_slope; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
   float look_power; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "power"
   float look_saturation;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "saturation"
+  float look_vibrance;               // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "vibrance"
   float look_original_hue_mix_ratio; // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "preserve hue"
 
   // log mapping params
@@ -144,6 +145,7 @@ typedef struct curve_and_look_params_t
   float look_slope;
   float look_power;
   float look_saturation;
+  float look_vibrance;
   float look_original_hue_mix_ratio;
 } curve_and_look_params_t;
 
@@ -389,6 +391,7 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
   const float offset = params->look_offset;
   const float power = params->look_power;
   const float sat = params->look_saturation;
+  const float vibrance = params->look_vibrance;
 
   // Apply ASC CDL (Slope, Offset, Power) per channel
   for_three_channels(k, aligned(pixel_in_out: 16))
@@ -408,6 +411,14 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
   for_three_channels(k, aligned(pixel_in_out: 16))
   {
     pixel_in_out[k] = luma + sat * (pixel_in_out[k] - luma);
+  }
+
+  if (vibrance > 1)
+  {
+    dt_aligned_pixel_t hsv_pixel = {0.0f};
+    dt_RGB_2_HSL(pixel_in_out, hsv_pixel);
+    hsv_pixel[1] = powf(hsv_pixel[1], 1/vibrance);
+    dt_HSL_2_RGB(hsv_pixel, pixel_in_out);
   }
 }
 
@@ -486,6 +497,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   params.look_offset = user_params->look_offset;
   params.look_slope = user_params->look_slope;
   params.look_saturation = user_params->look_saturation;
+  params.look_vibrance = user_params->look_vibrance;
   params.look_power = user_params->look_power;
   params.look_original_hue_mix_ratio = user_params->look_original_hue_mix_ratio;
 
@@ -1180,8 +1192,11 @@ static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   // look_saturation
   slider = dt_bauhaus_slider_from_params(self, "look_saturation");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("decrease or increase saturation "));
-  
+  gtk_widget_set_tooltip_text(slider, _("decrease or increase saturation"));
+  slider = dt_bauhaus_slider_from_params(self, "look_vibrance");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("decrease or increase vibrance"));
+
   // look_original_hue_mix_ratio
   slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
@@ -1396,10 +1411,10 @@ void init_presets(dt_iop_module_so_t *self)
   p.gamut_compression_distance_limit_in = 1.0f;
   p.gamut_compression_distance_limit_out = 1.0f;
 
-  // Base preset
   p.look_power = 1.0f;
   p.look_offset = 0.0f;
   p.look_saturation = 1.0f;
+  p.look_vibrance = 1.0f;
 
   dt_gui_presets_add_generic(_("AgX Base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
