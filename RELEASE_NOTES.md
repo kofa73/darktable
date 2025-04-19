@@ -90,8 +90,8 @@ changes (where available).
     - Add the line opencl_force_c_locale=anything to your
       ~/.config/darktable/darktablerc file.
 
-    - If that solves your problem, please report the issue to github
-      PR #xxxx, including information on the make of your GPU and the
+    - If that solves your problem, please report the issue to GiHhub
+      PR #18342, including information on the make of your GPU and the
       version of your drivers. We can then for the next release either
       by default reenable the workaround for drivers that need them,
       or warn people with antiquated drivers that they need to update.
@@ -154,6 +154,8 @@ changes (where available).
 
 - Fixed a crash in the import dialog when trying to add a new place to
   an empty places list.
+
+- Fixed bitdepth setting not saved in AVIF export presets.
 
 ## Lua
 
