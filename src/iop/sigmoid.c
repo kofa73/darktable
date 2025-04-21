@@ -944,7 +944,7 @@ void gui_init(dt_iop_module_t *self)
   slider = dt_bauhaus_slider_from_params(sect, #color "_rotation");                                               \
   dt_bauhaus_slider_set_format(slider, "°");                                                                      \
   dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
-  dt_bauhaus_slider_set_factor(slider, 180.f / M_PI_F);                                                        \
+  dt_bauhaus_slider_set_factor(slider, 180.f / M_PI_F);                                                           \
   dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
   gtk_widget_set_tooltip_text(slider, rotation_tooltip);
 

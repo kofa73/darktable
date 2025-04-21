@@ -949,11 +949,11 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     base_to_pipe
     );
 
-  dt_colormatrix_t pipe_to_processing;
-  dt_colormatrix_t processing_to_pipe;
-  dt_colormatrix_mul(pipe_to_processing, work_profile->matrix_in_transposed,
-                     output_profile->matrix_out_transposed);
-  mat3SSEinv(processing_to_pipe, pipe_to_processing);
+  // dt_colormatrix_t pipe_to_processing;
+  // dt_colormatrix_t processing_to_pipe;
+  // dt_colormatrix_mul(pipe_to_processing, work_profile->matrix_in_transposed,
+  //                    output_profile->matrix_out_transposed);
+  // mat3SSEinv(processing_to_pipe, pipe_to_processing);
 
   const float distance_limit_in = p->gamut_compression_distance_limit_in;
   const float distance_limit_out = p->gamut_compression_distance_limit_out;
