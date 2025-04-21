@@ -134,6 +134,10 @@ changes (where available).
 
 - Changing orientation (via the flip module) respects changes done in crop module.
 
+- In the history module item tooltip, fixed the formatting and scaling
+  of the changes to match the values as seen in the modules
+  themselves.
+
 ## Bug Fixes
 
 - Fixed sidecar writing if quitting from darkroom.
@@ -156,6 +160,8 @@ changes (where available).
   an empty places list.
 
 - Fixed bitdepth setting not saved in AVIF export presets.
+
+- Fixed reset button not working in the geotagging module.
 
 ## Lua
 
