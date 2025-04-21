@@ -853,9 +853,9 @@ static void _calculate_adjusted_primaries(const curve_and_look_params_t *const c
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
                                           dt_colormatrix_t pipe_to_base,
-                                          dt_colormatrix_t base_to_rendering,
                                           dt_colormatrix_t rendering_to_base,
-                                          dt_colormatrix_t base_to_pipe)
+                                          dt_colormatrix_t base_to_pipe,
+                                          dt_colormatrix_t pipe_to_rendering)
 {
   // Make adjusted primaries for generating the inset matrix
   //
@@ -886,11 +886,15 @@ static void _calculate_adjusted_primaries(const curve_and_look_params_t *const c
   dt_colormatrix_t custom_to_XYZ;
   dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
                                                             custom_to_XYZ);
+
+  dt_colormatrix_t base_to_rendering;
   dt_colormatrix_mul(
     base_to_rendering,
     custom_to_XYZ, // custom -> XYZ
     base_profile->matrix_out_transposed // XYZ -> base
     );
+  dt_colormatrix_mul(pipe_to_rendering, pipe_to_base,
+                      base_to_rendering);
 
   for(size_t i = 0; i < 3; i++)
   {
@@ -940,35 +944,27 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
 
-  dt_colormatrix_t pipe_to_base, base_to_rendering, rendering_to_base, base_to_pipe;
+  dt_colormatrix_t pipe_to_base, rendering_to_base, base_to_pipe, pipe_to_rendering;
   _calculate_adjusted_primaries(&curve_params,
     work_profile, output_profile,
     pipe_to_base,
-    base_to_rendering,
     rendering_to_base,
-    base_to_pipe
+    base_to_pipe,
+    pipe_to_rendering
     );
-
-  // dt_colormatrix_t pipe_to_processing;
-  // dt_colormatrix_t processing_to_pipe;
-  // dt_colormatrix_mul(pipe_to_processing, work_profile->matrix_in_transposed,
-  //                    output_profile->matrix_out_transposed);
-  // mat3SSEinv(processing_to_pipe, pipe_to_processing);
 
   const float distance_limit_in = p->gamut_compression_distance_limit_in;
   const float distance_limit_out = p->gamut_compression_distance_limit_out;
 
-  DT_OMP_FOR()
+  //DT_OMP_FOR()
   for(size_t k = 0; k < 4 * npixels; k += 4)
   {
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
-    dt_aligned_pixel_t pix_in_base;
 
-    // Convert to "base primaries"
-    dt_apply_transposed_color_matrix(pix_in, pipe_to_base, pix_in_base);
+    // Convert to "rendering primaries"
     dt_aligned_pixel_t rendering_RGB;
-    dt_apply_transposed_color_matrix(pix_in_base, base_to_rendering, rendering_RGB);
+    dt_apply_transposed_color_matrix(pix_in, pipe_to_rendering, rendering_RGB);
 
     _compensate_low_side(
       rendering_RGB,
@@ -977,7 +973,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     );
 
     // now rendering_RGB pixel holds rendering-profile values, and no negative values
-
     _agx_tone_mapping(rendering_RGB, &curve_params); // Operates in-place (passes rgb as input and output)
 
     dt_aligned_pixel_t base_RGB;
