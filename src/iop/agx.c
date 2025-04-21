@@ -1,19 +1,23 @@
 #include "bauhaus/bauhaus.h"
 #include "common/colorspaces_inline_conversions.h"
-#include "develop/imageop.h"
-#include "develop/imageop_gui.h"
-#include "iop/iop_api.h"
-#include "gui/draw.h"
-#include "gui/accelerators.h"
-#include "gui/color_picker_proxy.h"
-#include "control/control.h"
-#include "develop/develop.h"
+#include "common/custom_primaries.h"
 #include "common/iop_profile.h"
 #include "common/matrices.h"
+#include "control/control.h"
+#include "develop/develop.h"
+#include "develop/imageop.h"
+#include "develop/imageop_gui.h"
+#include "gui/accelerators.h"
+#include "gui/color_picker_proxy.h"
+#include "gui/draw.h"
+#include "iop/iop_api.h"
 #include <gtk/gtk.h>
-#include <math.h> // For math functions
-#include <stdlib.h>
+#include <math.h>             // For math functions
 #include <pango/pangocairo.h> // For text rendering in graph
+#include <stdlib.h>
+#include "common/math.h"
+#include "gui/gtk.h"
+#include "gui/presets.h"
 
 // Module introspection version
 DT_MODULE_INTROSPECTION(1, dt_iop_agx_user_params_t)
@@ -65,14 +69,24 @@ typedef struct dt_iop_agx_user_params_t
 
   float gamut_compression_distance_limit_in; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "input gamut compression"
   float gamut_compression_distance_limit_out; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "output gamut compression"
+
+  // custom primaries
+  float red_inset;        // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation"
+  float red_rotation;     // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "red rotation"
+  float green_inset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green attenuation"
+  float green_rotation;   // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "green rotation"
+  float blue_inset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation"
+  float blue_rotation;    // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
+  float purity;           // $MIN:  0.0  $MAX: 1.0  $DEFAULT: 0.0 $DESCRIPTION: "recover purity"
 } dt_iop_agx_user_params_t;
 
 
 typedef struct dt_iop_agx_gui_data_t
 {
-  dt_gui_collapsible_section_t advanced_section;
-  dt_gui_collapsible_section_t area_section;
   dt_gui_collapsible_section_t look_section;
+  dt_gui_collapsible_section_t area_section;
+  dt_gui_collapsible_section_t advanced_section;
+  dt_gui_collapsible_section_t primaries_section;
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -147,6 +161,11 @@ typedef struct curve_and_look_params_t
   float look_saturation;
   float look_vibrance;
   float look_original_hue_mix_ratio;
+
+  // custom primaries
+  float inset[3];
+  float rotation[3];
+  float purity;
 } curve_and_look_params_t;
 
 typedef struct
@@ -222,7 +241,7 @@ const mat3f AgXInsetMatrixInverse = { { { 1.1974410768877f, -0.14426151269800f, 
 
 static float _luminance(const dt_aligned_pixel_t pixel, const dt_iop_order_iccprofile_info_t *const profile)
 {
-  float lum = (profile) ? dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
+  const float lum = (profile) ? dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
                                                           profile->unbounded_coeffs_in, profile->lutsize,
                                                           profile->nonlinearlut)
                       : dt_camera_rgb_luminance(pixel);
@@ -614,6 +633,14 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   params.shoulder_a = _calculate_A(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, params.shoulder_b);
   printf("shoulder_a = %f\n", params.shoulder_a);
 
+  params.purity = user_params->purity;
+  params.inset[0] = user_params->red_inset;
+  params.inset[1] = user_params->green_inset;
+  params.inset[2] = user_params->blue_inset;
+  params.rotation[0] = user_params->red_rotation;
+  params.rotation[1] = user_params->green_rotation;
+  params.rotation[2] = user_params->blue_rotation;
+
   //if(isnan(shoulder_scale))
   //{
   //  errors++; // printf("shoulder_scale is NaN\n");
@@ -822,12 +849,73 @@ void _print_curve(curve_and_look_params_t *curve_params)
   printf("\n");
 }
 
+static void _calculate_adjusted_primaries(const curve_and_look_params_t *const curve_and_look_params,
+                                          const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
+                                          const dt_iop_order_iccprofile_info_t *const base_profile,
+                                          dt_colormatrix_t pipe_to_base,
+                                          dt_colormatrix_t base_to_rendering,
+                                          dt_colormatrix_t rendering_to_base,
+                                          dt_colormatrix_t base_to_pipe)
+{
+  // Make adjusted primaries for generating the inset matrix
+  //
+  // References:
+  // AgX by Troy Sobotka - https://github.com/sobotka/AgX-S2O3
+  // Related discussions on Blender Artists forums -
+  // https://blenderartists.org/t/feedback-development-filmic-baby-step-to-a-v2/1361663
+  //
+  // The idea is to "inset" the work RGB data toward achromatic
+  // along spectral lines before per-channel curves. This makes
+  // handling of bright, saturated colors much better as the
+  // per-channel process desaturates them.
+  // The primaries are also rotated to compensate for Abney etc.
+  // and achieve a favourable shift towards yellow.
+
+  // First, calculate matrix to get from pipe work profile to "base primaries".
+  dt_colormatrix_mul(pipe_to_base,
+                    pipe_work_profile->matrix_in_transposed, // pipe -> XYZ
+                     base_profile->matrix_out_transposed); // XYZ -> base
+  mat3SSEinv(base_to_pipe, pipe_to_base);
+
+  // Rotated, scaled primaries are calculated based on the "base profile"
+  float custom_primaries[3][2];
+  for(size_t i = 0; i < 3; i++)
+    dt_rotate_and_scale_primary(base_profile, 1.f - curve_and_look_params->inset[i], curve_and_look_params->rotation[i], i,
+                                custom_primaries[i]);
+
+  dt_colormatrix_t custom_to_XYZ;
+  dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
+                                                            custom_to_XYZ);
+  dt_colormatrix_mul(
+    base_to_rendering,
+    custom_to_XYZ, // custom -> XYZ
+    base_profile->matrix_out_transposed // XYZ -> base
+    );
+
+  for(size_t i = 0; i < 3; i++)
+  {
+    const float scaling = 1.f - curve_and_look_params->purity * curve_and_look_params->inset[i];
+    dt_rotate_and_scale_primary(base_profile, scaling, curve_and_look_params->rotation[i], i, custom_primaries[i]);
+  }
+
+  dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
+                                                            custom_to_XYZ);
+  dt_colormatrix_t tmp;
+  dt_colormatrix_mul(tmp,
+    custom_to_XYZ, // custom -> XYZ
+    base_profile->matrix_out_transposed // XYZ -> base
+    );
+  mat3SSEinv(rendering_to_base, tmp);
+}
+
 // Process
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
   const dt_iop_agx_user_params_t *p = piece->data;
-  const size_t ch = piece->colors;
+  const float *const in = (const float *)ivoid;
+  float *const out = (float *)ovoid;
+  const size_t npixels = (size_t)roi_in->width * roi_in->height;
 
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out))
   {
@@ -852,64 +940,67 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
 
+  dt_colormatrix_t pipe_to_base, base_to_rendering, rendering_to_base, base_to_pipe;
+  _calculate_adjusted_primaries(&curve_params,
+    work_profile, output_profile,
+    pipe_to_base,
+    base_to_rendering,
+    rendering_to_base,
+    base_to_pipe
+    );
+
   dt_colormatrix_t pipe_to_processing;
   dt_colormatrix_t processing_to_pipe;
   dt_colormatrix_mul(pipe_to_processing, work_profile->matrix_in_transposed,
                      output_profile->matrix_out_transposed);
   mat3SSEinv(processing_to_pipe, pipe_to_processing);
 
-
   const float distance_limit_in = p->gamut_compression_distance_limit_in;
   const float distance_limit_out = p->gamut_compression_distance_limit_out;
 
   DT_OMP_FOR()
-  for(int j = 0; j < roi_out->height; j++)
+  for(size_t k = 0; k < 4 * npixels; k += 4)
   {
-    const float *in = (float *)ivoid + (size_t)ch * roi_in->width * j;
-    float *out = (float *)ovoid + (size_t)ch * roi_out->width * j;
+    const float *const restrict pix_in = in + k;
+    float *const restrict pix_out = out + k;
+    dt_aligned_pixel_t pix_in_base;
 
-    for(int i = 0; i < roi_out->width; i++)
-    {
-      dt_aligned_pixel_t rgb = { in[0], in[1], in[2], in[3] };
+    // Convert to "base primaries"
+    dt_apply_transposed_color_matrix(pix_in, pipe_to_base, pix_in_base);
+    dt_aligned_pixel_t rendering_RGB;
+    dt_apply_transposed_color_matrix(pix_in_base, base_to_rendering, rendering_RGB);
 
-	    dt_aligned_pixel_t output_rgb_pixel;
-      dt_apply_transposed_color_matrix(rgb, pipe_to_processing, output_rgb_pixel);
+    _compensate_low_side(
+      rendering_RGB,
+      distance_limit_in,
+      0
+    );
 
-      _compensate_low_side(
-        output_rgb_pixel,
-        distance_limit_in,
-        0
-      );
+    // now rendering_RGB pixel holds rendering-profile values, and no negative values
 
-      // now the RGB pixel holds output-profile values, and no negative values
+    _agx_tone_mapping(rendering_RGB, &curve_params); // Operates in-place (passes rgb as input and output)
 
-      _agx_tone_mapping(output_rgb_pixel, &curve_params); // Operates in-place (passes rgb as input and output)
+    dt_aligned_pixel_t base_RGB;
+    dt_apply_transposed_color_matrix(rendering_RGB, rendering_to_base, base_RGB);
 
-	    // fix any negative we may have introduced
-      _compensate_low_side(
-        output_rgb_pixel,
-        distance_limit_out,
-        1
-      );
+	  // back in base (output) profile, fix any negative we may have introduced
+    _compensate_low_side(
+      base_RGB,
+      distance_limit_out,
+      1
+    );
 
-      // bring back to working space
-      // Convert compensated output space pixel back to XYZ
-      dt_apply_transposed_color_matrix(output_rgb_pixel, processing_to_pipe, rgb);
+    // bring back to working space
+    // Convert compensated output space pixel back to XYZ
+    dt_apply_transposed_color_matrix(base_RGB, base_to_pipe, pix_out);
 
-      // Copy final result (which is in rgb) to output buffer
-      for_three_channels(k, aligned(out, rgb : 16)) out[k] = rgb[k];
-      if(ch == 4) {
-        out[3] = in[3]; // Copy alpha if it exists
-      }
-
-      in += ch;
-      out += ch;
-    }
+    // Copy over the alpha channel
+    pix_out[3] = pix_in[3];
   }
 }
 
 // Plot the curve
-static gboolean agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t *self)
+static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t *self)
 {
   dt_iop_agx_user_params_t *p = self->params;
   dt_iop_agx_gui_data_t *g = self->gui_data;
@@ -1169,26 +1260,26 @@ static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   GtkWidget *main_box = self->widget;
   // Look Section
   dt_gui_new_collapsible_section(&gui_data->look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(box), DT_ACTION(self));
-  
+
   self->widget = GTK_WIDGET(gui_data->look_section.container);
   // Reuse the slider variable for all sliders instead of creating new ones in each scope
   GtkWidget *slider;
-  
+
   // look_offset
   slider = dt_bauhaus_slider_from_params(self, "look_offset");
   dt_bauhaus_slider_set_soft_range(slider, -0.5f, 0.5f);
   gtk_widget_set_tooltip_text(slider, _("deepen or lift shadows"));  // Tooltip text for look_offset
-  
+
   // look_slope
   slider = dt_bauhaus_slider_from_params(self, "look_slope");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("decrease or increase contrast and brightness"));  
-  
+  gtk_widget_set_tooltip_text(slider, _("decrease or increase contrast and brightness"));
+
   // look_power
   slider = dt_bauhaus_slider_from_params(self, "look_power");
   dt_bauhaus_slider_set_soft_range(slider, 0.5f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("increase or decrease brightness"));
-  
+
   // look_saturation
   slider = dt_bauhaus_slider_from_params(self, "look_saturation");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
@@ -1201,14 +1292,14 @@ static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("Hue mix ratio adjustment"));
-  
+
   self->widget = main_box;
 }
 
 static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget; // save
-   
+
   GtkWidget *base_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(box), base_box, TRUE, TRUE, 0);
 
@@ -1223,17 +1314,17 @@ static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   g_object_set_data(G_OBJECT(gui_data->area), "iop-instance", self);
   dt_action_define_iop(self, NULL, N_("graph"), GTK_WIDGET(gui_data->area), NULL);
   gtk_widget_set_can_focus(GTK_WIDGET(gui_data->area), TRUE);
-  g_signal_connect(G_OBJECT(gui_data->area), "draw", G_CALLBACK(agx_draw_curve), self);
+  g_signal_connect(G_OBJECT(gui_data->area), "draw", G_CALLBACK(_agx_draw_curve), self);
   gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->area), _("tone mapping curve"));
 
   // Pack drawing area at the top
   gtk_box_pack_start(GTK_BOX(area_container), GTK_WIDGET(gui_data->area), TRUE, TRUE, 0);
-  
+
   //separated picker box for black/white  relative exposure
   GtkWidget *picker_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(box), picker_box, TRUE, TRUE, 0);
   self->widget = picker_box;
- 
+
   // Create section label
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "Input exposure range")));
 
@@ -1263,7 +1354,7 @@ static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
 
   // Reuse slider variable for all sliders that use _add_slider_with_tooltip
   GtkWidget *slider;
-  
+
   // curve_gamma
   slider = dt_bauhaus_slider_from_params(self, "curve_gamma");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
@@ -1307,22 +1398,22 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
   self->widget = GTK_WIDGET(gui_data->advanced_section.container);
    // Reuse the slider variable for all sliders
   GtkWidget *slider;
-  
+
   // Toe length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_below_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
   gtk_widget_set_tooltip_text(slider, _("toe length"));
-  
+
   // Toe intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_y");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
-  
+
   // Shoulder length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
   gtk_widget_set_tooltip_text(slider, _("shoulder length"));
-  
+
   // Shoulder intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
@@ -1335,6 +1426,55 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("maximum output distance to handle"));
+
+  self->widget = main_box;
+}
+
+
+static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget *main_box = self->widget;
+  GtkWidget *slider;
+
+  // primaries collapsible section
+  dt_gui_new_collapsible_section(&gui_data->primaries_section, "plugins/darkroom/agx/expand_primaries",
+                                 _("primaries"), GTK_BOX(main_box), DT_ACTION(self));
+  //dt_iop_sigmoid_gui_data_t *g
+  gtk_widget_set_tooltip_text(gui_data->primaries_section.expander, _("set custom primaries"));
+
+  self->widget = GTK_WIDGET(gui_data->primaries_section.container);
+  dt_iop_module_t *sect = DT_IOP_SECTION_FOR_PARAMS(self, N_("primaries"));
+
+#define SETUP_COLOR_COMBO(color, r, g, b, inset_tooltip, rotation_tooltip)                                        \
+  slider = dt_bauhaus_slider_from_params(sect, #color "_inset");                                                  \
+  dt_bauhaus_slider_set_format(slider, "%");                                                                      \
+  dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
+  dt_bauhaus_slider_set_factor(slider, 100.f);                                                                    \
+  dt_bauhaus_slider_set_soft_range(slider, 0.f, 0.5f);                                                            \
+  dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
+  gtk_widget_set_tooltip_text(slider, inset_tooltip);                                                             \
+                                                                                                                  \
+  slider = dt_bauhaus_slider_from_params(sect, #color "_rotation");                                               \
+  dt_bauhaus_slider_set_format(slider, "°");                                                                      \
+  dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
+  dt_bauhaus_slider_set_factor(slider, 180.f / M_PI_F);                                                           \
+  dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
+  gtk_widget_set_tooltip_text(slider, rotation_tooltip);
+
+  const float desaturation = 0.2f;
+  SETUP_COLOR_COMBO(red, 1.f - desaturation, desaturation, desaturation, _("attenuate the purity of the red primary"),
+                    _("rotate the red primary"));
+  SETUP_COLOR_COMBO(green, desaturation, 1.f - desaturation, desaturation, _("attenuate the purity of the green primary"),
+                    _("rotate the green primary"));
+  SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, _("attenuate the purity of the blue primary"),
+                    _("rotate the blue primary"));
+#undef SETUP_COLOR_COMBO
+
+  slider = dt_bauhaus_slider_from_params(sect, "purity");
+  dt_bauhaus_slider_set_format(slider, "%");
+  dt_bauhaus_slider_set_digits(slider, 0);
+  dt_bauhaus_slider_set_factor(slider, 100.f);
+  gtk_widget_set_tooltip_text(slider, _("recover some of the original purity after the inset"));
 
   self->widget = main_box;
 }
@@ -1365,11 +1505,14 @@ void gui_init(dt_iop_module_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), tonemap_box, TRUE, TRUE, 0);
   GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(self->widget), advanced_box, TRUE, TRUE, 0);
+  GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(self->widget), advanced_box, TRUE, TRUE, 0);
 
    _add_look_box(self, look_box, gui_data);
    _add_base_box(self, tonemap_box, gui_data);
    _add_advanced_box(self, advanced_box, gui_data);
-   
+  _add_primaries_box(self, primaries_box, gui_data);
+
   self->widget = self_widget;
 }
 
