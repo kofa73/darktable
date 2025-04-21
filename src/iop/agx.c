@@ -25,7 +25,7 @@ DT_MODULE_INTROSPECTION(1, dt_iop_agx_user_params_t)
 // so we have a breakpoint target in error-handling branches, to be removed after debugging
 static int errors = 0; // Use static if needed within this file only
 
-const float _epsilon = 1E-6f;
+static const float _epsilon = 1E-6f;
 
 // Module parameters struct
 // Updated struct dt_iop_agx_user_params_t
@@ -67,8 +67,19 @@ typedef struct dt_iop_agx_user_params_t
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
 
-  float gamut_compression_distance_limit_in; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "input gamut compression"
-  float gamut_compression_distance_limit_out; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "output gamut compression"
+  float gamut_compression_threshold_in_r; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input red compression target"
+  float gamut_compression_threshold_in_g; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input green compression target"
+  float gamut_compression_threshold_in_b; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input blue compression target"
+  float gamut_compression_distance_limit_in_c; // $MIN: 1.0 $MAX: 3.0 $DEFAULT: 1.0 $DESCRIPTION: "max input cyan oversaturation"
+  float gamut_compression_distance_limit_in_m; // $MIN: 1.0 $MAX: 3.0 $DEFAULT: 1.0 $DESCRIPTION: "max input magenta oversaturation"
+  float gamut_compression_distance_limit_in_y; // $MIN: 1.0 $MAX: 3.0 $DEFAULT: 1.0 $DESCRIPTION: "max input yellow oversaturation"
+
+  float gamut_compression_threshold_out_r; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "output red compression target"
+  float gamut_compression_threshold_out_g; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "output green compression target"
+  float gamut_compression_threshold_out_b; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "output blue compression target"
+  float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "max output cyan oversaturation"
+  float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "max output magenta oversaturation"
+  float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "max output yellow oversaturation"
 
   // custom primaries
   float red_inset;        // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation"
@@ -80,13 +91,13 @@ typedef struct dt_iop_agx_user_params_t
   float purity;           // $MIN:  0.0  $MAX: 1.0  $DEFAULT: 0.0 $DESCRIPTION: "recover purity"
 } dt_iop_agx_user_params_t;
 
-
 typedef struct dt_iop_agx_gui_data_t
 {
   dt_gui_collapsible_section_t look_section;
   dt_gui_collapsible_section_t area_section;
   dt_gui_collapsible_section_t advanced_section;
   dt_gui_collapsible_section_t primaries_section;
+  dt_gui_collapsible_section_t gamut_compression_section;
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -168,21 +179,6 @@ typedef struct curve_and_look_params_t
   float purity;
 } curve_and_look_params_t;
 
-typedef struct
-{
-  float m[3][3];
-} mat3f;
-
-
-// Helper function: matrix multiplication
-static void _mat3f_mul_aligned_pixel(dt_aligned_pixel_t result, const mat3f m, const dt_aligned_pixel_t v)
-{
-  result[0] = m.m[0][0] * v[0] + m.m[0][1] * v[1] + m.m[0][2] * v[2];
-  result[1] = m.m[1][0] * v[0] + m.m[1][1] * v[1] + m.m[1][2] * v[2];
-  result[2] = m.m[2][0] * v[0] + m.m[2][1] * v[1] + m.m[2][2] * v[2];
-  result[3] = v[3]; // Preserve alpha
-}
-
 // Translatable name
 const char *name()
 {
@@ -229,16 +225,6 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 }
 
 // AgX implementation
-
-const mat3f AgXInsetMatrix = { { { 0.856627153315983f, 0.0951212405381588f, 0.0482516061458583f },
-                                 { 0.137318972929847f, 0.761241990602591f, 0.101439036467562f },
-                                 { 0.11189821299995f, 0.0767994186031903f, 0.811302368396859f } } };
-
-
-const mat3f AgXInsetMatrixInverse = { { { 1.1974410768877f, -0.14426151269800f, -0.053179564189704f },
-                                        { -0.19647462632135f, 1.3540951314697f, -0.15762050514838f },
-                                        { -0.14655741710660f, -0.10828405878847f, 1.2548414758951f } } };
-
 static float _luminance(const dt_aligned_pixel_t pixel, const dt_iop_order_iccprofile_info_t *const profile)
 {
   const float lum = (profile) ? dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
@@ -479,33 +465,69 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
   return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
 
+static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order_iccprofile_info_t *const profile)
+{
+  if(pixel_in_out[0] >= 0.0f && pixel_in_out[1] >= 0.0f && pixel_in_out[2] >= 0.0f)
+  {
+    // No compensation needed
+    return;
+  }
+
+  float original_luminance = _luminance(pixel_in_out, profile);
+  if (original_luminance < _epsilon)
+  {
+    // Set result to black
+    for_three_channels(k, aligned(pixel_in_out: 16))
+    {
+      pixel_in_out[k] = 0.0f;
+    }
+    return;
+  }
+
+  const float most_negative_component = fminf(pixel_in_out[0], fminf(pixel_in_out[1], pixel_in_out[2]));
+
+  // offset, so no component remains negative
+  for_three_channels(k, aligned(pixel_in_out : 16))
+  {
+    pixel_in_out[k] -= most_negative_component;
+  }
+
+  const float offset_luminance = _luminance(pixel_in_out, profile);
+
+  const float luminance_correction = original_luminance / offset_luminance;
+
+  for_three_channels(k, aligned(pixel_in_out : 16))
+  {
+    pixel_in_out[k] *= luminance_correction;
+  }
+}
+
 static void _compensate_low_side(
   dt_aligned_pixel_t pixel_in_out,
-  const float distance_limit,
-  int in_out)
+  const dt_aligned_pixel_t threshold,
+  const dt_aligned_pixel_t distance_limit,
+  const dt_iop_order_iccprofile_info_t *const profile)
 {
   // Achromatic axis
   const float achromatic = fmaxf(pixel_in_out[0], fmaxf(pixel_in_out[1], pixel_in_out[2]));
-  // leave the bottom 80% of the gamut alone
-  const float threshold = 0.8f;
 
-  for_three_channels(k, aligned(pixel_in_out: 16))
+  for_three_channels(k, aligned(pixel_in_out, distance_limit, threshold: 16))
   {
+    // compress into the top 20% of gamut
+    const float th = 1.0f - threshold[k];
     // Inverse RGB Ratios: distance from achromatic axis
     const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - pixel_in_out[k]) / fabs(achromatic);
     // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
-    const float scale = (1.0f - threshold) / sqrtf(fmaxf(1.001f, distance_limit) - 1.0f);
+    const float scale = (1.0f - th) / sqrtf(fmaxf(1.001f, distance_limit[k]) - 1.0f);
     // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
-    const float compressed_distance = distance_from_achromatic < threshold ? distance_from_achromatic :
-            scale * sqrtf(distance_from_achromatic - threshold + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + threshold;
+    const float compressed_distance = distance_from_achromatic < th ? distance_from_achromatic :
+            scale * sqrtf(distance_from_achromatic - th + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + th;
     // Inverse RGB Ratios to RGB
-    // float was = pixel_in_out[k];
     pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
-    // if (pixel_in_out[k] < 0)
-    // {
-    //   printf("in/out: %d channel %ld = %f, was: %f\n", in_out, k, pixel_in_out[k], was);
-    // }
   }
+
+  // just in case any negative remains
+  _avoid_negatives(pixel_in_out, profile);
 }
 
 static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
@@ -653,18 +675,13 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
 
 static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params)
 {
-  // Apply Inset Matrix
-  dt_aligned_pixel_t inset_rgb = {0.0f}; // Temp storage
-  _mat3f_mul_aligned_pixel(inset_rgb, AgXInsetMatrix, rgb_in_out);
-  // dt_aligned_pixel_t inset_rgb = {rgb_in_out[0], rgb_in_out[1], rgb_in_out[2], rgb_in_out[3]}; // Temp storage
-
   // record current chromaticity angle
   dt_aligned_pixel_t hsv_pixel = {0.0f};
-  dt_RGB_2_HSV(inset_rgb, hsv_pixel);
+  dt_RGB_2_HSV(rgb_in_out, hsv_pixel);
   const float h_before = hsv_pixel[0];
 
   dt_aligned_pixel_t transformed_pixel = {0.0f};
-  _apply_log_encoding(transformed_pixel, inset_rgb, params->range_in_ev, params->min_ev);
+  _apply_log_encoding(transformed_pixel, rgb_in_out, params->range_in_ev, params->min_ev);
 
   // Apply curve using cached parameters
   for_three_channels(k, aligned(transformed_pixel: 16))
@@ -681,7 +698,7 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
     transformed_pixel[k] = powf(fmaxf(0.0f, transformed_pixel[k]), params->curve_gamma);
   }
 
-  // record post-curve chroma angle
+  // get post-curve chroma angle
   dt_RGB_2_HSV(transformed_pixel, hsv_pixel);
 
   float h_after = hsv_pixel[0];
@@ -690,14 +707,7 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
   h_after = _lerp_hue(h_before, h_after, params->look_original_hue_mix_ratio);
 
   hsv_pixel[0] = h_after;
-  dt_HSV_2_RGB(hsv_pixel, transformed_pixel); // Convert back in-place
-
-  // Apply Outset Matrix
-  _mat3f_mul_aligned_pixel(rgb_in_out, AgXInsetMatrixInverse, transformed_pixel);
-  // rgb_in_out[0] = transformed_pixel[0];
-  // rgb_in_out[1] = transformed_pixel[1];
-  // rgb_in_out[2] = transformed_pixel[2];
-  // rgb_in_out[3] = transformed_pixel[3];
+  dt_HSV_2_RGB(hsv_pixel, rgb_in_out);
 }
 
 // Get pixel norm using max RGB method (similar to filmic's choice for black/white)
@@ -852,8 +862,8 @@ void _print_curve(curve_and_look_params_t *curve_params)
 static void _calculate_adjusted_primaries(const curve_and_look_params_t *const curve_and_look_params,
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
-                                          dt_colormatrix_t pipe_to_base,
                                           dt_colormatrix_t rendering_to_base,
+                                          dt_colormatrix_t rendering_to_XYZ,
                                           dt_colormatrix_t base_to_pipe,
                                           dt_colormatrix_t pipe_to_rendering)
 {
@@ -872,6 +882,7 @@ static void _calculate_adjusted_primaries(const curve_and_look_params_t *const c
   // and achieve a favourable shift towards yellow.
 
   // First, calculate matrix to get from pipe work profile to "base primaries".
+  dt_colormatrix_t pipe_to_base;
   dt_colormatrix_mul(pipe_to_base,
                     pipe_work_profile->matrix_in_transposed, // pipe -> XYZ
                      base_profile->matrix_out_transposed); // XYZ -> base
@@ -883,14 +894,13 @@ static void _calculate_adjusted_primaries(const curve_and_look_params_t *const c
     dt_rotate_and_scale_primary(base_profile, 1.f - curve_and_look_params->inset[i], curve_and_look_params->rotation[i], i,
                                 custom_primaries[i]);
 
-  dt_colormatrix_t custom_to_XYZ;
   dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
-                                                            custom_to_XYZ);
+                                                            rendering_to_XYZ);
 
   dt_colormatrix_t base_to_rendering;
   dt_colormatrix_mul(
     base_to_rendering,
-    custom_to_XYZ, // custom -> XYZ
+    rendering_to_XYZ, // custom -> XYZ
     base_profile->matrix_out_transposed // XYZ -> base
     );
   dt_colormatrix_mul(pipe_to_rendering, pipe_to_base,
@@ -903,10 +913,10 @@ static void _calculate_adjusted_primaries(const curve_and_look_params_t *const c
   }
 
   dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
-                                                            custom_to_XYZ);
+                                                            rendering_to_XYZ);
   dt_colormatrix_t tmp;
   dt_colormatrix_mul(tmp,
-    custom_to_XYZ, // custom -> XYZ
+    rendering_to_XYZ, // custom -> XYZ
     base_profile->matrix_out_transposed // XYZ -> base
     );
   mat3SSEinv(rendering_to_base, tmp);
@@ -944,19 +954,46 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
 
-  dt_colormatrix_t pipe_to_base, rendering_to_base, base_to_pipe, pipe_to_rendering;
+  dt_iop_order_iccprofile_info_t rendering_profile;
+  rendering_profile.nonlinearlut = 0;
+
+  dt_colormatrix_t rendering_to_base, base_to_pipe, pipe_to_rendering;
   _calculate_adjusted_primaries(&curve_params,
     work_profile, output_profile,
-    pipe_to_base,
     rendering_to_base,
+    rendering_profile.matrix_in_transposed,
     base_to_pipe,
     pipe_to_rendering
     );
 
-  const float distance_limit_in = p->gamut_compression_distance_limit_in;
-  const float distance_limit_out = p->gamut_compression_distance_limit_out;
+  dt_colormatrix_transpose(rendering_profile.matrix_in, rendering_profile.matrix_in_transposed);
 
-  //DT_OMP_FOR()
+  const dt_aligned_pixel_t distance_limit_in = {
+    p->gamut_compression_distance_limit_in_c,
+    p->gamut_compression_distance_limit_in_m,
+    p->gamut_compression_distance_limit_in_y,
+    0
+  };
+  const dt_aligned_pixel_t distance_limit_out = {
+    p->gamut_compression_distance_limit_in_c,
+    p->gamut_compression_distance_limit_in_m,
+    p->gamut_compression_distance_limit_in_y,
+    0
+  };
+  const dt_aligned_pixel_t threshold_in = {
+    p->gamut_compression_threshold_in_r,
+    p->gamut_compression_threshold_in_g,
+    p->gamut_compression_threshold_in_b,
+    0
+  };
+  const dt_aligned_pixel_t threshold_out = {
+    p->gamut_compression_threshold_in_r,
+    p->gamut_compression_threshold_in_g,
+    p->gamut_compression_threshold_in_b,
+    0
+  };
+
+  DT_OMP_FOR()
   for(size_t k = 0; k < 4 * npixels; k += 4)
   {
     const float *const restrict pix_in = in + k;
@@ -968,8 +1005,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     _compensate_low_side(
       rendering_RGB,
+      threshold_in,
       distance_limit_in,
-      0
+      &rendering_profile
     );
 
     // now rendering_RGB pixel holds rendering-profile values, and no negative values
@@ -981,8 +1019,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 	  // back in base (output) profile, fix any negative we may have introduced
     _compensate_low_side(
       base_RGB,
+      threshold_out,
       distance_limit_out,
-      1
+      output_profile
     );
 
     // bring back to working space
@@ -1414,17 +1453,69 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum input distance to handle"));
-
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum output distance to handle"));
-
   self->widget = main_box;
 }
 
+static void _add_gamut_compression_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget *main_box = self->widget;
+
+  dt_gui_new_collapsible_section(&gui_data->gamut_compression_section, "plugins/darkroom/agx/expand_gamut_compression",
+                                 _("gamut compression"), GTK_BOX(box), DT_ACTION(self));
+  self->widget = GTK_WIDGET(gui_data->gamut_compression_section.container);
+   // Reuse the slider variable for all sliders
+  GtkWidget *slider;
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_c");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum input cyan oversaturation to correct"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_r");
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("portion of reds to receive cyan overflow"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_m");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum input magenta oversaturation to correct"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_g");
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("portion of greens to receive magenta overflow"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_in_y");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum input yellow oversaturation to correct"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_in_b");
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("portion of blues to receive compressed yellow overflow"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_c");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum output cyan oversaturation to correct"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_r");
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("portion of reds to receive cyan overflow"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_m");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum output magenta oversaturation to correct"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_g");
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("portion of greens to receive magenta overflow"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_out_y");
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("maximum output yellow oversaturation to correct"));
+
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_out_b");
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("portion of blues to receive compressed yellow overflow"));
+
+  self->widget = main_box;
+}
 
 static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
@@ -1433,8 +1524,7 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
 
   // primaries collapsible section
   dt_gui_new_collapsible_section(&gui_data->primaries_section, "plugins/darkroom/agx/expand_primaries",
-                                 _("primaries"), GTK_BOX(main_box), DT_ACTION(self));
-  //dt_iop_sigmoid_gui_data_t *g
+                                 _("primaries"), GTK_BOX(box), DT_ACTION(self));
   gtk_widget_set_tooltip_text(gui_data->primaries_section.expander, _("set custom primaries"));
 
   self->widget = GTK_WIDGET(gui_data->primaries_section.container);
@@ -1493,7 +1583,7 @@ void gui_init(dt_iop_module_t *self)
   // so we can restore it later
   GtkWidget *self_widget = self->widget;
 
-  // define the 3 boxes
+  // define the boxes
   GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
   GtkWidget *tonemap_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
@@ -1501,14 +1591,22 @@ void gui_init(dt_iop_module_t *self)
   GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(self->widget), advanced_box, TRUE, TRUE, 0);
   GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), advanced_box, TRUE, TRUE, 0);
+  gtk_box_pack_start(GTK_BOX(self->widget), primaries_box, TRUE, TRUE, 0);
+  GtkWidget *gamut_compression_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(self->widget), gamut_compression_box, TRUE, TRUE, 0);
 
    _add_look_box(self, look_box, gui_data);
    _add_base_box(self, tonemap_box, gui_data);
    _add_advanced_box(self, advanced_box, gui_data);
   _add_primaries_box(self, primaries_box, gui_data);
+  _add_gamut_compression_box(self, gamut_compression_box, gui_data);
 
   self->widget = self_widget;
+}
+
+static float _degrees_to_radians(float degrees)
+{
+  return degrees * M_PI_F / 180.f;
 }
 
 void init_presets(dt_iop_module_so_t *self)
@@ -1546,21 +1644,68 @@ void init_presets(dt_iop_module_so_t *self)
   p.curve_pivot_x_shift = 0.0;
   p.curve_pivot_y_linear = 0.18;
 
-  p.gamut_compression_distance_limit_in = 1.0f;
-  p.gamut_compression_distance_limit_out = 1.0f;
+  p.gamut_compression_distance_limit_in_c = 1.0f;
+  p.gamut_compression_distance_limit_in_m = 1.0f;
+  p.gamut_compression_distance_limit_in_y = 1.0f;
+  p.gamut_compression_threshold_in_r = 0.2f;
+  p.gamut_compression_threshold_in_g = 0.2f;
+  p.gamut_compression_threshold_in_b = 0.2f;
+
+  p.gamut_compression_distance_limit_out_c = 1.0f;
+  p.gamut_compression_distance_limit_out_m = 1.0f;
+  p.gamut_compression_distance_limit_out_y = 1.0f;
+  p.gamut_compression_threshold_out_r = 0.2f;
+  p.gamut_compression_threshold_out_g = 0.2f;
+  p.gamut_compression_threshold_out_b = 0.2f;
 
   p.look_power = 1.0f;
   p.look_offset = 0.0f;
   p.look_saturation = 1.0f;
   p.look_vibrance = 1.0f;
+  p.look_original_hue_mix_ratio = 0.0f;
 
-  dt_gui_presets_add_generic(_("AgX Base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  // AgX primaries settings
+  // https://github.com/sobotka/SB2383-Configuration-Generation/blob/74bff1547505e751d6f0605ca65834b6c7e99a8f/generate_config.py#L88
+  p.red_inset = 0.1f;
+  p.green_inset = 0.1f;
+  p.blue_inset = 0.15f;
+  p.red_rotation = _degrees_to_radians(4.5f);
+  p.green_rotation = _degrees_to_radians(-0.5f);
+  p.blue_rotation = _degrees_to_radians(-2.0f);
+  // Restore purity
+  p.purity = 1.f;
+
+  dt_gui_presets_add_generic(_("blender-line|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   // Punchy preset
-  p.look_power = 1.35f; // Power was the same for all channels in Punchy
+  p.look_power = 1.35f;
   p.look_offset = 0.0f;
   p.look_saturation = 1.4f;
-  dt_gui_presets_add_generic(_("Punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  dt_gui_presets_add_generic(_("blender-like|punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  // 'Base' look
+  p.look_power = 1.0f;
+  p.look_offset = 0.0f;
+  p.look_saturation = 1.0f;
+
+  // Sigmoid 'smooth' primaries settings
+  // https://github.com/sobotka/SB2383-Configuration-Generation/blob/74bff1547505e751d6f0605ca65834b6c7e99a8f/generate_config.py#L88
+  p.red_inset = 0.1f;
+  p.green_inset = 0.1f;
+  p.blue_inset = 0.15f;
+  p.red_rotation = _degrees_to_radians(2.f);
+  p.green_rotation = _degrees_to_radians(-1.f);
+  p.blue_rotation = _degrees_to_radians(-3.f);
+  // Don't restore purity - try to avoid posterization.
+  p.purity = 0.f;
+
+  dt_gui_presets_add_generic(_("smooth|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  // 'Punchy' look
+  p.look_power = 1.35f;
+  p.look_offset = 0.0f;
+  p.look_saturation = 1.4f;
+  dt_gui_presets_add_generic(_("smooth|punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
 // GUI cleanup
