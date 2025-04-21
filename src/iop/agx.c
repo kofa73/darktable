@@ -483,7 +483,7 @@ static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order
     return;
   }
 
-  float original_luminance = _luminance(pixel_in_out, profile);
+  const float original_luminance = _luminance(pixel_in_out, profile);
   if (original_luminance < _epsilon)
   {
     // Set result to black
@@ -933,7 +933,7 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   mat3SSEinv(rendering_to_base, tmp);
 }
 
-static gamut_compression_params_t _get_gamut_compression_params(const dt_iop_agx_user_params_t * p)
+static gamut_compression_params_t _get_gamut_compression_params(const dt_iop_agx_user_params_t *p)
 {
   gamut_compression_params_t gamut_compression_params;
   gamut_compression_params.distance_limit_in[0] = p->gamut_compression_distance_limit_in_c;
@@ -953,6 +953,33 @@ static gamut_compression_params_t _get_gamut_compression_params(const dt_iop_agx
   gamut_compression_params.threshold_out[2] = p->gamut_compression_threshold_out_b;
 
   return gamut_compression_params;
+}
+
+static void _create_matrices_and_profiles(
+    const dt_iop_agx_user_params_t *p,
+    const dt_iop_order_iccprofile_info_t *work_profile,
+    const dt_iop_order_iccprofile_info_t *output_profile,
+    // outputs
+    dt_iop_order_iccprofile_info_t *out_rendering_profile,
+    dt_colormatrix_t out_rendering_to_base,
+    dt_colormatrix_t out_base_to_pipe,
+    dt_colormatrix_t out_pipe_to_rendering)
+{
+  const primaries_params_t primaries_params = _get_primaries_params(p);
+  _calculate_adjusted_primaries(
+      &primaries_params,
+      work_profile,
+      output_profile,
+      // outputs
+      out_rendering_to_base,
+      out_rendering_profile->matrix_in_transposed,
+      out_base_to_pipe,
+      out_pipe_to_rendering
+      );
+
+  // It'll be a simple matrix profile, the 'in' (RGB -> XYZ) matrix is used for luminance (Y) calculation
+  out_rendering_profile->nonlinearlut = 0;
+  dt_colormatrix_transpose(out_rendering_profile->matrix_in, out_rendering_profile->matrix_in_transposed);
 }
 
 // Process
@@ -984,23 +1011,24 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   // Calculate curve parameters once
   const curve_and_look_params_t curve_params = _calculate_curve_params(p);
 
-  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
-  const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
+  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe); // Needed for setup
+  const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe); // Needed for setup AND loop
 
   dt_iop_order_iccprofile_info_t rendering_profile;
-  rendering_profile.nonlinearlut = 0;
+  dt_colormatrix_t rendering_to_base;
+  dt_colormatrix_t base_to_pipe;
+  dt_colormatrix_t pipe_to_rendering;
 
-  dt_colormatrix_t rendering_to_base, base_to_pipe, pipe_to_rendering;
-  primaries_params_t primaries_params = _get_primaries_params(p);
-  _calculate_adjusted_primaries(&primaries_params,
-    work_profile, output_profile,
-    rendering_to_base,
-    rendering_profile.matrix_in_transposed,
-    base_to_pipe,
-    pipe_to_rendering
-    );
-
-  dt_colormatrix_transpose(rendering_profile.matrix_in, rendering_profile.matrix_in_transposed);
+  // --- Call the setup function ---
+  _create_matrices_and_profiles(
+      p,
+      work_profile,
+      output_profile,
+      &rendering_profile,
+      rendering_to_base,
+      base_to_pipe,
+      pipe_to_rendering
+      );
 
   gamut_compression_params_t gamut_compression_params = _get_gamut_compression_params(p);
 
