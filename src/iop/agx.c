@@ -1666,16 +1666,16 @@ void init_presets(dt_iop_module_so_t *self)
 
   // AgX primaries settings
   // https://github.com/sobotka/SB2383-Configuration-Generation/blob/74bff1547505e751d6f0605ca65834b6c7e99a8f/generate_config.py#L88
-  p.red_inset = 0.1f;
-  p.green_inset = 0.1f;
-  p.blue_inset = 0.15f;
+  p.red_inset = 0.15f;
+  p.green_inset = 0.10f;
+  p.blue_inset = 0.10f;
   p.red_rotation = _degrees_to_radians(4.5f);
   p.green_rotation = _degrees_to_radians(-0.5f);
   p.blue_rotation = _degrees_to_radians(-2.0f);
   // Restore purity
   p.purity = 1.f;
 
-  dt_gui_presets_add_generic(_("blender-line|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  dt_gui_presets_add_generic(_("blender-like|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   // Punchy preset
   p.look_power = 1.35f;
@@ -1689,7 +1689,6 @@ void init_presets(dt_iop_module_so_t *self)
   p.look_saturation = 1.0f;
 
   // Sigmoid 'smooth' primaries settings
-  // https://github.com/sobotka/SB2383-Configuration-Generation/blob/74bff1547505e751d6f0605ca65834b6c7e99a8f/generate_config.py#L88
   p.red_inset = 0.1f;
   p.green_inset = 0.1f;
   p.blue_inset = 0.15f;
