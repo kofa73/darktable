@@ -172,12 +172,22 @@ typedef struct curve_and_look_params_t
   float look_saturation;
   float look_vibrance;
   float look_original_hue_mix_ratio;
+} curve_and_look_params_t;
 
-  // custom primaries
+typedef struct primaries_params_t
+{
   float inset[3];
   float rotation[3];
   float purity;
-} curve_and_look_params_t;
+} primaries_params_t;
+
+typedef struct gamut_compression_params_t
+{
+  dt_aligned_pixel_t threshold_in;
+  dt_aligned_pixel_t distance_limit_in;
+  dt_aligned_pixel_t threshold_out;
+  dt_aligned_pixel_t distance_limit_out;
+} gamut_compression_params_t;
 
 // Translatable name
 const char *name()
@@ -316,7 +326,7 @@ static float _fallback_shoulder(const float x, const curve_and_look_params_t *cu
     curve_params->target_white - fmaxf(0, curve_params->shoulder_a * powf(1 - x, curve_params->shoulder_b));
 }
 
-// the commented values (t_tx, etc) are references to https://www.desmos.com/calculator/yrysofmx8h
+// the commented values (t_tx, etc.) are references to https://www.desmos.com/calculator/yrysofmx8h
 static float _apply_curve(const float x, const curve_and_look_params_t *curve_params)
 {
   float result;
@@ -430,7 +440,7 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
 DT_OMP_DECLARE_SIMD(aligned(result, pixel: 16))
 static void _apply_log_encoding(dt_aligned_pixel_t result, const dt_aligned_pixel_t pixel, float range_in_ev, float minEv)
 {
-  // Assume input is linear Rec2020 relative to 0.18 mid gray
+  // Assume input is linear Rec2020 relative to 0.18 mid-gray
   // Ensure all values are > 0 before log
   dt_aligned_pixel_t v = {
     fmaxf(_epsilon, pixel[0] / 0.18f),
@@ -621,7 +631,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   params.toe_a = _calculate_A(toe_dx_transition_to_limit, toe_dy_transition_to_limit, params.toe_b);
   printf("toe_a = %f\n", params.toe_a);
 
-  // if x went from toe_transition_x to 0, at the given slope, starting from toe_transition_y, where would we intersect the y axis?
+  // if x went from toe_transition_x to 0, at the given slope, starting from toe_transition_y, where would we intersect the y-axis?
   params.intercept = params.toe_transition_y - params.slope * params.toe_transition_x;
   printf("intercept = %f\n", params.intercept);
 
@@ -655,14 +665,6 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   params.shoulder_a = _calculate_A(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, params.shoulder_b);
   printf("shoulder_a = %f\n", params.shoulder_a);
 
-  params.purity = user_params->purity;
-  params.inset[0] = user_params->red_inset;
-  params.inset[1] = user_params->green_inset;
-  params.inset[2] = user_params->blue_inset;
-  params.rotation[0] = user_params->red_rotation;
-  params.rotation[1] = user_params->green_rotation;
-  params.rotation[2] = user_params->blue_rotation;
-
   //if(isnan(shoulder_scale))
   //{
   //  errors++; // printf("shoulder_scale is NaN\n");
@@ -672,6 +674,20 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   return params;
 }
 
+static primaries_params_t _get_primaries_params(const dt_iop_agx_user_params_t *user_params)
+{
+  primaries_params_t primaries_params;
+
+  primaries_params.purity = user_params->purity;
+  primaries_params.inset[0] = user_params->red_inset;
+  primaries_params.inset[1] = user_params->green_inset;
+  primaries_params.inset[2] = user_params->blue_inset;
+  primaries_params.rotation[0] = user_params->red_rotation;
+  primaries_params.rotation[1] = user_params->green_rotation;
+  primaries_params.rotation[2] = user_params->blue_rotation;
+
+  return primaries_params;
+}
 
 static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params)
 {
@@ -859,13 +875,11 @@ void _print_curve(curve_and_look_params_t *curve_params)
   printf("\n");
 }
 
-static void _calculate_adjusted_primaries(const curve_and_look_params_t *const curve_and_look_params,
+static void _calculate_adjusted_primaries(const primaries_params_t *const params,
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
-                                          dt_colormatrix_t rendering_to_base,
-                                          dt_colormatrix_t rendering_to_XYZ,
-                                          dt_colormatrix_t base_to_pipe,
-                                          dt_colormatrix_t pipe_to_rendering)
+                                          dt_colormatrix_t rendering_to_base, dt_colormatrix_t rendering_to_XYZ,
+                                          dt_colormatrix_t base_to_pipe, dt_colormatrix_t pipe_to_rendering)
 {
   // Make adjusted primaries for generating the inset matrix
   //
@@ -884,42 +898,61 @@ static void _calculate_adjusted_primaries(const curve_and_look_params_t *const c
   // First, calculate matrix to get from pipe work profile to "base primaries".
   dt_colormatrix_t pipe_to_base;
   dt_colormatrix_mul(pipe_to_base,
-                    pipe_work_profile->matrix_in_transposed, // pipe -> XYZ
-                     base_profile->matrix_out_transposed); // XYZ -> base
+                     pipe_work_profile->matrix_in_transposed, // pipe -> XYZ
+                     base_profile->matrix_out_transposed);    // XYZ -> base
   mat3SSEinv(base_to_pipe, pipe_to_base);
 
   // Rotated, scaled primaries are calculated based on the "base profile"
   float custom_primaries[3][2];
   for(size_t i = 0; i < 3; i++)
-    dt_rotate_and_scale_primary(base_profile, 1.f - curve_and_look_params->inset[i], curve_and_look_params->rotation[i], i,
-                                custom_primaries[i]);
+    dt_rotate_and_scale_primary(base_profile, 1.f - params->inset[i], params->rotation[i], i, custom_primaries[i]);
 
   dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
                                                             rendering_to_XYZ);
 
   dt_colormatrix_t base_to_rendering;
-  dt_colormatrix_mul(
-    base_to_rendering,
-    rendering_to_XYZ, // custom -> XYZ
-    base_profile->matrix_out_transposed // XYZ -> base
-    );
-  dt_colormatrix_mul(pipe_to_rendering, pipe_to_base,
-                      base_to_rendering);
+  dt_colormatrix_mul(base_to_rendering,
+                     rendering_to_XYZ,                   // custom -> XYZ
+                     base_profile->matrix_out_transposed // XYZ -> base
+  );
+  dt_colormatrix_mul(pipe_to_rendering, pipe_to_base, base_to_rendering);
 
   for(size_t i = 0; i < 3; i++)
   {
-    const float scaling = 1.f - curve_and_look_params->purity * curve_and_look_params->inset[i];
-    dt_rotate_and_scale_primary(base_profile, scaling, curve_and_look_params->rotation[i], i, custom_primaries[i]);
+    const float scaling = 1.f - params->purity * params->inset[i];
+    dt_rotate_and_scale_primary(base_profile, scaling, params->rotation[i], i, custom_primaries[i]);
   }
 
   dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
                                                             rendering_to_XYZ);
   dt_colormatrix_t tmp;
   dt_colormatrix_mul(tmp,
-    rendering_to_XYZ, // custom -> XYZ
-    base_profile->matrix_out_transposed // XYZ -> base
-    );
+                     rendering_to_XYZ,                   // custom -> XYZ
+                     base_profile->matrix_out_transposed // XYZ -> base
+  );
   mat3SSEinv(rendering_to_base, tmp);
+}
+
+static gamut_compression_params_t _get_gamut_compression_params(const dt_iop_agx_user_params_t * p)
+{
+  gamut_compression_params_t gamut_compression_params;
+  gamut_compression_params.distance_limit_in[0] = p->gamut_compression_distance_limit_in_c;
+  gamut_compression_params.distance_limit_in[1] = p->gamut_compression_distance_limit_in_m;
+  gamut_compression_params.distance_limit_in[2] = p->gamut_compression_distance_limit_in_y;
+
+  gamut_compression_params.distance_limit_out[0] = p->gamut_compression_distance_limit_out_c;
+  gamut_compression_params.distance_limit_out[1] = p->gamut_compression_distance_limit_out_m;
+  gamut_compression_params.distance_limit_out[2] = p->gamut_compression_distance_limit_out_y;
+
+  gamut_compression_params.threshold_in[0] = p->gamut_compression_threshold_in_r;
+  gamut_compression_params.threshold_in[1] = p->gamut_compression_threshold_in_g;
+  gamut_compression_params.threshold_in[2] = p->gamut_compression_threshold_in_b;
+
+  gamut_compression_params.threshold_out[0] = p->gamut_compression_threshold_out_r;
+  gamut_compression_params.threshold_out[1] = p->gamut_compression_threshold_out_g;
+  gamut_compression_params.threshold_out[2] = p->gamut_compression_threshold_out_b;
+
+  return gamut_compression_params;
 }
 
 // Process
@@ -958,7 +991,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   rendering_profile.nonlinearlut = 0;
 
   dt_colormatrix_t rendering_to_base, base_to_pipe, pipe_to_rendering;
-  _calculate_adjusted_primaries(&curve_params,
+  primaries_params_t primaries_params = _get_primaries_params(p);
+  _calculate_adjusted_primaries(&primaries_params,
     work_profile, output_profile,
     rendering_to_base,
     rendering_profile.matrix_in_transposed,
@@ -968,30 +1002,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   dt_colormatrix_transpose(rendering_profile.matrix_in, rendering_profile.matrix_in_transposed);
 
-  const dt_aligned_pixel_t distance_limit_in = {
-    p->gamut_compression_distance_limit_in_c,
-    p->gamut_compression_distance_limit_in_m,
-    p->gamut_compression_distance_limit_in_y,
-    0
-  };
-  const dt_aligned_pixel_t distance_limit_out = {
-    p->gamut_compression_distance_limit_in_c,
-    p->gamut_compression_distance_limit_in_m,
-    p->gamut_compression_distance_limit_in_y,
-    0
-  };
-  const dt_aligned_pixel_t threshold_in = {
-    p->gamut_compression_threshold_in_r,
-    p->gamut_compression_threshold_in_g,
-    p->gamut_compression_threshold_in_b,
-    0
-  };
-  const dt_aligned_pixel_t threshold_out = {
-    p->gamut_compression_threshold_in_r,
-    p->gamut_compression_threshold_in_g,
-    p->gamut_compression_threshold_in_b,
-    0
-  };
+  gamut_compression_params_t gamut_compression_params = _get_gamut_compression_params(p);
 
   DT_OMP_FOR()
   for(size_t k = 0; k < 4 * npixels; k += 4)
@@ -1005,8 +1016,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     _compensate_low_side(
       rendering_RGB,
-      threshold_in,
-      distance_limit_in,
+      gamut_compression_params.threshold_in,
+      gamut_compression_params.distance_limit_in,
       &rendering_profile
     );
 
@@ -1019,8 +1030,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 	  // back in base (output) profile, fix any negative we may have introduced
     _compensate_low_side(
       base_RGB,
-      threshold_out,
-      distance_limit_out,
+      gamut_compression_params.threshold_out,
+      gamut_compression_params.distance_limit_out,
       output_profile
     );
 
