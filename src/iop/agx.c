@@ -457,15 +457,13 @@ static void _apply_log_encoding(dt_aligned_pixel_t result, const dt_aligned_pixe
   for_three_channels(k, aligned(v : 16))
   {
     // Log2 encoding
-    v[k] = log2f(v[k]);
+    float mapped = log2f(v[k]);
     // normalise to [0, 1] based on minEv and range_in_ev
-    v[k] = (v[k] - minEv) / range_in_ev;
+    mapped = (mapped - minEv) / range_in_ev;
     // Clamp result to [0, 1] - this is the input domain for the curve
-    v[k] = CLAMPF(v[k], 0.0f, 1.0f);
+    result[k] = CLAMPF(mapped, 0.0f, 1.0f);
   }
-  v[3] = pixel[3]; // Ensure alpha is preserved if it was carried
-
-  for_four_channels(k, aligned(result, v: 16)) result[k] = v[k];
+  result[3] = pixel[3]; // Ensure alpha is preserved if it was carried
 }
 
 // see https://www.desmos.com/calculator/gijzff3wlv
@@ -715,7 +713,6 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
   dt_aligned_pixel_t transformed_pixel = {0.0f};
   _apply_log_encoding(transformed_pixel, rgb_in_out, params->range_in_ev, params->min_ev);
 
-  // Apply curve using cached parameters
   for_three_channels(k, aligned(transformed_pixel: 16))
   {
     transformed_pixel[k] = _apply_curve(transformed_pixel[k], params);
