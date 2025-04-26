@@ -520,6 +520,7 @@ static void _compensate_low_side(
   const dt_aligned_pixel_t distance_limit,
   const dt_iop_order_iccprofile_info_t *const profile)
 {
+  //*
   // from sigmoid
   const float pixel_average = fmaxf((pixel_in_out[0] + pixel_in_out[1] + pixel_in_out[2]) / 3.0f, 0.0f);
   const float min_value = fminf(fminf(pixel_in_out[0], pixel_in_out[1]), pixel_in_out[2]);
@@ -528,7 +529,7 @@ static void _compensate_low_side(
   {
     pixel_in_out[c] = pixel_average + saturation_factor * (pixel_in_out[c] - pixel_average);
   }
-
+  //*/
   // Jed Smith
 
   // Achromatic axis
@@ -916,8 +917,8 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // First, calculate the matrix from pipe the work profile to the base profile whose primaries
   // will be rotated/inset.
   dt_colormatrix_mul(pipe_to_base_transposed,
-                     base_profile->matrix_in_transposed,        // base -> XYZ
-                     pipe_work_profile->matrix_out_transposed); // XYZ -> pipe
+                     pipe_work_profile->matrix_in_transposed,   // pipe -> XYZ
+                     base_profile->matrix_out_transposed);      // XYZ -> base
 
   mat3SSEinv(base_to_pipe_transposed, pipe_to_base_transposed);
 
