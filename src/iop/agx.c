@@ -522,6 +522,17 @@ static void _compensate_low_side(
   const dt_aligned_pixel_t distance_limit,
   const dt_iop_order_iccprofile_info_t *const profile)
 {
+  // from sigmoid
+  const float pixel_average = fmaxf((pixel_in_out[0] + pixel_in_out[1] + pixel_in_out[2]) / 3.0f, 0.0f);
+  const float min_value = fminf(fminf(pixel_in_out[0], pixel_in_out[1]), pixel_in_out[2]);
+  const float saturation_factor = min_value < 0.0f ? -pixel_average / (min_value - pixel_average) : 1.0f;
+  for_each_channel(c, aligned(pixel_in_out))
+  {
+    pixel_in_out[c] = pixel_average + saturation_factor * (pixel_in_out[c] - pixel_average);
+  }
+
+  // Jed Smith
+
   // Achromatic axis
   const float achromatic = fmaxf(pixel_in_out[0], fmaxf(pixel_in_out[1], pixel_in_out[2]));
 
@@ -541,6 +552,7 @@ static void _compensate_low_side(
   }
 
   // just in case any negative remains
+  // Sakari
   _avoid_negatives(pixel_in_out, profile);
 }
 
@@ -1113,15 +1125,25 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     dt_aligned_pixel_t base_RGB;
     dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
 
+/*
     dt_aligned_pixel_t rendering_from_base;
     dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_from_base);
-
     _compensate_low_side(
       rendering_RGB,
       gamut_compression_params.threshold_in,
       gamut_compression_params.distance_limit_in,
       output_profile
     );
+    */
+    dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
+
+    _compensate_low_side(
+      base_RGB,
+      gamut_compression_params.threshold_in,
+      gamut_compression_params.distance_limit_in,
+      output_profile
+    );
+    dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_RGB);
 
     // now rendering_RGB pixel holds rendering-profile values with no negative components
     _agx_tone_mapping(rendering_RGB, &curve_params); // Operates in-place (passes rgb as input and output)
