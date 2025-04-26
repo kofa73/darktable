@@ -19,6 +19,11 @@
 #include "gui/gtk.h"
 #include "gui/presets.h"
 
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wunused-function"
+
+
 // Module introspection version
 DT_MODULE_INTROSPECTION(1, dt_iop_agx_user_params_t)
 
@@ -70,16 +75,16 @@ typedef struct dt_iop_agx_user_params_t
   float gamut_compression_threshold_in_r; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input red compression target"
   float gamut_compression_threshold_in_g; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input green compression target"
   float gamut_compression_threshold_in_b; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input blue compression target"
-  float gamut_compression_distance_limit_in_c; // $MIN: 1.0 $MAX: 3.0 $DEFAULT: 1.0 $DESCRIPTION: "max input cyan oversaturation"
-  float gamut_compression_distance_limit_in_m; // $MIN: 1.0 $MAX: 3.0 $DEFAULT: 1.0 $DESCRIPTION: "max input magenta oversaturation"
-  float gamut_compression_distance_limit_in_y; // $MIN: 1.0 $MAX: 3.0 $DEFAULT: 1.0 $DESCRIPTION: "max input yellow oversaturation"
+  float gamut_compression_distance_limit_in_c; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max input cyan oversaturation"
+  float gamut_compression_distance_limit_in_m; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max input magenta oversaturation"
+  float gamut_compression_distance_limit_in_y; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max input yellow oversaturation"
 
   float gamut_compression_threshold_out_r; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "output red compression target"
   float gamut_compression_threshold_out_g; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "output green compression target"
   float gamut_compression_threshold_out_b; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "output blue compression target"
-  float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "max output cyan oversaturation"
-  float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "max output magenta oversaturation"
-  float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "max output yellow oversaturation"
+  float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max output cyan oversaturation"
+  float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max output magenta oversaturation"
+  float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max output yellow oversaturation"
 
   // custom primaries
   float red_inset;        // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation"
@@ -462,7 +467,6 @@ static void _apply_log_encoding(dt_aligned_pixel_t result, const dt_aligned_pixe
 
   for_four_channels(k, aligned(result, v: 16)) result[k] = v[k];
 }
-
 
 // see https://www.desmos.com/calculator/gijzff3wlv
 static float _calculate_B(float slope, float dx_transition_to_limit, float dy_transition_to_limit)
@@ -878,8 +882,13 @@ void _print_curve(curve_and_look_params_t *curve_params)
 static void _calculate_adjusted_primaries(const primaries_params_t *const params,
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
-                                          dt_colormatrix_t rendering_to_base, dt_colormatrix_t rendering_to_XYZ,
-                                          dt_colormatrix_t base_to_pipe, dt_colormatrix_t pipe_to_rendering)
+                                          // outputs
+                                          dt_colormatrix_t pipe_to_base_transposed,
+                                          dt_colormatrix_t base_to_rendering_transposed,
+                                          dt_colormatrix_t pipe_to_rendering_transposed,
+                                          dt_colormatrix_t rendering_to_base_transposed,
+                                          dt_colormatrix_t base_to_pipe_transposed
+                                          )
 {
   // Make adjusted primaries for generating the inset matrix
   //
@@ -895,45 +904,67 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // The primaries are also rotated to compensate for Abney etc.
   // and achieve a favourable shift towards yellow.
 
-  // First, calculate matrix to get from pipe work profile to "base primaries".
-  dt_colormatrix_t pipe_to_base;
-  dt_colormatrix_mul(pipe_to_base,
-                     pipe_work_profile->matrix_in_transposed, // pipe -> XYZ
-                     base_profile->matrix_out_transposed);    // XYZ -> base
-  mat3SSEinv(base_to_pipe, pipe_to_base);
+  // First, calculate the matrix from pipe the work profile to the base profile whose primaries
+  // will be rotated/inset.
+  dt_colormatrix_mul(pipe_to_base_transposed,
+                     base_profile->matrix_in_transposed,        // base -> XYZ
+                     pipe_work_profile->matrix_out_transposed); // XYZ -> pipe
 
-  // Rotated, scaled primaries are calculated based on the "base profile"
-  float custom_primaries[3][2];
+  mat3SSEinv(base_to_pipe_transposed, pipe_to_base_transposed);
+
+  // inbound path, base RGB -> inset and rotated rendering space for the curve
+
+  // Rotated, scaled primaries are calculated based on the base profile.
+  float inset_and_rotated_primaries[3][2];
   for(size_t i = 0; i < 3; i++)
-    dt_rotate_and_scale_primary(base_profile, 1.f - params->inset[i], params->rotation[i], i, custom_primaries[i]);
+    dt_rotate_and_scale_primary(base_profile, 1.f - params->inset[i], params->rotation[i], i, inset_and_rotated_primaries[i]);
 
-  dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
-                                                            rendering_to_XYZ);
+  // The matrix to convert from the inset/rotated to XYZ. When applying to the RGB values that are actually
+  // in the 'base' space, it will convert them to XYZ coordinates that represent colors that are partly
+  // desaturated (due to the inset) and skewed (do to the rotation).
+  dt_colormatrix_t base_to_inset_rotated_xyz_transposed;
+  dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_and_rotated_primaries, base_profile->whitepoint,
+                                                            base_to_inset_rotated_xyz_transposed);
 
-  dt_colormatrix_t base_to_rendering;
-  dt_colormatrix_mul(base_to_rendering,
-                     rendering_to_XYZ,                   // custom -> XYZ
-                     base_profile->matrix_out_transposed // XYZ -> base
-  );
-  dt_colormatrix_mul(pipe_to_rendering, pipe_to_base, base_to_rendering);
+  // The matrix to convert colors from the original 'base' space to their partially desaturated and skewed
+  // versions, using the inset RGB -> XYZ and the original base XYZ -> RGB matrices.
+  dt_colormatrix_mul(base_to_rendering_transposed,
+                      base_to_inset_rotated_xyz_transposed,
+                      base_profile->matrix_out_transposed
+                      );
+  dt_colormatrix_mul(pipe_to_rendering_transposed, pipe_to_base_transposed, base_to_rendering_transposed);
 
+  // outbound path, inset and rotated working space for the curve -> base RGB
+
+  // Rotated, primaries, with optional restoration of purity. This is to be applied after the sigmoid curve;
+  // it can undo the skew and recover purity (saturation).
+  float inset_with_purity_and_rotated_primaries[3][2];
   for(size_t i = 0; i < 3; i++)
   {
     const float scaling = 1.f - params->purity * params->inset[i];
-    dt_rotate_and_scale_primary(base_profile, scaling, params->rotation[i], i, custom_primaries[i]);
+    dt_rotate_and_scale_primary(base_profile, scaling, params->rotation[i], i, inset_with_purity_and_rotated_primaries[i]);
   }
 
-  dt_make_transposed_matrices_from_primaries_and_whitepoint(custom_primaries, base_profile->whitepoint,
-                                                            rendering_to_XYZ);
+  // The matrix to convert the curve's output to XYZ; the primaries reflect the fact that the curve's output
+  // was inset and skewed at the start of the process.
+  // Its inverse (see the next steps), when applied to RGB values in the curve's working space (which actually uses
+  // the base primaries), will undo the rotation and, depending on purity, push colours further from achromatic,
+  // resaturating them.
+  dt_colormatrix_t inset_with_purity_and_rotated_to_xyz_transposed;
+  dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_with_purity_and_rotated_primaries, base_profile->whitepoint,
+                                                            inset_with_purity_and_rotated_to_xyz_transposed);
+
   dt_colormatrix_t tmp;
   dt_colormatrix_mul(tmp,
-                     rendering_to_XYZ,                   // custom -> XYZ
-                     base_profile->matrix_out_transposed // XYZ -> base
-  );
-  mat3SSEinv(rendering_to_base, tmp);
+    inset_with_purity_and_rotated_to_xyz_transposed,  // custom (with purity) -> XYZ
+    base_profile->matrix_out_transposed               // XYZ -> base
+    );
+  // 'tmp' is constructed the same way as inbound_inset_and_rotated_to_xyz_transposed,
+  // but this matrix will be used to remap colours to the 'base' profile, so we need to invert it.
+  mat3SSEinv(rendering_to_base_transposed, tmp);
 }
 
-static gamut_compression_params_t _get_gamut_compression_params(const dt_iop_agx_user_params_t *p)
+static gamut_compression_params_t _agx_get_gamut_compression_params(const dt_iop_agx_user_params_t *p)
 {
   gamut_compression_params_t gamut_compression_params;
   gamut_compression_params.distance_limit_in[0] = p->gamut_compression_distance_limit_in_c;
@@ -957,29 +988,33 @@ static gamut_compression_params_t _get_gamut_compression_params(const dt_iop_agx
 
 static void _create_matrices_and_profiles(
     const dt_iop_agx_user_params_t *p,
-    const dt_iop_order_iccprofile_info_t *work_profile,
-    const dt_iop_order_iccprofile_info_t *output_profile,
+    const dt_iop_order_iccprofile_info_t *pipe_work_profile,
+    const dt_iop_order_iccprofile_info_t *base_profile,
     // outputs
-    dt_iop_order_iccprofile_info_t *out_rendering_profile,
-    dt_colormatrix_t out_rendering_to_base,
-    dt_colormatrix_t out_base_to_pipe,
-    dt_colormatrix_t out_pipe_to_rendering)
+    dt_colormatrix_t pipe_to_base_transposed,
+    dt_colormatrix_t base_to_rendering_transposed,
+    dt_colormatrix_t pipe_to_rendering_transposed,
+    dt_colormatrix_t rendering_to_base_transposed,
+    dt_colormatrix_t base_to_pipe_transposed
+)
 {
   const primaries_params_t primaries_params = _get_primaries_params(p);
   _calculate_adjusted_primaries(
       &primaries_params,
-      work_profile,
-      output_profile,
+      pipe_work_profile,
+      base_profile,
       // outputs
-      out_rendering_to_base,
-      out_rendering_profile->matrix_in_transposed,
-      out_base_to_pipe,
-      out_pipe_to_rendering
+      pipe_to_base_transposed,
+      base_to_rendering_transposed,
+      pipe_to_rendering_transposed,
+      rendering_to_base_transposed,
+      base_to_pipe_transposed
+      /*
+      pipe_to_rendering_transposed,
+      base_to_pipe_transposed,
+      rendering_to_base_transposed
+      */
       );
-
-  // It'll be a simple matrix profile, the 'in' (RGB -> XYZ) matrix is used for luminance (Y) calculation
-  out_rendering_profile->nonlinearlut = 0;
-  dt_colormatrix_transpose(out_rendering_profile->matrix_in, out_rendering_profile->matrix_in_transposed);
 }
 
 // Process
@@ -1011,26 +1046,59 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   // Calculate curve parameters once
   const curve_and_look_params_t curve_params = _calculate_curve_params(p);
 
-  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe); // Needed for setup
+  const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe); // Needed for setup
   const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe); // Needed for setup AND loop
 
-  dt_iop_order_iccprofile_info_t rendering_profile;
-  dt_colormatrix_t rendering_to_base;
-  dt_colormatrix_t base_to_pipe;
-  dt_colormatrix_t pipe_to_rendering;
+  dt_colormatrix_t pipe_to_base_transposed;
+  dt_colormatrix_t base_to_rendering_transposed;
+  dt_colormatrix_t pipe_to_rendering_transposed;
+  dt_colormatrix_t rendering_to_base_transposed;
+  dt_colormatrix_t base_to_pipe_transposed;
 
-  // --- Call the setup function ---
   _create_matrices_and_profiles(
-      p,
-      work_profile,
-      output_profile,
-      &rendering_profile,
-      rendering_to_base,
-      base_to_pipe,
-      pipe_to_rendering
-      );
+          p,
+          pipe_work_profile, output_profile,
+          pipe_to_base_transposed,
+          base_to_rendering_transposed,
+          pipe_to_rendering_transposed,
+          rendering_to_base_transposed,
+          base_to_pipe_transposed
+  );
 
-  gamut_compression_params_t gamut_compression_params = _get_gamut_compression_params(p);
+  dt_colormatrix_t pipe_to_base_and_back_transposed;
+  dt_colormatrix_mul(pipe_to_base_and_back_transposed, pipe_to_base_transposed, base_to_pipe_transposed);
+  printf("pipe_to_base_and_back_transposed\n");
+  printf("%f, %f, %f\n", pipe_to_base_and_back_transposed[0][0], pipe_to_base_and_back_transposed[0][1], pipe_to_base_and_back_transposed[0][2]);
+  printf("%f, %f, %f\n", pipe_to_base_and_back_transposed[1][0], pipe_to_base_and_back_transposed[1][1], pipe_to_base_and_back_transposed[1][2]);
+  printf("%f, %f, %f\n", pipe_to_base_and_back_transposed[2][0], pipe_to_base_and_back_transposed[2][1], pipe_to_base_and_back_transposed[2][2]);
+  printf("\n\n");
+
+  dt_colormatrix_t base_to_rendering_and_back_transposed;
+  dt_colormatrix_mul(base_to_rendering_and_back_transposed, base_to_rendering_transposed, rendering_to_base_transposed);
+  printf("base_to_rendering_and_back_transposed\n");
+  printf("%f, %f, %f\n", base_to_rendering_and_back_transposed[0][0], base_to_rendering_and_back_transposed[0][1], base_to_rendering_and_back_transposed[0][2]);
+  printf("%f, %f, %f\n", base_to_rendering_and_back_transposed[1][0], base_to_rendering_and_back_transposed[1][1], base_to_rendering_and_back_transposed[1][2]);
+  printf("%f, %f, %f\n", base_to_rendering_and_back_transposed[2][0], base_to_rendering_and_back_transposed[2][1], base_to_rendering_and_back_transposed[2][2]);
+  printf("\n\n");
+
+  dt_colormatrix_t rendering_to_pipe_transposed;
+  dt_colormatrix_mul(rendering_to_pipe_transposed, rendering_to_base_transposed, base_to_pipe_transposed);
+  printf("rendering_to_pipe_transposed\n");
+  printf("%f, %f, %f\n", rendering_to_pipe_transposed[0][0], rendering_to_pipe_transposed[0][1], rendering_to_pipe_transposed[0][2]);
+  printf("%f, %f, %f\n", rendering_to_pipe_transposed[1][0], rendering_to_pipe_transposed[1][1], rendering_to_pipe_transposed[1][2]);
+  printf("%f, %f, %f\n", rendering_to_pipe_transposed[2][0], rendering_to_pipe_transposed[2][1], rendering_to_pipe_transposed[2][2]);
+  printf("\n\n");
+
+  dt_colormatrix_t pipe_to_rendering_and_back_transposed;
+  dt_colormatrix_mul(pipe_to_rendering_and_back_transposed, pipe_to_rendering_transposed, rendering_to_pipe_transposed);
+  printf("pipe_to_rendering_and_back_transposed\n");
+  printf("%f, %f, %f\n", pipe_to_rendering_and_back_transposed[0][0], pipe_to_rendering_and_back_transposed[0][1], pipe_to_rendering_and_back_transposed[0][2]);
+  printf("%f, %f, %f\n", pipe_to_rendering_and_back_transposed[1][0], pipe_to_rendering_and_back_transposed[1][1], pipe_to_rendering_and_back_transposed[1][2]);
+  printf("%f, %f, %f\n", pipe_to_rendering_and_back_transposed[2][0], pipe_to_rendering_and_back_transposed[2][1], pipe_to_rendering_and_back_transposed[2][2]);
+  printf("\n\n");
+
+
+  const gamut_compression_params_t gamut_compression_params = _agx_get_gamut_compression_params(p);
 
   DT_OMP_FOR()
   for(size_t k = 0; k < 4 * npixels; k += 4)
@@ -1038,22 +1106,27 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
 
-    // Convert to "rendering primaries"
+    // Convert to "rendering space"
     dt_aligned_pixel_t rendering_RGB;
-    dt_apply_transposed_color_matrix(pix_in, pipe_to_rendering, rendering_RGB);
+    dt_apply_transposed_color_matrix(pix_in, pipe_to_rendering_transposed, rendering_RGB);
+
+    dt_aligned_pixel_t base_RGB;
+    dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
+
+    dt_aligned_pixel_t rendering_from_base;
+    dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_from_base);
 
     _compensate_low_side(
       rendering_RGB,
       gamut_compression_params.threshold_in,
       gamut_compression_params.distance_limit_in,
-      &rendering_profile
+      output_profile
     );
 
-    // now rendering_RGB pixel holds rendering-profile values, and no negative values
+    // now rendering_RGB pixel holds rendering-profile values with no negative components
     _agx_tone_mapping(rendering_RGB, &curve_params); // Operates in-place (passes rgb as input and output)
 
-    dt_aligned_pixel_t base_RGB;
-    dt_apply_transposed_color_matrix(rendering_RGB, rendering_to_base, base_RGB);
+    dt_apply_transposed_color_matrix(rendering_RGB, rendering_to_base_transposed, base_RGB);
 
 	  // back in base (output) profile, fix any negative we may have introduced
     _compensate_low_side(
@@ -1063,9 +1136,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       output_profile
     );
 
-    // bring back to working space
-    // Convert compensated output space pixel back to XYZ
-    dt_apply_transposed_color_matrix(base_RGB, base_to_pipe, pix_out);
+    // bring back to pipe working space
+    dt_apply_transposed_color_matrix(base_RGB, base_to_pipe_transposed, pix_out);
 
     // Copy over the alpha channel
     pix_out[3] = pix_in[3];
