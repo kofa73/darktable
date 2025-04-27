@@ -41,7 +41,6 @@ typedef struct dt_iop_agx_user_params_t
   float look_slope; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
   float look_power; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "power"
   float look_saturation;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "saturation"
-  float look_vibrance;               // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "vibrance"
   float look_original_hue_mix_ratio; // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "preserve hue"
 
   // log mapping params
@@ -94,6 +93,8 @@ typedef struct dt_iop_agx_user_params_t
   float blue_inset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation"
   float blue_rotation;    // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
   float purity;           // $MIN:  0.0  $MAX: 1.0  $DEFAULT: 0.0 $DESCRIPTION: "recover purity"
+
+  gboolean experimental_gamut_compression_order;    // $DESCRIPTION: "use experimental gamut compression order"
 } dt_iop_agx_user_params_t;
 
 typedef struct dt_iop_agx_gui_data_t
@@ -103,6 +104,7 @@ typedef struct dt_iop_agx_gui_data_t
   dt_gui_collapsible_section_t advanced_section;
   dt_gui_collapsible_section_t primaries_section;
   dt_gui_collapsible_section_t gamut_compression_section;
+  GtkWidget *experimental_gamut_compression_order;
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -175,7 +177,6 @@ typedef struct curve_and_look_params_t
   float look_slope;
   float look_power;
   float look_saturation;
-  float look_vibrance;
   float look_original_hue_mix_ratio;
 } curve_and_look_params_t;
 
@@ -411,7 +412,6 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
   const float offset = params->look_offset;
   const float power = params->look_power;
   const float sat = params->look_saturation;
-  const float vibrance = params->look_vibrance;
 
   // Apply ASC CDL (Slope, Offset, Power) per channel
   for_three_channels(k, aligned(pixel_in_out: 16))
@@ -431,14 +431,6 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
   for_three_channels(k, aligned(pixel_in_out: 16))
   {
     pixel_in_out[k] = luma + sat * (pixel_in_out[k] - luma);
-  }
-
-  if (vibrance > 1)
-  {
-    dt_aligned_pixel_t hsv_pixel = {0.0f};
-    dt_RGB_2_HSL(pixel_in_out, hsv_pixel);
-    hsv_pixel[1] = powf(hsv_pixel[1], 1/vibrance);
-    dt_HSL_2_RGB(hsv_pixel, pixel_in_out);
   }
 }
 
@@ -563,7 +555,6 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   params.look_offset = user_params->look_offset;
   params.look_slope = user_params->look_slope;
   params.look_saturation = user_params->look_saturation;
-  params.look_vibrance = user_params->look_vibrance;
   params.look_power = user_params->look_power;
   params.look_original_hue_mix_ratio = user_params->look_original_hue_mix_ratio;
 
@@ -1118,30 +1109,31 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     // Convert to "rendering space"
     dt_aligned_pixel_t rendering_RGB;
-    dt_apply_transposed_color_matrix(pix_in, pipe_to_rendering_transposed, rendering_RGB);
 
     dt_aligned_pixel_t base_RGB;
-    dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
 
-/*
-    dt_aligned_pixel_t rendering_from_base;
-    dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_from_base);
-    _compensate_low_side(
-      rendering_RGB,
-      gamut_compression_params.threshold_in,
-      gamut_compression_params.distance_limit_in,
-      output_profile
-    );
-    */
-    dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
+    if (p->experimental_gamut_compression_order)
+    {
+      // go from pipe straight to rendering, and apply compression there
+      dt_apply_transposed_color_matrix(pix_in, pipe_to_rendering_transposed, rendering_RGB);
+      _compensate_low_side(
+        rendering_RGB,
+        gamut_compression_params.threshold_in,
+        gamut_compression_params.distance_limit_in,
+        output_profile
+      );
+    } else {
+      // go from pipe to base, compress, move to rendering
+      dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
 
-    _compensate_low_side(
-      base_RGB,
-      gamut_compression_params.threshold_in,
-      gamut_compression_params.distance_limit_in,
-      output_profile
-    );
-    dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_RGB);
+      _compensate_low_side(
+        base_RGB,
+        gamut_compression_params.threshold_in,
+        gamut_compression_params.distance_limit_in,
+        output_profile
+      );
+      dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_RGB);
+    }
 
     // now rendering_RGB pixel holds rendering-profile values with no negative components
     _agx_tone_mapping(rendering_RGB, &curve_params); // Operates in-place (passes rgb as input and output)
@@ -1413,10 +1405,17 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 void gui_update(dt_iop_module_t *self)
 {
   const dt_iop_agx_gui_data_t *g = self->gui_data;
+  const dt_iop_agx_user_params_t *params = self->params;
 
   // Ensure the graph is drawn initially
   if (g && g->area) {
     gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  }
+
+  if (g)
+  {
+    // dt_bauhaus_toggle_from_params creates a standard gtk_toggle_button.
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->experimental_gamut_compression_order), params->experimental_gamut_compression_order);
   }
 }
 
@@ -1449,9 +1448,6 @@ static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   slider = dt_bauhaus_slider_from_params(self, "look_saturation");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
   gtk_widget_set_tooltip_text(slider, _("decrease or increase saturation"));
-  slider = dt_bauhaus_slider_from_params(self, "look_vibrance");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("decrease or increase vibrance"));
 
   // look_original_hue_mix_ratio
   slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
@@ -1594,6 +1590,9 @@ static void _add_gamut_compression_box(dt_iop_module_t *self, GtkWidget *box, dt
   dt_gui_new_collapsible_section(&gui_data->gamut_compression_section, "plugins/darkroom/agx/expand_gamut_compression",
                                  _("gamut compression"), GTK_BOX(box), DT_ACTION(self));
   self->widget = GTK_WIDGET(gui_data->gamut_compression_section.container);
+
+  gui_data->experimental_gamut_compression_order = dt_bauhaus_toggle_from_params(self, "experimental_gamut_compression_order");
+
    // Reuse the slider variable for all sliders
   GtkWidget *slider;
 
@@ -1652,6 +1651,8 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
 {
   GtkWidget *main_box = self->widget;
   GtkWidget *slider;
+
+  gui_data->experimental_gamut_compression_order = dt_bauhaus_toggle_from_params(self, "experimental_gamut_compression_order");
 
   // primaries collapsible section
   dt_gui_new_collapsible_section(&gui_data->primaries_section, "plugins/darkroom/agx/expand_primaries",
@@ -1792,8 +1793,9 @@ void init_presets(dt_iop_module_so_t *self)
   p.look_power = 1.0f;
   p.look_offset = 0.0f;
   p.look_saturation = 1.0f;
-  p.look_vibrance = 1.0f;
   p.look_original_hue_mix_ratio = 0.0f;
+
+  p.experimental_gamut_compression_order = FALSE;
 
   // AgX primaries settings
   // https://github.com/sobotka/SB2383-Configuration-Generation/blob/74bff1547505e751d6f0605ca65834b6c7e99a8f/generate_config.py#L88
