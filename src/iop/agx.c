@@ -27,9 +27,6 @@
 // Module introspection version
 DT_MODULE_INTROSPECTION(1, dt_iop_agx_user_params_t)
 
-// so we have a breakpoint target in error-handling branches, to be removed after debugging
-static int errors = 0; // Use static if needed within this file only
-
 static const float _epsilon = 1E-6f;
 
 // Module parameters struct
@@ -240,17 +237,26 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   memcpy(piece->data, p1, self->params_size);
 }
 
+// Get pixel norm using max RGB method (similar to filmic's choice for black/white)
+DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
+static float _max(const dt_aligned_pixel_t pixel)
+{
+  return fmaxf(fmaxf(pixel[0], pixel[1]), pixel[2]);
+}
+
+// Get pixel norm using min RGB method (for black)
+DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
+static float _min(const dt_aligned_pixel_t pixel)
+{
+  return fminf(fminf(pixel[0], pixel[1]), pixel[2]);
+}
+
 // AgX implementation
 static float _luminance(const dt_aligned_pixel_t pixel, const dt_iop_order_iccprofile_info_t *const profile)
 {
-  const float lum = (profile) ? dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
+  const float lum = dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
                                                           profile->unbounded_coeffs_in, profile->lutsize,
-                                                          profile->nonlinearlut)
-                      : dt_camera_rgb_luminance(pixel);
-  if (lum <= _epsilon)
-  {
-    errors++;
-  }
+                                                          profile->nonlinearlut);
   return lum;
 }
 
@@ -296,24 +302,14 @@ static float _scale(float limit_x, float limit_y, float transition_x, float tran
 // this is f_t(x), f_s(x) at https://www.desmos.com/calculator/yrysofmx8h
 static float _exponential(float x, float power)
 {
-  const float value = x / powf(1.0f + powf(x, power), 1.0f / power);
-  if(isnan(value))
-  {
-    errors++; // printf("_exponential returns nan\n");
-  }
-  return value;
+  return x / powf(1.0f + powf(x, power), 1.0f / power);
 }
 
 static float _exponential_curve(float x, float scale, float slope, float power, float transition_x,
                                 float transition_y)
 {
   // this is f_ss, f_ts on the original curve https://www.desmos.com/calculator/yrysofmx8h
-  const float value = scale * _exponential(slope * (x - transition_x) / scale, power) + transition_y;
-  if(isnan(value))
-  {
-    errors++; // printf("_exponential_curve returns nan\n");
-  }
-  return value;
+  return scale * _exponential(slope * (x - transition_x) / scale, power) + transition_y;
 }
 
 // Fallback toe/shoulder, so we can always reach black and white.
@@ -353,49 +349,39 @@ static float _apply_curve(const float x, const curve_and_look_params_t *curve_pa
       _fallback_shoulder(x, curve_params) :
       _exponential_curve(x, curve_params->shoulder_scale, curve_params->slope, curve_params->shoulder_power, curve_params->shoulder_transition_x, curve_params->shoulder_transition_y);
   }
-
-  if ((x >= 0.1 && result <= 0.1f) || isnan(result) || isinf(result))
-  {
-    errors++;
-  }
-
   return CLAMPF(result, curve_params->target_black, curve_params->target_white);
 }
 
 // 'lerp', but take care of the boundary: hue wraps around 1 -> 0
-static float _lerp_hue(float hue1, float hue2, float mix)
+static float _lerp_hue(float original_hue, float processed_hue, float mix)
 {
-  const float hue_diff = hue2 - hue1;
+  // can be removed once colorspaces_inline_conversions gets merged
+  original_hue = _sanitise_hue(original_hue);
+  processed_hue = _sanitise_hue(processed_hue);
+
+  const float hue_diff = processed_hue - original_hue;
 
   if(hue_diff > 0.5)
   {
-    hue2 -= 1;
+    processed_hue -= 1;
   }
   else if(hue_diff < -0.5)
   {
-    hue2 += 1;
+    processed_hue += 1;
   }
 
-  float hue_out = hue2 + (hue1 - hue2) * mix;
-  if(hue_out < 0)
-  {
-    hue_out += 1;
-  }
-  else if(hue_out > 1)
-  {
-    hue_out -= 1;
-  }
-  return hue_out;
+  float restored_hue = processed_hue + (original_hue - processed_hue) * mix;
+  return _sanitise_hue(restored_hue);
 }
 
-static float _apply_slope_offset(float x, float slope, float offset)
+static float _apply_slope_offset(const float x, const float slope, const float offset)
 {
   // negative offset should darken the image; positive brighten it
   // without the scale: m = 1 / (1 + offset)
   // offset = 1, slope = 1, x = 0 -> m = 1 / (1+1) = 1/2, b = 1 * 1/2 = 1/2, y = 1/2*0 + 1/2 = 1/2
   const float m = slope / (1 + offset);
   const float b = offset * m;
-  return fmaxf(0.0f, m * x + b);
+  return m * x + b;
   // ASC CDL:
   // return x * slope + offset;
   // alternative:
@@ -405,7 +391,7 @@ static float _apply_slope_offset(float x, float slope, float offset)
 
 // https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
 DT_OMP_DECLARE_SIMD(aligned(pixel_in_out: 16))
-static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_params_t *params)
+static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_params_t *params, const dt_iop_order_iccprofile_info_t *const rendering_profile)
 {
   // Default parameters from the curve_and_look_params_t struct
   const float slope = params->look_slope;
@@ -422,10 +408,7 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
     pixel_in_out[k] = slope_and_offset_val > 0.0f ? powf(slope_and_offset_val, power) : slope_and_offset_val;
   }
 
-  // FIXME: Using Rec 2020 Y coefficients (we use insetting, so this is probably incorrect)
-  const float luma = 0.2626983389565561f * pixel_in_out[0] + // R
-                     0.6780087657728164f * pixel_in_out[1] + // G
-                     0.05929289527062728f * pixel_in_out[2];  // B
+  const float luma = _luminance(pixel_in_out, rendering_profile);
 
   // saturation
   for_three_channels(k, aligned(pixel_in_out: 16))
@@ -434,28 +417,16 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
   }
 }
 
-DT_OMP_DECLARE_SIMD(aligned(result, pixel: 16))
-static void _apply_log_encoding(dt_aligned_pixel_t result, const dt_aligned_pixel_t pixel, float range_in_ev, float minEv)
+static float _apply_log_encoding(float x, float range_in_ev, float minEv)
 {
-  // Assume input is linear Rec2020 relative to 0.18 mid-gray
-  // Ensure all values are > 0 before log
-  dt_aligned_pixel_t v = {
-    fmaxf(_epsilon, pixel[0] / 0.18f),
-    fmaxf(_epsilon, pixel[1] / 0.18f),
-    fmaxf(_epsilon, pixel[2] / 0.18f),
-    pixel[3] // Carry alpha if needed, though it's not used in log
-  };
-
-  for_three_channels(k, aligned(v : 16))
-  {
-    // Log2 encoding
-    float mapped = log2f(v[k]);
-    // normalise to [0, 1] based on minEv and range_in_ev
-    mapped = (mapped - minEv) / range_in_ev;
-    // Clamp result to [0, 1] - this is the input domain for the curve
-    result[k] = CLAMPF(mapped, 0.0f, 1.0f);
-  }
-  result[3] = pixel[3]; // Ensure alpha is preserved if it was carried
+  // Assume input is linear RGB relative to 0.18 mid-gray
+  // Ensure value > 0 before log
+  x = fmaxf(_epsilon, x / 0.18f);
+  float mapped = log2f(x);
+  // normalise to [0, 1] based on minEv and range_in_ev
+  mapped = (mapped - minEv) / range_in_ev;
+  // Clamp result to [0, 1] - this is the input domain for the curve
+  return CLAMPF(mapped, 0.0f, 1.0f);
 }
 
 // see https://www.desmos.com/calculator/gijzff3wlv
@@ -478,17 +449,7 @@ static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order
   }
 
   const float original_luminance = _luminance(pixel_in_out, profile);
-  if (original_luminance < _epsilon)
-  {
-    // Set result to black
-    for_three_channels(k, aligned(pixel_in_out: 16))
-    {
-      pixel_in_out[k] = 0.0f;
-    }
-    return;
-  }
-
-  const float most_negative_component = fminf(pixel_in_out[0], fminf(pixel_in_out[1], pixel_in_out[2]));
+  const float most_negative_component = _min(pixel_in_out);
 
   // offset, so no component remains negative
   for_three_channels(k, aligned(pixel_in_out : 16))
@@ -512,16 +473,6 @@ static void _compensate_low_side(
   const dt_aligned_pixel_t distance_limit,
   const dt_iop_order_iccprofile_info_t *const profile)
 {
-  //*
-  // from sigmoid
-  const float pixel_average = fmaxf((pixel_in_out[0] + pixel_in_out[1] + pixel_in_out[2]) / 3.0f, 0.0f);
-  const float min_value = fminf(fminf(pixel_in_out[0], pixel_in_out[1]), pixel_in_out[2]);
-  const float saturation_factor = min_value < 0.0f ? -pixel_average / (min_value - pixel_average) : 1.0f;
-  for_each_channel(c, aligned(pixel_in_out))
-  {
-    pixel_in_out[c] = pixel_average + saturation_factor * (pixel_in_out[c] - pixel_average);
-  }
-  //*/
   // Jed Smith
 
   // Achromatic axis
@@ -542,6 +493,33 @@ static void _compensate_low_side(
     pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
   }
 
+  // from sigmoid; can create black pixels
+  // e.g.
+  // (-0.2, 0.2, 0.3) -> avg = 0.1, min = -0.2, saturation_factor = -0.1/(-0.2 - 0.1) = 1/3 -> (0, 0.13, 0.17)
+  // but
+  // (-0.3, 0.1, 0.1) -> avg = -0.1/3 => mapped to 0, min = -0.3, saturation_factor = 0; -> (0, 0, 0)
+  // average
+  const float pixel_average = fmaxf((pixel_in_out[0] + pixel_in_out[1] + pixel_in_out[2]) / 3.0f, 0.0f);
+  const float min_value = _min(pixel_in_out);
+  const float saturation_factor = min_value < 0.0f ? -pixel_average / (min_value - pixel_average) : 1.0f;
+  for_each_channel(c, aligned(pixel_in_out))
+  {
+    pixel_in_out[c] = pixel_average + saturation_factor * (pixel_in_out[c] - pixel_average);
+  }
+  /*
+  dt_aligned_pixel_t tmp;
+    for_each_channel(c, aligned(pixel_in_out, tmp))
+    {
+      tmp[c] = pixel_average + saturation_factor * (pixel_in_out[c] - pixel_average);
+    }
+    if (tmp[0] > 0 && tmp[1] > 0 && tmp[2] > 0)
+  {
+    for_each_channel(c, aligned(pixel_in_out, tmp))
+    {
+      pixel_in_out[c] = tmp[c];
+    }
+  }
+*/
   // just in case any negative remains
   // Sakari
   _avoid_negatives(pixel_in_out, profile);
@@ -671,10 +649,6 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   params.shoulder_a = _calculate_A(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, params.shoulder_b);
   printf("shoulder_a = %f\n", params.shoulder_a);
 
-  //if(isnan(shoulder_scale))
-  //{
-  //  errors++; // printf("shoulder_scale is NaN\n");
-  //}
   printf("================== end ==================\n");
 
   return params;
@@ -695,7 +669,7 @@ static primaries_params_t _get_primaries_params(const dt_iop_agx_user_params_t *
   return primaries_params;
 }
 
-static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params)
+static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params, const dt_iop_order_iccprofile_info_t *const rendering_profile)
 {
   // record current chromaticity angle
   dt_aligned_pixel_t hsv_pixel = {0.0f};
@@ -703,15 +677,15 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
   const float h_before = hsv_pixel[0];
 
   dt_aligned_pixel_t transformed_pixel = {0.0f};
-  _apply_log_encoding(transformed_pixel, rgb_in_out, params->range_in_ev, params->min_ev);
 
-  for_three_channels(k, aligned(transformed_pixel: 16))
+  for_three_channels(k, aligned(rgb_in_out, transformed_pixel: 16))
   {
-    transformed_pixel[k] = _apply_curve(transformed_pixel[k], params);
+    float log_value = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
+    transformed_pixel[k] = _apply_curve(log_value, params);
   }
 
   // Apply AgX look
-  _agxLook(transformed_pixel, params);
+  _agxLook(transformed_pixel, params, rendering_profile);
 
   // Linearize
   for_three_channels(k, aligned(transformed_pixel: 16))
@@ -731,20 +705,6 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
   dt_HSV_2_RGB(hsv_pixel, rgb_in_out);
 }
 
-// Get pixel norm using max RGB method (similar to filmic's choice for black/white)
-DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
-static float _agx_get_pixel_norm_max_rgb(const dt_aligned_pixel_t pixel)
-{
-  return fmaxf(fmaxf(pixel[0], pixel[1]), pixel[2]);
-}
-
-// Get pixel norm using min RGB method (for black)
-DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
-static float _agx_get_pixel_norm_min_rgb(const dt_aligned_pixel_t pixel)
-{
-  return fminf(fminf(pixel[0], pixel[1]), pixel[2]);
-}
-
 // Apply logic for black point picker
 static void apply_auto_black_exposure(dt_iop_module_t *self)
 {
@@ -752,7 +712,7 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
   dt_iop_agx_user_params_t *p = self->params;
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
-  const float black_norm = _agx_get_pixel_norm_min_rgb(self->picked_color_min);
+  const float black_norm = _min(self->picked_color_min);
   p->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   ++darktable.gui->reset;
@@ -770,7 +730,7 @@ static void apply_auto_white_exposure(dt_iop_module_t *self)
   dt_iop_agx_user_params_t *p = self->params;
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
-  const float white_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_max);
+  const float white_norm = _max(self->picked_color_max);
   p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
@@ -789,11 +749,11 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
   // Black point
-  const float black_norm = _agx_get_pixel_norm_min_rgb(self->picked_color_min);
+  const float black_norm = _min(self->picked_color_min);
   p->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   // White point
-  const float white_norm = _agx_get_pixel_norm_max_rgb(self->picked_color_max);
+  const float white_norm = _max(self->picked_color_max);
   p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
@@ -884,6 +844,7 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
                                           // outputs
+                                          dt_iop_order_iccprofile_info_t *rendering_profile,
                                           dt_colormatrix_t pipe_to_base_transposed,
                                           dt_colormatrix_t base_to_rendering_transposed,
                                           dt_colormatrix_t pipe_to_rendering_transposed,
@@ -923,14 +884,16 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // The matrix to convert from the inset/rotated to XYZ. When applying to the RGB values that are actually
   // in the 'base' space, it will convert them to XYZ coordinates that represent colors that are partly
   // desaturated (due to the inset) and skewed (do to the rotation).
-  dt_colormatrix_t base_to_inset_rotated_xyz_transposed;
   dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_and_rotated_primaries, base_profile->whitepoint,
-                                                            base_to_inset_rotated_xyz_transposed);
+                                                            rendering_profile->matrix_in_transposed);
+  dt_colormatrix_transpose(rendering_profile->matrix_in, rendering_profile->matrix_in_transposed);
+  // it just holds the matrix required for luminance calculation
+  rendering_profile->nonlinearlut = false;
 
   // The matrix to convert colors from the original 'base' space to their partially desaturated and skewed
   // versions, using the inset RGB -> XYZ and the original base XYZ -> RGB matrices.
   dt_colormatrix_mul(base_to_rendering_transposed,
-                      base_to_inset_rotated_xyz_transposed,
+                      rendering_profile->matrix_in_transposed,
                       base_profile->matrix_out_transposed
                       );
   dt_colormatrix_mul(pipe_to_rendering_transposed, pipe_to_base_transposed, base_to_rendering_transposed);
@@ -992,45 +955,49 @@ static void _create_matrices_and_profiles(
     const dt_iop_order_iccprofile_info_t *pipe_work_profile,
     const dt_iop_order_iccprofile_info_t *base_profile,
     // outputs
+    dt_iop_order_iccprofile_info_t *rendering_profile,
     dt_colormatrix_t pipe_to_base_transposed,
     dt_colormatrix_t base_to_rendering_transposed,
     dt_colormatrix_t pipe_to_rendering_transposed,
     dt_colormatrix_t rendering_to_base_transposed,
-    dt_colormatrix_t base_to_pipe_transposed
-)
+    dt_colormatrix_t base_to_pipe_transposed)
 {
   const primaries_params_t primaries_params = _get_primaries_params(p);
   _calculate_adjusted_primaries(
-      &primaries_params,
-      pipe_work_profile,
-      base_profile,
-      // outputs
-      pipe_to_base_transposed,
-      base_to_rendering_transposed,
-      pipe_to_rendering_transposed,
-      rendering_to_base_transposed,
-      base_to_pipe_transposed
-      /*
-      pipe_to_rendering_transposed,
-      base_to_pipe_transposed,
-      rendering_to_base_transposed
-      */
-      );
+    &primaries_params,
+    pipe_work_profile,
+    base_profile,
+    rendering_profile,
+    // outputs
+    pipe_to_base_transposed,
+    base_to_rendering_transposed,
+    pipe_to_rendering_transposed,
+    rendering_to_base_transposed,
+    base_to_pipe_transposed);
+}
+
+void _print_transposed_matrix(char* name, dt_colormatrix_t matrix)
+{
+  printf("%s\n", name);
+  printf("%f, %f, %f\n", matrix[0][0], matrix[1][0], matrix[2][0]);
+  printf("%f, %f, %f\n", matrix[0][1], matrix[1][1], matrix[2][1]);
+  printf("%f, %f, %f\n", matrix[0][2], matrix[1][2], matrix[2][2]);
+  printf("\n\n");
 }
 
 // Process
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  const dt_iop_agx_user_params_t *p = piece->data;
-  const float *const in = (const float *)ivoid;
-  float *const out = (float *)ovoid;
-  const size_t npixels = (size_t)roi_in->width * roi_in->height;
-
   if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out))
   {
     return;
   }
+
+  const dt_iop_agx_user_params_t *p = piece->data;
+  const float *const in = ivoid;
+  float *const out = ovoid;
+  const size_t n_pixels = (size_t)roi_in->width * roi_in->height;
 
   printf("================== start ==================\n");
   printf("range_black_relative_exposure = %f\n", p->range_black_relative_exposure);
@@ -1055,10 +1022,12 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   dt_colormatrix_t pipe_to_rendering_transposed;
   dt_colormatrix_t rendering_to_base_transposed;
   dt_colormatrix_t base_to_pipe_transposed;
+  dt_iop_order_iccprofile_info_t rendering_profile;
 
   _create_matrices_and_profiles(
           p,
           pipe_work_profile, output_profile,
+          &rendering_profile,
           pipe_to_base_transposed,
           base_to_rendering_transposed,
           pipe_to_rendering_transposed,
@@ -1068,41 +1037,24 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   dt_colormatrix_t pipe_to_base_and_back_transposed;
   dt_colormatrix_mul(pipe_to_base_and_back_transposed, pipe_to_base_transposed, base_to_pipe_transposed);
-  printf("pipe_to_base_and_back_transposed\n");
-  printf("%f, %f, %f\n", pipe_to_base_and_back_transposed[0][0], pipe_to_base_and_back_transposed[0][1], pipe_to_base_and_back_transposed[0][2]);
-  printf("%f, %f, %f\n", pipe_to_base_and_back_transposed[1][0], pipe_to_base_and_back_transposed[1][1], pipe_to_base_and_back_transposed[1][2]);
-  printf("%f, %f, %f\n", pipe_to_base_and_back_transposed[2][0], pipe_to_base_and_back_transposed[2][1], pipe_to_base_and_back_transposed[2][2]);
-  printf("\n\n");
+  _print_transposed_matrix("pipe_to_base_and_back_transposed", pipe_to_base_and_back_transposed);
 
   dt_colormatrix_t base_to_rendering_and_back_transposed;
   dt_colormatrix_mul(base_to_rendering_and_back_transposed, base_to_rendering_transposed, rendering_to_base_transposed);
-  printf("base_to_rendering_and_back_transposed\n");
-  printf("%f, %f, %f\n", base_to_rendering_and_back_transposed[0][0], base_to_rendering_and_back_transposed[0][1], base_to_rendering_and_back_transposed[0][2]);
-  printf("%f, %f, %f\n", base_to_rendering_and_back_transposed[1][0], base_to_rendering_and_back_transposed[1][1], base_to_rendering_and_back_transposed[1][2]);
-  printf("%f, %f, %f\n", base_to_rendering_and_back_transposed[2][0], base_to_rendering_and_back_transposed[2][1], base_to_rendering_and_back_transposed[2][2]);
-  printf("\n\n");
+  _print_transposed_matrix("base_to_rendering_and_back_transposed", base_to_rendering_and_back_transposed);
 
   dt_colormatrix_t rendering_to_pipe_transposed;
   dt_colormatrix_mul(rendering_to_pipe_transposed, rendering_to_base_transposed, base_to_pipe_transposed);
-  printf("rendering_to_pipe_transposed\n");
-  printf("%f, %f, %f\n", rendering_to_pipe_transposed[0][0], rendering_to_pipe_transposed[0][1], rendering_to_pipe_transposed[0][2]);
-  printf("%f, %f, %f\n", rendering_to_pipe_transposed[1][0], rendering_to_pipe_transposed[1][1], rendering_to_pipe_transposed[1][2]);
-  printf("%f, %f, %f\n", rendering_to_pipe_transposed[2][0], rendering_to_pipe_transposed[2][1], rendering_to_pipe_transposed[2][2]);
-  printf("\n\n");
+  _print_transposed_matrix("rendering_to_pipe_transposed", rendering_to_pipe_transposed);
 
   dt_colormatrix_t pipe_to_rendering_and_back_transposed;
   dt_colormatrix_mul(pipe_to_rendering_and_back_transposed, pipe_to_rendering_transposed, rendering_to_pipe_transposed);
-  printf("pipe_to_rendering_and_back_transposed\n");
-  printf("%f, %f, %f\n", pipe_to_rendering_and_back_transposed[0][0], pipe_to_rendering_and_back_transposed[0][1], pipe_to_rendering_and_back_transposed[0][2]);
-  printf("%f, %f, %f\n", pipe_to_rendering_and_back_transposed[1][0], pipe_to_rendering_and_back_transposed[1][1], pipe_to_rendering_and_back_transposed[1][2]);
-  printf("%f, %f, %f\n", pipe_to_rendering_and_back_transposed[2][0], pipe_to_rendering_and_back_transposed[2][1], pipe_to_rendering_and_back_transposed[2][2]);
-  printf("\n\n");
-
+  _print_transposed_matrix("pipe_to_rendering_and_back_transposed", pipe_to_rendering_and_back_transposed);
 
   const gamut_compression_params_t gamut_compression_params = _agx_get_gamut_compression_params(p);
 
   DT_OMP_FOR()
-  for(size_t k = 0; k < 4 * npixels; k += 4)
+  for(size_t k = 0; k < 4 * n_pixels; k += 4)
   {
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
@@ -1120,7 +1072,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
         rendering_RGB,
         gamut_compression_params.threshold_in,
         gamut_compression_params.distance_limit_in,
-        output_profile
+        &rendering_profile
       );
     } else {
       // go from pipe to base, compress, move to rendering
@@ -1136,7 +1088,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     }
 
     // now rendering_RGB pixel holds rendering-profile values with no negative components
-    _agx_tone_mapping(rendering_RGB, &curve_params); // Operates in-place (passes rgb as input and output)
+    _agx_tone_mapping(rendering_RGB, &curve_params, &rendering_profile);
 
     dt_apply_transposed_color_matrix(rendering_RGB, rendering_to_base_transposed, base_RGB);
 
@@ -1652,8 +1604,6 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
   GtkWidget *main_box = self->widget;
   GtkWidget *slider;
 
-  gui_data->experimental_gamut_compression_order = dt_bauhaus_toggle_from_params(self, "experimental_gamut_compression_order");
-
   // primaries collapsible section
   dt_gui_new_collapsible_section(&gui_data->primaries_section, "plugins/darkroom/agx/expand_primaries",
                                  _("primaries"), GTK_BOX(box), DT_ACTION(self));
@@ -1741,6 +1691,45 @@ static float _degrees_to_radians(float degrees)
   return degrees * M_PI_F / 180.f;
 }
 
+static void _set_neutral_params(dt_iop_agx_user_params_t* p)
+{
+  p->look_slope = 1.0f;
+  p->look_power = 1.0f;
+  p->look_offset = 0.0f;
+  p->look_saturation = 1.0f;
+  p->look_original_hue_mix_ratio = 0.0f;
+
+  p->range_black_relative_exposure = -10;
+  p->range_white_relative_exposure = 6.5;
+
+  p->curve_contrast_around_pivot = 2.4;
+  p->curve_linear_percent_below_pivot = 0.0;
+  p->curve_linear_percent_below_pivot = 0.0;
+  p->curve_toe_power = 1.5;
+  p->curve_shoulder_power = 1.5;
+  p->curve_target_display_black_y = 0.0;
+  p->curve_target_display_white_y = 1.0;
+  p->curve_gamma = 2.2;
+  p->curve_pivot_x_shift = 0.0;
+  p->curve_pivot_y_linear = 0.18;
+
+  p->gamut_compression_distance_limit_in_c = 1.0f;
+  p->gamut_compression_distance_limit_in_m = 1.0f;
+  p->gamut_compression_distance_limit_in_y = 1.0f;
+  p->gamut_compression_threshold_in_r = 0.2f;
+  p->gamut_compression_threshold_in_g = 0.2f;
+  p->gamut_compression_threshold_in_b = 0.2f;
+
+  p->gamut_compression_distance_limit_out_c = 1.0f;
+  p->gamut_compression_distance_limit_out_m = 1.0f;
+  p->gamut_compression_distance_limit_out_y = 1.0f;
+  p->gamut_compression_threshold_out_r = 0.2f;
+  p->gamut_compression_threshold_out_g = 0.2f;
+  p->gamut_compression_threshold_out_b = 0.2f;
+
+  p->experimental_gamut_compression_order = FALSE;
+}
+
 void init_presets(dt_iop_module_so_t *self)
 {
   const char *workflow = dt_conf_get_string_const("plugins/darkroom/workflow");
@@ -1758,45 +1747,7 @@ void init_presets(dt_iop_module_so_t *self)
 
   dt_iop_agx_user_params_t p = { 0 };
 
-  // common
-  p.look_slope = 1.0f;
-  p.look_original_hue_mix_ratio = 0.0f;
-
-  p.range_black_relative_exposure = -10;
-  p.range_white_relative_exposure = 6.5;
-
-  p.curve_contrast_around_pivot = 2.4;
-  p.curve_linear_percent_below_pivot = 0.0;
-  p.curve_linear_percent_below_pivot = 0.0;
-  p.curve_toe_power = 1.5;
-  p.curve_shoulder_power = 1.5;
-  p.curve_target_display_black_y = 0.0;
-  p.curve_target_display_white_y = 1.0;
-  p.curve_gamma = 2.2;
-  p.curve_pivot_x_shift = 0.0;
-  p.curve_pivot_y_linear = 0.18;
-
-  p.gamut_compression_distance_limit_in_c = 1.0f;
-  p.gamut_compression_distance_limit_in_m = 1.0f;
-  p.gamut_compression_distance_limit_in_y = 1.0f;
-  p.gamut_compression_threshold_in_r = 0.2f;
-  p.gamut_compression_threshold_in_g = 0.2f;
-  p.gamut_compression_threshold_in_b = 0.2f;
-
-  p.gamut_compression_distance_limit_out_c = 1.0f;
-  p.gamut_compression_distance_limit_out_m = 1.0f;
-  p.gamut_compression_distance_limit_out_y = 1.0f;
-  p.gamut_compression_threshold_out_r = 0.2f;
-  p.gamut_compression_threshold_out_g = 0.2f;
-  p.gamut_compression_threshold_out_b = 0.2f;
-
-  p.look_power = 1.0f;
-  p.look_offset = 0.0f;
-  p.look_saturation = 1.0f;
-  p.look_original_hue_mix_ratio = 0.0f;
-
-  p.experimental_gamut_compression_order = FALSE;
-
+  _set_neutral_params(&p);
   // AgX primaries settings
   // https://github.com/sobotka/SB2383-Configuration-Generation/blob/74bff1547505e751d6f0605ca65834b6c7e99a8f/generate_config.py#L88
   p.red_inset = 0.15f;
@@ -1816,11 +1767,7 @@ void init_presets(dt_iop_module_so_t *self)
   p.look_saturation = 1.4f;
   dt_gui_presets_add_generic(_("blender-like|punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
-  // 'Base' look
-  p.look_power = 1.0f;
-  p.look_offset = 0.0f;
-  p.look_saturation = 1.0f;
-
+  _set_neutral_params(&p);
   // Sigmoid 'smooth' primaries settings
   p.red_inset = 0.1f;
   p.green_inset = 0.1f;
