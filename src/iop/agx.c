@@ -352,12 +352,19 @@ static float _apply_curve(const float x, const curve_and_look_params_t *curve_pa
   return CLAMPF(result, curve_params->target_black, curve_params->target_white);
 }
 
+static float _agx_sanitise_hue(float hue)
+{
+  if(hue < 0.0f) hue += 1.0f;
+  if(hue >= 1.0f) hue -= 1.0f;
+  return hue;
+}
+
 // 'lerp', but take care of the boundary: hue wraps around 1 -> 0
 static float _lerp_hue(float original_hue, float processed_hue, float mix)
 {
   // can be removed once colorspaces_inline_conversions gets merged
-  original_hue = _sanitise_hue(original_hue);
-  processed_hue = _sanitise_hue(processed_hue);
+  original_hue = _agx_sanitise_hue(original_hue);
+  processed_hue = _agx_sanitise_hue(processed_hue);
 
   const float hue_diff = processed_hue - original_hue;
 
@@ -371,7 +378,7 @@ static float _lerp_hue(float original_hue, float processed_hue, float mix)
   }
 
   float restored_hue = processed_hue + (original_hue - processed_hue) * mix;
-  return _sanitise_hue(restored_hue);
+  return _agx_sanitise_hue(restored_hue);
 }
 
 static float _apply_slope_offset(const float x, const float slope, const float offset)

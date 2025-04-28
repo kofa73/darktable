@@ -595,12 +595,6 @@ static inline void dt_RGB_to_Lab(const dt_aligned_pixel_t rgb,
   dt_XYZ_to_Lab(XYZ, Lab);
 }
 
-static float _sanitise_hue(float hue)
-{
-  if(hue < 0.0f) hue += 1.0f;
-  if(hue >= 1.0f) hue -= 1.0f;
-  return hue;
-}
 
 DT_OMP_DECLARE_SIMD(aligned(RGB))
 static inline float _dt_RGB_2_Hue(const dt_aligned_pixel_t RGB, const float max, const float delta)
@@ -614,13 +608,15 @@ static inline float _dt_RGB_2_Hue(const dt_aligned_pixel_t RGB, const float max,
     hue = 4.0f + (RGB[0] - RGB[1]) / delta;
 
   hue /= 6.0f;
-  return _sanitise_hue(hue);
+  if(hue < 0.0f) hue += 1.0f;
+  if(hue > 1.0f) hue -= 1.0f;
+  return hue;
 }
 
 DT_OMP_DECLARE_SIMD(aligned(RGB: 16))
 static inline void _dt_Hue_2_RGB(dt_aligned_pixel_t RGB, const float H, const float C, const float min)
 {
-  const float h = _sanitise_hue(H) * 6.0f;
+  const float h = H * 6.0f;
   const float i = floorf(h);
   const float f = h - i;
   const float fc = f * C;
