@@ -29,6 +29,17 @@ DT_MODULE_INTROSPECTION(1, dt_iop_agx_user_params_t)
 
 static const float _epsilon = 1E-6f;
 
+typedef enum dt_iop_agx_base_primaries_t
+{
+  // NOTE: Keep Export Profile first to make it the default (index 0)
+  DT_AGX_EXPORT_PROFILE = 0,         // $DESCRIPTION: "export profile"
+  DT_AGX_WORK_PROFILE = 1,           // $DESCRIPTION: "working profile"
+  DT_AGX_REC2020 = 2,                // $DESCRIPTION: "Rec2020"
+  DT_AGX_DISPLAY_P3 = 3,             // $DESCRIPTION: "Display P3"
+  DT_AGX_ADOBE_RGB = 4,              // $DESCRIPTION: "Adobe RGB (compatible)"
+  DT_AGX_SRGB = 5,                   // $DESCRIPTION: "sRGB"
+} dt_iop_agx_base_primaries_t;
+
 // Module parameters struct
 // Updated struct dt_iop_agx_user_params_t
 typedef struct dt_iop_agx_user_params_t
@@ -83,6 +94,7 @@ typedef struct dt_iop_agx_user_params_t
   float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max output yellow oversaturation"
 
   // custom primaries
+  dt_iop_agx_base_primaries_t base_primaries; // $DEFAULT: DT_AGX_EXPORT_PROFILE $DESCRIPTION: "base primaries"
   float red_inset;        // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation"
   float red_rotation;     // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "red rotation"
   float green_inset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green attenuation"
@@ -237,14 +249,106 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   memcpy(piece->data, p1, self->params_size);
 }
 
-// Get pixel norm using max RGB method (similar to filmic's choice for black/white)
+void _print_transposed_matrix(const char* name, const dt_colormatrix_t matrix)
+{
+  printf("%s\n", name);
+  printf("%f, %f, %f\n", matrix[0][0], matrix[1][0], matrix[2][0]);
+  printf("%f, %f, %f\n", matrix[0][1], matrix[1][1], matrix[2][1]);
+  printf("%f, %f, %f\n", matrix[0][2], matrix[1][2], matrix[2][2]);
+  printf("\n\n");
+}
+
+// Helper function to get the dt_colorspaces type from the enum
+static dt_colorspaces_color_profile_type_t _get_base_profile_type_from_enum(const dt_iop_agx_base_primaries_t base_primaries_enum)
+{
+  switch(base_primaries_enum)
+  {
+    case DT_AGX_SRGB:       return DT_COLORSPACE_SRGB;
+    case DT_AGX_DISPLAY_P3: return DT_COLORSPACE_DISPLAY_P3;
+    case DT_AGX_ADOBE_RGB:  return DT_COLORSPACE_ADOBERGB;
+    case DT_AGX_REC2020:    // Fall through
+    default:                return DT_COLORSPACE_LIN_REC2020; // Default/fallback
+  }
+}
+
+// Get the profile info struct based on the user selection
+static const dt_iop_order_iccprofile_info_t*
+_agx_get_base_profile(dt_develop_t *dev,
+                      const dt_iop_order_iccprofile_info_t *pipe_work_profile,
+                      const dt_iop_agx_base_primaries_t base_primaries_selection)
+{
+  dt_iop_order_iccprofile_info_t *selected_profile_info = NULL;
+
+  switch(base_primaries_selection)
+  {
+    case DT_AGX_EXPORT_PROFILE:
+      {
+        dt_colorspaces_color_profile_type_t export_type;
+        char export_filename[DT_IOP_COLOR_ICC_LEN];
+        dt_iop_color_intent_t export_intent;
+
+        // Get the configured export profile settings
+        gboolean settings_ok = dt_ioppr_get_configured_export_profile_settings(
+            dev, &export_type, export_filename, sizeof(export_filename), &export_intent);
+
+        if (settings_ok)
+        {
+          selected_profile_info = dt_ioppr_add_profile_info_to_list(dev, export_type, export_filename, export_intent);
+          if (!selected_profile_info || !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
+          {
+             dt_print(DT_DEBUG_PIPE, "[agx] Export profile '%s' unusable or missing matrix, falling back to Rec2020.",
+                      dt_colorspaces_get_name(export_type, export_filename));
+             selected_profile_info = NULL; // Force fallback
+          }
+        }
+        else
+        {
+           dt_print(DT_DEBUG_ALWAYS, "[agx] Failed to get configured export profile settings, falling back to Rec2020.");
+           // Fallback handled below
+        }
+      }
+      break;
+
+    case DT_AGX_WORK_PROFILE:
+      // Cast away const, as dt_ioppr_add_profile_info_to_list returns non-const
+      return (dt_iop_order_iccprofile_info_t *)pipe_work_profile;
+
+    case DT_AGX_REC2020:
+    case DT_AGX_DISPLAY_P3:
+    case DT_AGX_ADOBE_RGB:
+    case DT_AGX_SRGB:
+      {
+        dt_colorspaces_color_profile_type_t profile_type = _get_base_profile_type_from_enum(base_primaries_selection);
+        // Use relative intent for standard profiles when used as base
+        selected_profile_info = dt_ioppr_add_profile_info_to_list(dev, profile_type, "", DT_INTENT_RELATIVE_COLORIMETRIC);
+         if (!selected_profile_info || !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
+         {
+             dt_print(DT_DEBUG_PIPE, "[agx] Standard base profile '%s' unusable or missing matrix, falling back to Rec2020.",
+                      dt_colorspaces_get_name(profile_type, ""));
+             selected_profile_info = NULL; // Force fallback
+         }
+      }
+      break;
+  }
+
+  // Fallback if selected profile wasn't found or was invalid
+  if (!selected_profile_info)
+  {
+    selected_profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_LIN_REC2020, "", DT_INTENT_RELATIVE_COLORIMETRIC);
+    // If even Rec2020 fails, something is very wrong, but let the caller handle NULL if necessary.
+    if (!selected_profile_info)
+       dt_print(DT_DEBUG_ALWAYS, "[agx] CRITICAL: Failed to get even Rec2020 base profile info.");
+  }
+
+  return selected_profile_info;
+}
+
 DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
 static float _max(const dt_aligned_pixel_t pixel)
 {
   return fmaxf(fmaxf(pixel[0], pixel[1]), pixel[2]);
 }
 
-// Get pixel norm using min RGB method (for black)
 DT_OMP_DECLARE_SIMD(aligned(pixel : 16))
 static float _min(const dt_aligned_pixel_t pixel)
 {
@@ -879,6 +983,10 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
                      pipe_work_profile->matrix_in_transposed,   // pipe -> XYZ
                      base_profile->matrix_out_transposed);      // XYZ -> base
 
+  printf("base_profile.nonlinearlut: %d\n", base_profile->nonlinearlut);
+  _print_transposed_matrix("base_profile->matrix_in_transposed", base_profile->matrix_in_transposed);
+  _print_transposed_matrix("base_profile->matrix_out_transposed", base_profile->matrix_out_transposed);
+
   mat3SSEinv(base_to_pipe_transposed, pipe_to_base_transposed);
 
   // inbound path, base RGB -> inset and rotated rendering space for the curve
@@ -983,16 +1091,6 @@ static void _create_matrices_and_profiles(
     base_to_pipe_transposed);
 }
 
-void _print_transposed_matrix(char* name, dt_colormatrix_t matrix)
-{
-  printf("%s\n", name);
-  printf("%f, %f, %f\n", matrix[0][0], matrix[1][0], matrix[2][0]);
-  printf("%f, %f, %f\n", matrix[0][1], matrix[1][1], matrix[2][1]);
-  printf("%f, %f, %f\n", matrix[0][2], matrix[1][2], matrix[2][2]);
-  printf("\n\n");
-}
-
-// Process
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
@@ -1021,8 +1119,18 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   // Calculate curve parameters once
   const curve_and_look_params_t curve_params = _calculate_curve_params(p);
 
-  const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe); // Needed for setup
-  const dt_iop_order_iccprofile_info_t *const output_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe); // Needed for setup AND loop
+  const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+  // Get the base profile based on user selection
+  const dt_iop_order_iccprofile_info_t *const base_profile = _agx_get_base_profile(self->dev, pipe_work_profile, p->base_primaries);
+
+  // Check if we got a valid base profile, fallback if necessary (already handled in _agx_get_base_profile, but double-check)
+  if (!base_profile) {
+    dt_print(DT_DEBUG_ALWAYS, "[agx process] Failed to obtain a valid base profile. Cannot proceed.");
+    // Optionally copy input to output to avoid garbage
+    if (in != out) memcpy(out, in, n_pixels * 4 * sizeof(float));
+    return;
+  }
+  dt_print(DT_DEBUG_PIPE, "[agx process] Using base profile: %s", dt_colorspaces_get_name(base_profile->type, base_profile->filename));
 
   dt_colormatrix_t pipe_to_base_transposed;
   dt_colormatrix_t base_to_rendering_transposed;
@@ -1033,7 +1141,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   _create_matrices_and_profiles(
           p,
-          pipe_work_profile, output_profile,
+          pipe_work_profile, base_profile,
           &rendering_profile,
           pipe_to_base_transposed,
           base_to_rendering_transposed,
@@ -1089,7 +1197,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
         base_RGB,
         gamut_compression_params.threshold_in,
         gamut_compression_params.distance_limit_in,
-        output_profile
+        base_profile
       );
       dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_RGB);
     }
@@ -1104,7 +1212,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       base_RGB,
       gamut_compression_params.threshold_out,
       gamut_compression_params.distance_limit_out,
-      output_profile
+      base_profile
     );
 
     // bring back to pipe working space
@@ -1619,6 +1727,10 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
   self->widget = GTK_WIDGET(gui_data->primaries_section.container);
   dt_iop_module_t *sect = DT_IOP_SECTION_FOR_PARAMS(self, N_("primaries"));
 
+  GtkWidget *base_primaries_combo = dt_bauhaus_combobox_from_params(self, "base_primaries");
+  gtk_widget_set_tooltip_text(base_primaries_combo, _("Color space primaries to use as the base for below adjustments.\n"
+                                                      "'export profile' uses the profile set in 'output color profile'."));
+
 #define SETUP_COLOR_COMBO(color, r, g, b, inset_tooltip, rotation_tooltip)                                        \
   slider = dt_bauhaus_slider_from_params(sect, #color "_inset");                                                  \
   dt_bauhaus_slider_set_format(slider, "%");                                                                      \
@@ -1734,6 +1846,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t* p)
   p->gamut_compression_threshold_out_g = 0.2f;
   p->gamut_compression_threshold_out_b = 0.2f;
 
+  p->base_primaries = DT_AGX_EXPORT_PROFILE;
   p->experimental_gamut_compression_order = FALSE;
 }
 
