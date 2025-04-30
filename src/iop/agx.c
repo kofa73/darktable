@@ -584,6 +584,7 @@ static void _compensate_low_side(
   const dt_aligned_pixel_t distance_limit,
   const dt_iop_order_iccprofile_info_t *const profile)
 {
+
   // Jed Smith
 
   // Achromatic axis
@@ -1002,8 +1003,11 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_and_rotated_primaries, base_profile->whitepoint,
                                                             rendering_profile->matrix_in_transposed);
   dt_colormatrix_transpose(rendering_profile->matrix_in, rendering_profile->matrix_in_transposed);
+  mat3SSEinv(rendering_profile->matrix_out_transposed, rendering_profile->matrix_in_transposed);
   // it just holds the matrix required for luminance calculation
   rendering_profile->nonlinearlut = false;
+  _print_transposed_matrix("rendering_profile->matrix_in_transposed", rendering_profile->matrix_in_transposed);
+  _print_transposed_matrix("rendering_profile->matrix_out_transposed", rendering_profile->matrix_out_transposed);
 
   // The matrix to convert colors from the original 'base' space to their partially desaturated and skewed
   // versions, using the inset RGB -> XYZ and the original base XYZ -> RGB matrices.
@@ -1012,6 +1016,7 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
                       base_profile->matrix_out_transposed
                       );
   dt_colormatrix_mul(pipe_to_rendering_transposed, pipe_to_base_transposed, base_to_rendering_transposed);
+  _print_transposed_matrix("pipe_to_rendering_transposed", pipe_to_rendering_transposed);
 
   // outbound path, inset and rotated working space for the curve -> base RGB
 
@@ -1032,15 +1037,18 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   dt_colormatrix_t inset_with_purity_and_rotated_to_xyz_transposed;
   dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_with_purity_and_rotated_primaries, base_profile->whitepoint,
                                                             inset_with_purity_and_rotated_to_xyz_transposed);
+  _print_transposed_matrix("inset_with_purity_and_rotated_to_xyz_transposed", inset_with_purity_and_rotated_to_xyz_transposed);
 
   dt_colormatrix_t tmp;
   dt_colormatrix_mul(tmp,
     inset_with_purity_and_rotated_to_xyz_transposed,  // custom (with purity) -> XYZ
     base_profile->matrix_out_transposed               // XYZ -> base
     );
+  _print_transposed_matrix("tmp (inverse of rendering_to_base_transposed)", tmp);
   // 'tmp' is constructed the same way as inbound_inset_and_rotated_to_xyz_transposed,
   // but this matrix will be used to remap colours to the 'base' profile, so we need to invert it.
   mat3SSEinv(rendering_to_base_transposed, tmp);
+  _print_transposed_matrix("rendering_to_base_transposed", rendering_to_base_transposed);
 }
 
 static gamut_compression_params_t _agx_get_gamut_compression_params(const dt_iop_agx_user_params_t *p)
@@ -1207,7 +1215,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     dt_apply_transposed_color_matrix(rendering_RGB, rendering_to_base_transposed, base_RGB);
 
-	  // back in base (output) profile, fix any negative we may have introduced
+    // back in base (output) profile, fix any negative we may have introduced
     _compensate_low_side(
       base_RGB,
       gamut_compression_params.threshold_out,

@@ -123,7 +123,7 @@ dt_imageio_retval_t dt_imageio_open_pfm(dt_image_t *img,
   // the rows in the process of filling the output buffer with data
   if(channels == 3)
   {
-    DT_OMP_FOR() // WORKAROUND: remove collapse(2) from DT_OMP_FOR(collapse(2))
+    DT_OMP_FOR()
     for(size_t row = 0; row < img->height; row++)
     {
       const size_t target_row = made_by_photoshop ? row : img->height - 1 - row;
@@ -133,7 +133,8 @@ dt_imageio_retval_t dt_imageio_open_pfm(dt_image_t *img,
         for_three_channels(c)
         {
           value.as_float = readbuf[3 * (target_row * img->width + column) + c];
-          if(swap_byte_order) value.as_int = GUINT32_SWAP_LE_BE(value.as_int);
+          if(swap_byte_order)
+            value.as_int = GUINT32_SWAP_LE_BE(value.as_int);
           pix[c] = value.as_float;
         }
         copy_pixel_nontemporal(&buf[4 * (img->width * row + column)], pix);
@@ -142,16 +143,17 @@ dt_imageio_retval_t dt_imageio_open_pfm(dt_image_t *img,
   }
   else
   {
-    DT_OMP_FOR(collapse(2))
+    DT_OMP_FOR()
     for(size_t row = 0; row < img->height; row++)
     {
       const size_t target_row = made_by_photoshop ? row : img->height - 1 - row;
       for(size_t column = 0; column < img->width; column++)
       {
+        const size_t idx = img->width * row + column;
         value.as_float = readbuf[target_row * img->width + column];
-        if(swap_byte_order) value.as_int = GUINT32_SWAP_LE_BE(value.as_int);
-        buf[4 * (img->width * row + column) + 2] = buf[4 * (img->width * row + column) + 1]
-            = buf[4 * (img->width * row + column) + 0] = value.as_float;
+        if(swap_byte_order)
+          value.as_int = GUINT32_SWAP_LE_BE(value.as_int);
+        buf[4 * idx + 2] = buf[4 * idx + 1] = buf[4 * idx + 0] = value.as_float;
       }
     }
   }
