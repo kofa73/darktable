@@ -983,12 +983,11 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   dt_colormatrix_mul(pipe_to_base_transposed,
                      pipe_work_profile->matrix_in_transposed,   // pipe -> XYZ
                      base_profile->matrix_out_transposed);      // XYZ -> base
-
+  _print_transposed_matrix("pipe_to_base_transposed", pipe_to_base_transposed);
   printf("base_profile.nonlinearlut: %d\n", base_profile->nonlinearlut);
-  _print_transposed_matrix("base_profile->matrix_in_transposed", base_profile->matrix_in_transposed);
-  _print_transposed_matrix("base_profile->matrix_out_transposed", base_profile->matrix_out_transposed);
 
   mat3SSEinv(base_to_pipe_transposed, pipe_to_base_transposed);
+  _print_transposed_matrix("base_to_pipe_transposed", base_to_pipe_transposed);
 
   // inbound path, base RGB -> inset and rotated rendering space for the curve
 
@@ -1002,12 +1001,13 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // desaturated (due to the inset) and skewed (do to the rotation).
   dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_and_rotated_primaries, base_profile->whitepoint,
                                                             rendering_profile->matrix_in_transposed);
-  dt_colormatrix_transpose(rendering_profile->matrix_in, rendering_profile->matrix_in_transposed);
-  mat3SSEinv(rendering_profile->matrix_out_transposed, rendering_profile->matrix_in_transposed);
-  // it just holds the matrix required for luminance calculation
-  rendering_profile->nonlinearlut = false;
   _print_transposed_matrix("rendering_profile->matrix_in_transposed", rendering_profile->matrix_in_transposed);
+  dt_colormatrix_transpose(rendering_profile->matrix_in, rendering_profile->matrix_in_transposed);
+
+  mat3SSEinv(rendering_profile->matrix_out_transposed, rendering_profile->matrix_in_transposed);
   _print_transposed_matrix("rendering_profile->matrix_out_transposed", rendering_profile->matrix_out_transposed);
+  // it just holds the matrix required for luminance calculation
+  rendering_profile->nonlinearlut = FALSE;
 
   // The matrix to convert colors from the original 'base' space to their partially desaturated and skewed
   // versions, using the inset RGB -> XYZ and the original base XYZ -> RGB matrices.
@@ -1015,6 +1015,8 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
                       rendering_profile->matrix_in_transposed,
                       base_profile->matrix_out_transposed
                       );
+  _print_transposed_matrix("base_to_rendering_transposed", base_to_rendering_transposed);
+
   dt_colormatrix_mul(pipe_to_rendering_transposed, pipe_to_base_transposed, base_to_rendering_transposed);
   _print_transposed_matrix("pipe_to_rendering_transposed", pipe_to_rendering_transposed);
 
