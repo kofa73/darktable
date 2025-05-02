@@ -78,7 +78,7 @@ typedef struct dt_iop_agx_user_params_t
   float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
-
+/*
   float gamut_compression_threshold_in_r; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input red compression target"
   float gamut_compression_threshold_in_g; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input green compression target"
   float gamut_compression_threshold_in_b; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "input blue compression target"
@@ -92,7 +92,7 @@ typedef struct dt_iop_agx_user_params_t
   float gamut_compression_distance_limit_out_c; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max output cyan oversaturation"
   float gamut_compression_distance_limit_out_m; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max output magenta oversaturation"
   float gamut_compression_distance_limit_out_y; // $MIN: 1.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "max output yellow oversaturation"
-
+*/
   // custom primaries
   dt_iop_agx_base_primaries_t base_primaries; // $DEFAULT: DT_AGX_EXPORT_PROFILE $DESCRIPTION: "base primaries"
   float red_inset;        // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation"
@@ -101,9 +101,18 @@ typedef struct dt_iop_agx_user_params_t
   float green_rotation;   // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "green rotation"
   float blue_inset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation"
   float blue_rotation;    // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
-  float purity;           // $MIN:  0.0  $MAX: 1.0  $DEFAULT: 0.0 $DESCRIPTION: "recover purity"
 
-  gboolean experimental_gamut_compression_order;    // $DESCRIPTION: "use experimental gamut compression order"
+  float master_outset_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master attenuation reversal"
+  float master_unrotation_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master rotation reversal"
+  float red_outset;        // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation reversal"
+  float red_unrotation;     // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "red rotation reversal"
+  float green_outset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green attenuation reversal"
+  float green_unrotation;   // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "green rotation reversal"
+  float blue_outset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation reversal"
+  float blue_unrotation;    // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation reversal"
+  //float purity;           // $MIN:  0.0  $MAX: 1.0  $DEFAULT: 0.0 $DESCRIPTION: "recover purity"
+
+  //gboolean experimental_gamut_compression_order;    // $DESCRIPTION: "use experimental gamut compression order"
 } dt_iop_agx_user_params_t;
 
 typedef struct dt_iop_agx_gui_data_t
@@ -112,8 +121,8 @@ typedef struct dt_iop_agx_gui_data_t
   dt_gui_collapsible_section_t area_section;
   dt_gui_collapsible_section_t advanced_section;
   dt_gui_collapsible_section_t primaries_section;
-  dt_gui_collapsible_section_t gamut_compression_section;
-  GtkWidget *experimental_gamut_compression_order;
+  // dt_gui_collapsible_section_t gamut_compression_section;
+  // GtkWidget *experimental_gamut_compression_order;
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -193,9 +202,14 @@ typedef struct primaries_params_t
 {
   float inset[3];
   float rotation[3];
-  float purity;
-} primaries_params_t;
 
+  float master_outset_ratio;
+  float master_unrotation_ratio;
+  float outset[3];
+  float unrotation[3];
+  //float purity;
+} primaries_params_t;
+/*
 typedef struct gamut_compression_params_t
 {
   dt_aligned_pixel_t threshold_in;
@@ -203,7 +217,7 @@ typedef struct gamut_compression_params_t
   dt_aligned_pixel_t threshold_out;
   dt_aligned_pixel_t distance_limit_out;
 } gamut_compression_params_t;
-
+*/
 // Translatable name
 const char *name()
 {
@@ -580,11 +594,11 @@ static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order
 
 static void _compensate_low_side(
   dt_aligned_pixel_t pixel_in_out,
-  const dt_aligned_pixel_t threshold,
-  const dt_aligned_pixel_t distance_limit,
+  // const dt_aligned_pixel_t threshold,
+  // const dt_aligned_pixel_t distance_limit,
   const dt_iop_order_iccprofile_info_t *const profile)
 {
-
+/*
   // Jed Smith
 
   // Achromatic axis
@@ -604,7 +618,7 @@ static void _compensate_low_side(
     // Inverse RGB Ratios to RGB
     pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
   }
-
+*/
   // from sigmoid; can create black pixels
   // e.g.
   // (-0.2, 0.2, 0.3) -> avg = 0.1, min = -0.2, saturation_factor = -0.1/(-0.2 - 0.1) = 1/3 -> (0, 0.13, 0.17)
@@ -681,7 +695,9 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   printf("pivot(%f, %f) at gamma = %f\n", pivot_x, params.pivot_y, params.curve_gamma);
 
   // avoid range altering slope - 16.5 EV is the default AgX range; keep the meaning of slope
+  // new Blender defaults: 20 EV range
   params.slope = user_params->curve_contrast_around_pivot * (params.range_in_ev / 16.5f);
+  // params.slope = user_params->curve_contrast_around_pivot * (params.range_in_ev / 20.0f);
   printf("scaled slope = %f from user_contrast_around_pivot = %f\n", params.slope, user_params->curve_contrast_around_pivot);
 
   // toe
@@ -770,13 +786,21 @@ static primaries_params_t _get_primaries_params(const dt_iop_agx_user_params_t *
 {
   primaries_params_t primaries_params;
 
-  primaries_params.purity = user_params->purity;
+  //primaries_params.purity = user_params->purity;
   primaries_params.inset[0] = user_params->red_inset;
   primaries_params.inset[1] = user_params->green_inset;
   primaries_params.inset[2] = user_params->blue_inset;
   primaries_params.rotation[0] = user_params->red_rotation;
   primaries_params.rotation[1] = user_params->green_rotation;
   primaries_params.rotation[2] = user_params->blue_rotation;
+  primaries_params.master_outset_ratio = user_params->master_outset_ratio;
+  primaries_params.master_unrotation_ratio = user_params->master_unrotation_ratio;
+  primaries_params.outset[0] = user_params->red_outset;
+  primaries_params.outset[1] = user_params->green_outset;
+  primaries_params.outset[2] = user_params->blue_outset;
+  primaries_params.unrotation[0] = user_params->red_unrotation;
+  primaries_params.unrotation[1] = user_params->green_unrotation;
+  primaries_params.unrotation[2] = user_params->blue_unrotation;
 
   return primaries_params;
 }
@@ -902,6 +926,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
   params_with_mid_gray.curve_pivot_x_shift = 0;
 
   curve_and_look_params_t curve_and_look_params = _calculate_curve_params(&params_with_mid_gray);
+
   // see where the target_pivot would be mapped with defaults of mid-gray to mid-gray mapped
   float target_y = _apply_curve(target_pivot_x, &curve_and_look_params);
   // try to avoid changing the brightness of the pivot
@@ -939,7 +964,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-void _print_curve(curve_and_look_params_t *curve_params)
+void _print_curve(const curve_and_look_params_t *curve_params)
 {
   const int steps = 100;
   printf("\nCurve\n");
@@ -1024,11 +1049,19 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
 
   // Rotated, primaries, with optional restoration of purity. This is to be applied after the sigmoid curve;
   // it can undo the skew and recover purity (saturation).
+  /*
   float inset_with_purity_and_rotated_primaries[3][2];
   for(size_t i = 0; i < 3; i++)
   {
     const float scaling = 1.f - params->purity * params->inset[i];
     dt_rotate_and_scale_primary(base_profile, scaling, params->rotation[i], i, inset_with_purity_and_rotated_primaries[i]);
+  }
+  */
+  float outset_and_unrotated_primaries[3][2];
+  for(size_t i = 0; i < 3; i++)
+  {
+    const float scaling = 1.f - params->master_outset_ratio * params->outset[i];
+    dt_rotate_and_scale_primary(base_profile, scaling, params->master_unrotation_ratio * params->unrotation[i], i, outset_and_unrotated_primaries[i]);
   }
 
   // The matrix to convert the curve's output to XYZ; the primaries reflect the fact that the curve's output
@@ -1036,15 +1069,21 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // Its inverse (see the next steps), when applied to RGB values in the curve's working space (which actually uses
   // the base primaries), will undo the rotation and, depending on purity, push colours further from achromatic,
   // resaturating them.
+  /*
   dt_colormatrix_t inset_with_purity_and_rotated_to_xyz_transposed;
   dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_with_purity_and_rotated_primaries, base_profile->whitepoint,
                                                             inset_with_purity_and_rotated_to_xyz_transposed);
   _print_transposed_matrix("inset_with_purity_and_rotated_to_xyz_transposed", inset_with_purity_and_rotated_to_xyz_transposed);
+  */
+  dt_colormatrix_t outset_and_unrotated_to_xyz_transposed;
+  dt_make_transposed_matrices_from_primaries_and_whitepoint(outset_and_unrotated_primaries, base_profile->whitepoint,
+                                                            outset_and_unrotated_to_xyz_transposed);
+  _print_transposed_matrix("outset_and_unrotated_to_xyz_transposed", outset_and_unrotated_to_xyz_transposed);
 
   dt_colormatrix_t tmp;
   dt_colormatrix_mul(tmp,
-    inset_with_purity_and_rotated_to_xyz_transposed,  // custom (with purity) -> XYZ
-    base_profile->matrix_out_transposed               // XYZ -> base
+    outset_and_unrotated_to_xyz_transposed,  // custom (with purity) -> XYZ
+    base_profile->matrix_out_transposed      // XYZ -> base
     );
   _print_transposed_matrix("tmp (inverse of rendering_to_base_transposed)", tmp);
   // 'tmp' is constructed the same way as inbound_inset_and_rotated_to_xyz_transposed,
@@ -1052,7 +1091,7 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   mat3SSEinv(rendering_to_base_transposed, tmp);
   _print_transposed_matrix("rendering_to_base_transposed", rendering_to_base_transposed);
 }
-
+/*
 static gamut_compression_params_t _agx_get_gamut_compression_params(const dt_iop_agx_user_params_t *p)
 {
   gamut_compression_params_t gamut_compression_params;
@@ -1074,7 +1113,7 @@ static gamut_compression_params_t _agx_get_gamut_compression_params(const dt_iop
 
   return gamut_compression_params;
 }
-
+*/
 static void _create_matrices_and_profiles(
     const dt_iop_agx_user_params_t *p,
     const dt_iop_order_iccprofile_info_t *pipe_work_profile,
@@ -1128,6 +1167,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   // Calculate curve parameters once
   const curve_and_look_params_t curve_params = _calculate_curve_params(p);
+  _print_curve(&curve_params);
 
   const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   // Get the base profile based on user selection
@@ -1176,7 +1216,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   dt_colormatrix_mul(pipe_to_rendering_and_back_transposed, pipe_to_rendering_transposed, rendering_to_pipe_transposed);
   _print_transposed_matrix("pipe_to_rendering_and_back_transposed", pipe_to_rendering_and_back_transposed);
 
-  const gamut_compression_params_t gamut_compression_params = _agx_get_gamut_compression_params(p);
+  //const gamut_compression_params_t gamut_compression_params = _agx_get_gamut_compression_params(p);
 
   DT_OMP_FOR()
   for(size_t k = 0; k < 4 * n_pixels; k += 4)
@@ -1188,7 +1228,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     dt_aligned_pixel_t rendering_RGB;
 
     dt_aligned_pixel_t base_RGB;
-
+/*
     if (p->experimental_gamut_compression_order)
     {
       // go from pipe straight to rendering, and apply compression there
@@ -1200,17 +1240,18 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
         &rendering_profile
       );
     } else {
+    */
       // go from pipe to base, compress, move to rendering
       dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
 
       _compensate_low_side(
         base_RGB,
-        gamut_compression_params.threshold_in,
-        gamut_compression_params.distance_limit_in,
+        // gamut_compression_params.threshold_in,
+        // gamut_compression_params.distance_limit_in,
         base_profile
       );
       dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_RGB);
-    }
+    //}
 
     // now rendering_RGB pixel holds rendering-profile values with no negative components
     _agx_tone_mapping(rendering_RGB, &curve_params, &rendering_profile);
@@ -1220,8 +1261,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     // back in base (output) profile, fix any negative we may have introduced
     _compensate_low_side(
       base_RGB,
-      gamut_compression_params.threshold_out,
-      gamut_compression_params.distance_limit_out,
+      // gamut_compression_params.threshold_out,
+      // gamut_compression_params.distance_limit_out,
       base_profile
     );
 
@@ -1488,12 +1529,13 @@ void gui_update(dt_iop_module_t *self)
   if (g && g->area) {
     gtk_widget_queue_draw(GTK_WIDGET(g->area));
   }
-
+/*
   if (g)
   {
     // dt_bauhaus_toggle_from_params creates a standard gtk_toggle_button.
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->experimental_gamut_compression_order), params->experimental_gamut_compression_order);
   }
+*/
 }
 
 static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
@@ -1659,7 +1701,7 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
 
   self->widget = main_box;
 }
-
+/*
 static void _add_gamut_compression_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
@@ -1723,7 +1765,7 @@ static void _add_gamut_compression_box(dt_iop_module_t *self, GtkWidget *box, dt
 
   self->widget = main_box;
 }
-
+*/
 static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
@@ -1741,6 +1783,7 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
   gtk_widget_set_tooltip_text(base_primaries_combo, _("Color space primaries to use as the base for below adjustments.\n"
                                                       "'export profile' uses the profile set in 'output color profile'."));
 
+  const float desaturation = 0.2f;
 #define SETUP_COLOR_COMBO(color, r, g, b, inset_tooltip, rotation_tooltip)                                        \
   slider = dt_bauhaus_slider_from_params(sect, #color "_inset");                                                  \
   dt_bauhaus_slider_set_format(slider, "%");                                                                      \
@@ -1757,7 +1800,6 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
   dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
   gtk_widget_set_tooltip_text(slider, rotation_tooltip);
 
-  const float desaturation = 0.2f;
   SETUP_COLOR_COMBO(red, 1.f - desaturation, desaturation, desaturation, _("attenuate the purity of the red primary"),
                     _("rotate the red primary"));
   SETUP_COLOR_COMBO(green, desaturation, 1.f - desaturation, desaturation, _("attenuate the purity of the green primary"),
@@ -1766,11 +1808,48 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
                     _("rotate the blue primary"));
 #undef SETUP_COLOR_COMBO
 
-  slider = dt_bauhaus_slider_from_params(sect, "purity");
+  slider = dt_bauhaus_slider_from_params(sect, "master_outset_ratio");
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_digits(slider, 0);
   dt_bauhaus_slider_set_factor(slider, 100.f);
-  gtk_widget_set_tooltip_text(slider, _("recover some of the original purity after the inset"));
+  gtk_widget_set_tooltip_text(slider, _("overall purity boost"));
+
+  slider = dt_bauhaus_slider_from_params(sect, "master_unrotation_ratio");
+  dt_bauhaus_slider_set_format(slider, "%");
+  dt_bauhaus_slider_set_digits(slider, 0);
+  dt_bauhaus_slider_set_factor(slider, 100.f);
+  gtk_widget_set_tooltip_text(slider, _("overall unrotation ratio"));
+
+
+#define SETUP_COLOR_COMBO(color, r, g, b, inset_tooltip, rotation_tooltip)                                        \
+  slider = dt_bauhaus_slider_from_params(sect, #color "_outset");                                                  \
+  dt_bauhaus_slider_set_format(slider, "%");                                                                      \
+  dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
+  dt_bauhaus_slider_set_factor(slider, 100.f);                                                                    \
+  dt_bauhaus_slider_set_soft_range(slider, 0.f, 0.5f);                                                            \
+  dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
+  gtk_widget_set_tooltip_text(slider, inset_tooltip);                                                             \
+                                                                                                                  \
+  slider = dt_bauhaus_slider_from_params(sect, #color "_unrotation");                                               \
+  dt_bauhaus_slider_set_format(slider, "°");                                                                      \
+  dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
+  dt_bauhaus_slider_set_factor(slider, 180.f / M_PI_F);                                                           \
+  dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
+  gtk_widget_set_tooltip_text(slider, rotation_tooltip);
+
+  SETUP_COLOR_COMBO(red, 1.f - desaturation, desaturation, desaturation, _("boost the purity of the red primary"),
+                    _("unrotate the red primary"));
+  SETUP_COLOR_COMBO(green, desaturation, 1.f - desaturation, desaturation, _("boost the purity of the green primary"),
+                    _("unrotate the green primary"));
+  SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, _("boost the purity of the blue primary"),
+                    _("unrotate the blue primary"));
+#undef SETUP_COLOR_COMBO
+
+  // slider = dt_bauhaus_slider_from_params(sect, "purity");
+  // dt_bauhaus_slider_set_format(slider, "%");
+  // dt_bauhaus_slider_set_digits(slider, 0);
+  // dt_bauhaus_slider_set_factor(slider, 100.f);
+  // gtk_widget_set_tooltip_text(slider, _("recover some of the original purity after the inset"));
 
   self->widget = main_box;
 }
@@ -1803,14 +1882,14 @@ void gui_init(dt_iop_module_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), advanced_box, TRUE, TRUE, 0);
   GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(self->widget), primaries_box, TRUE, TRUE, 0);
-  GtkWidget *gamut_compression_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), gamut_compression_box, TRUE, TRUE, 0);
+  // GtkWidget *gamut_compression_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  // gtk_box_pack_start(GTK_BOX(self->widget), gamut_compression_box, TRUE, TRUE, 0);
 
    _add_look_box(self, look_box, gui_data);
    _add_base_box(self, tonemap_box, gui_data);
    _add_advanced_box(self, advanced_box, gui_data);
   _add_primaries_box(self, primaries_box, gui_data);
-  _add_gamut_compression_box(self, gamut_compression_box, gui_data);
+  // _add_gamut_compression_box(self, gamut_compression_box, gui_data);
 
   self->widget = self_widget;
 }
@@ -1841,7 +1920,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t* p)
   p->curve_gamma = 2.2;
   p->curve_pivot_x_shift = 0.0;
   p->curve_pivot_y_linear = 0.18;
-
+/*
   p->gamut_compression_distance_limit_in_c = 1.0f;
   p->gamut_compression_distance_limit_in_m = 1.0f;
   p->gamut_compression_distance_limit_in_y = 1.0f;
@@ -1855,9 +1934,25 @@ static void _set_neutral_params(dt_iop_agx_user_params_t* p)
   p->gamut_compression_threshold_out_r = 0.2f;
   p->gamut_compression_threshold_out_g = 0.2f;
   p->gamut_compression_threshold_out_b = 0.2f;
+*/
+  p->red_inset = 0.0f;
+  p->red_rotation = 0.0;
+  p->green_inset = 0.0;
+  p->green_rotation = 0.0f;
+  p->blue_inset = 0.0f;
+  p->blue_rotation = 0.0f;
+
+  p->master_outset_ratio = 1.0f;
+  p->master_unrotation_ratio = 1.0f;
+  p->red_outset = 0.0f;
+  p->red_unrotation = 0.0f;
+  p->green_outset = 0.0f;
+  p->green_unrotation = 0.0f;
+  p->blue_outset = 0.0f;
+  p->blue_unrotation = 0.0f;
 
   p->base_primaries = DT_AGX_EXPORT_PROFILE;
-  p->experimental_gamut_compression_order = FALSE;
+  // p->experimental_gamut_compression_order = FALSE;
 }
 
 void init_presets(dt_iop_module_so_t *self)
@@ -1878,16 +1973,25 @@ void init_presets(dt_iop_module_so_t *self)
   dt_iop_agx_user_params_t p = { 0 };
 
   _set_neutral_params(&p);
-  // AgX primaries settings
-  // https://github.com/sobotka/SB2383-Configuration-Generation/blob/74bff1547505e751d6f0605ca65834b6c7e99a8f/generate_config.py#L88
-  p.red_inset = 0.15f;
-  p.green_inset = 0.10f;
-  p.blue_inset = 0.10f;
-  p.red_rotation = _degrees_to_radians(4.5f);
-  p.green_rotation = _degrees_to_radians(-0.5f);
-  p.blue_rotation = _degrees_to_radians(-2.0f);
+  // AgX primaries settings from Eary_Chow
+  // https://discuss.pixls.us/t/blender-agx-in-darktable-proof-of-concept/48697/1018
+  p.red_inset = 0.32965205f;
+  p.green_inset = 0.28051336f;
+  p.blue_inset = 0.12475368f;
+  p.red_rotation = _degrees_to_radians(2.13976149);
+  p.green_rotation = _degrees_to_radians(-1.22827335f);
+  p.blue_rotation = _degrees_to_radians(-3.05174246f);
+  p.red_outset = 0.32317438f;
+  p.green_outset = 0.28325605f;
+  p.blue_outset = 0.0374326f;
+  p.red_unrotation = _degrees_to_radians(0.0f);
+  p.green_unrotation = _degrees_to_radians(0.0f);
+  p.blue_unrotation = _degrees_to_radians(0.0f);
   // Restore purity
-  p.purity = 1.f;
+  //p.purity = 1.f;
+  p.master_outset_ratio = 1.0f;
+  p.master_unrotation_ratio = 1.0f;
+  p.base_primaries = DT_AGX_REC2020;
 
   dt_gui_presets_add_generic(_("blender-like|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
@@ -1905,8 +2009,17 @@ void init_presets(dt_iop_module_so_t *self)
   p.red_rotation = _degrees_to_radians(2.f);
   p.green_rotation = _degrees_to_radians(-1.f);
   p.blue_rotation = _degrees_to_radians(-3.f);
+  p.red_outset = 0.1f;
+  p.green_outset = 0.1f;
+  p.blue_outset = 0.15f;
+  p.red_unrotation = _degrees_to_radians(2.f);
+  p.green_unrotation = _degrees_to_radians(-1.f);
+  p.blue_unrotation = _degrees_to_radians(-3.f);
   // Don't restore purity - try to avoid posterization.
-  p.purity = 0.f;
+  //p.purity = 0.f;
+  p.master_outset_ratio = 0.0f;
+  p.master_unrotation_ratio = 1.0f;
+  p.base_primaries = DT_AGX_WORK_PROFILE;
 
   dt_gui_presets_add_generic(_("smooth|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
