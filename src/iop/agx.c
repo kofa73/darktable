@@ -104,8 +104,6 @@ typedef struct dt_iop_agx_gui_data_t
   dt_gui_collapsible_section_t area_section;
   dt_gui_collapsible_section_t advanced_section;
   dt_gui_collapsible_section_t primaries_section;
-  // dt_gui_collapsible_section_t gamut_compression_section;
-  // GtkWidget *experimental_gamut_compression_order;
   GtkDrawingArea *area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -1133,8 +1131,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     _compensate_low_side(
       base_RGB,
-      // gamut_compression_params.threshold_in,
-      // gamut_compression_params.distance_limit_in,
       base_profile
     );
     dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_RGB);
