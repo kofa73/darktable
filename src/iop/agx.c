@@ -69,7 +69,7 @@ typedef struct dt_iop_agx_user_params_t
   // t_p
   float curve_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "toe power"
   // s_p -> Renamed from curve_shoulder_power for clarity
-  float curve_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "shoulder power;"
+  float curve_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "shoulder power"
   // we don't have a parameter for pivot_x, it's set to the x value representing mid-gray, splitting [0..1] in the ratio
   // range_black_relative_exposure : range_white_relative_exposure
   // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
@@ -1597,8 +1597,8 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
                                                       "'export profile' uses the profile set in 'output color profile'."));
 
   const float desaturation = 0.2f;
-#define SETUP_COLOR_COMBO(color, r, g, b, inset_tooltip, rotation_tooltip)                                        \
-  slider = dt_bauhaus_slider_from_params(sect, #color "_inset");                                                  \
+#define SETUP_COLOR_COMBO(color, r, g, b, attenuation_suffix, inset_tooltip, rotation_suffix, rotation_tooltip)   \
+  slider = dt_bauhaus_slider_from_params(sect, #color attenuation_suffix);                                        \
   dt_bauhaus_slider_set_format(slider, "%");                                                                      \
   dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
   dt_bauhaus_slider_set_factor(slider, 100.f);                                                                    \
@@ -1606,20 +1606,19 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
   dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
   gtk_widget_set_tooltip_text(slider, inset_tooltip);                                                             \
                                                                                                                   \
-  slider = dt_bauhaus_slider_from_params(sect, #color "_rotation");                                               \
+  slider = dt_bauhaus_slider_from_params(sect, #color rotation_suffix);                                           \
   dt_bauhaus_slider_set_format(slider, "°");                                                                      \
   dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
   dt_bauhaus_slider_set_factor(slider, 180.f / M_PI_F);                                                           \
   dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
   gtk_widget_set_tooltip_text(slider, rotation_tooltip);
 
-  SETUP_COLOR_COMBO(red, 1.f - desaturation, desaturation, desaturation, _("attenuate the purity of the red primary"),
-                    _("rotate the red primary"));
-  SETUP_COLOR_COMBO(green, desaturation, 1.f - desaturation, desaturation, _("attenuate the purity of the green primary"),
-                    _("rotate the green primary"));
-  SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, _("attenuate the purity of the blue primary"),
-                    _("rotate the blue primary"));
-#undef SETUP_COLOR_COMBO
+  SETUP_COLOR_COMBO(red, 1.f - desaturation, desaturation, desaturation, "_inset", _("attenuate the purity of the red primary"),
+                    "_rotation", _("rotate the red primary"));
+  SETUP_COLOR_COMBO(green, desaturation, 1.f - desaturation, desaturation, "_inset", _("attenuate the purity of the green primary"),
+                    "_rotation", _("rotate the green primary"));
+  SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, "_inset", _("attenuate the purity of the blue primary"),
+                    "_rotation", _("rotate the blue primary"));
 
   slider = dt_bauhaus_slider_from_params(sect, "master_outset_ratio");
   dt_bauhaus_slider_set_format(slider, "%");
@@ -1633,29 +1632,12 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
   dt_bauhaus_slider_set_factor(slider, 100.f);
   gtk_widget_set_tooltip_text(slider, _("overall unrotation ratio"));
 
-
-#define SETUP_COLOR_COMBO(color, r, g, b, inset_tooltip, rotation_tooltip)                                        \
-  slider = dt_bauhaus_slider_from_params(sect, #color "_outset");                                                  \
-  dt_bauhaus_slider_set_format(slider, "%");                                                                      \
-  dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
-  dt_bauhaus_slider_set_factor(slider, 100.f);                                                                    \
-  dt_bauhaus_slider_set_soft_range(slider, 0.f, 0.5f);                                                            \
-  dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
-  gtk_widget_set_tooltip_text(slider, inset_tooltip);                                                             \
-                                                                                                                  \
-  slider = dt_bauhaus_slider_from_params(sect, #color "_unrotation");                                               \
-  dt_bauhaus_slider_set_format(slider, "°");                                                                      \
-  dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
-  dt_bauhaus_slider_set_factor(slider, 180.f / M_PI_F);                                                           \
-  dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
-  gtk_widget_set_tooltip_text(slider, rotation_tooltip);
-
-  SETUP_COLOR_COMBO(red, 1.f - desaturation, desaturation, desaturation, _("boost the purity of the red primary"),
-                    _("unrotate the red primary"));
-  SETUP_COLOR_COMBO(green, desaturation, 1.f - desaturation, desaturation, _("boost the purity of the green primary"),
-                    _("unrotate the green primary"));
-  SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, _("boost the purity of the blue primary"),
-                    _("unrotate the blue primary"));
+  SETUP_COLOR_COMBO(red, 1.f - desaturation, desaturation, desaturation, "_outset", _("boost the purity of the red primary"),
+                    "_unrotation", _("unrotate the red primary"));
+  SETUP_COLOR_COMBO(green, desaturation, 1.f - desaturation, desaturation, "_outset", _("boost the purity of the green primary"),
+                    "_unrotation", _("unrotate the green primary"));
+  SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, "_outset", _("boost the purity of the blue primary"),
+                    "_unrotation", _("unrotate the blue primary"));
 #undef SETUP_COLOR_COMBO
 
   self->widget = main_box;
