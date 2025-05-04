@@ -101,10 +101,10 @@ typedef struct dt_iop_agx_user_params_t
 typedef struct dt_iop_agx_gui_data_t
 {
   dt_gui_collapsible_section_t look_section;
-  dt_gui_collapsible_section_t area_section;
+  dt_gui_collapsible_section_t graph_section;
   dt_gui_collapsible_section_t advanced_section;
   dt_gui_collapsible_section_t primaries_section;
-  GtkDrawingArea *area;
+  GtkDrawingArea *graph_drawing_area;
 
   // Cache Pango and Cairo stuff for the graph drawing
   float line_height;
@@ -791,7 +791,7 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
   dt_bauhaus_slider_set(g->range_black_exposure, p->range_black_relative_exposure);
   --darktable.gui->reset;
 
-  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
@@ -809,7 +809,7 @@ static void apply_auto_white_exposure(dt_iop_module_t *self)
   dt_bauhaus_slider_set(g->range_white_exposure, p->range_white_relative_exposure);
   --darktable.gui->reset;
 
-  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
@@ -833,7 +833,7 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
   dt_bauhaus_slider_set(g->range_white_exposure, p->range_white_relative_exposure);
   --darktable.gui->reset;
 
-  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
@@ -896,7 +896,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
   --darktable.gui->reset;
 
   // Redraw and add history
-  gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
@@ -1395,8 +1395,8 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
   const dt_iop_agx_gui_data_t *g = self->gui_data;
   // Trigger redraw when any parameter changes
-  if (g && g->area) {
-    gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  if (g && g->graph_drawing_area) {
+    gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   }
 }
 
@@ -1407,25 +1407,23 @@ void gui_update(dt_iop_module_t *self)
   const dt_iop_agx_user_params_t *params = self->params;
 
   // Ensure the graph is drawn initially
-  if (g && g->area) {
-    gtk_widget_queue_draw(GTK_WIDGET(g->area));
+  if (g && g->graph_drawing_area) {
+    gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   }
 }
 
-static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
+static void _add_look_sliders(dt_iop_module_t *self, GtkWidget *parent_widget)
 {
-  GtkWidget *main_box = self->widget;
-  // Look Section
-  dt_gui_new_collapsible_section(&gui_data->look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(box), DT_ACTION(self));
+  GtkWidget *original_self_widget = self->widget;
+  self->widget = parent_widget;
 
-  self->widget = GTK_WIDGET(gui_data->look_section.container);
   // Reuse the slider variable for all sliders instead of creating new ones in each scope
   GtkWidget *slider;
 
   // look_offset
   slider = dt_bauhaus_slider_from_params(self, "look_offset");
   dt_bauhaus_slider_set_soft_range(slider, -0.5f, 0.5f);
-  gtk_widget_set_tooltip_text(slider, _("deepen or lift shadows"));  // Tooltip text for look_offset
+  gtk_widget_set_tooltip_text(slider, _("deepen or lift shadows"));
 
   // look_slope
   slider = dt_bauhaus_slider_from_params(self, "look_slope");
@@ -1447,61 +1445,93 @@ static void _add_look_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("Hue mix ratio adjustment"));
 
-  self->widget = main_box; // Restore previous widget context
+  self->widget = original_self_widget;
 }
 
-static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget* _add_look_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
 {
-  GtkWidget *main_box = self->widget; // save
+  GtkWidget *original_self_widget = self->widget;
 
-  GtkWidget *base_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(box), base_box, TRUE, TRUE, 0);
+  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  self->widget = look_box;
+  dt_gui_new_collapsible_section(&gui_data->look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(look_box), DT_ACTION(self));
+  _add_look_sliders(self, GTK_WIDGET(gui_data->look_section.container));
 
-  // Area section – is added first so that it is at the top
-  dt_gui_new_collapsible_section(&gui_data->area_section, "plugins/darkroom/agx/expand_area_params",
-    _("show curve"), GTK_BOX(base_box), DT_ACTION(self));
+  self->widget = original_self_widget;
+  return look_box;
+}
 
-  GtkWidget *area_container = GTK_WIDGET(gui_data->area_section.container);
-  gui_data->area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
-                                                      0, // Initial height factor
-                                                      "plugins/darkroom/agx/graphheight")); // Conf key
-  g_object_set_data(G_OBJECT(gui_data->area), "iop-instance", self);
-  dt_action_define_iop(self, NULL, N_("graph"), GTK_WIDGET(gui_data->area), NULL);
-  gtk_widget_set_can_focus(GTK_WIDGET(gui_data->area), TRUE);
-  g_signal_connect(G_OBJECT(gui_data->area), "draw", G_CALLBACK(_agx_draw_curve), self);
-  gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->area), _("tone mapping curve"));
+static void _add_curve_graph(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data, GtkBox *parent_box)
+{
+  GtkWidget *original_self_widget = self->widget;
+  self->widget = GTK_WIDGET(parent_box);
+
+  GtkWidget *graph_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(parent_box), graph_box, TRUE, TRUE, 0);
+  self->widget = graph_box;
+
+  dt_gui_new_collapsible_section(&gui_data->graph_section, "plugins/darkroom/agx/show_curve", _("show curve"),
+                                 GTK_BOX(graph_box), DT_ACTION(self));
+  GtkWidget *graph_container = GTK_WIDGET(gui_data->graph_section.container);
+  gui_data->graph_drawing_area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
+                                                                    0, // Initial height factor
+                                                                    "plugins/darkroom/agx/graphheight"));
+  g_object_set_data(G_OBJECT(gui_data->graph_drawing_area), "iop-instance", self);
+  dt_action_define_iop(self, NULL, N_("graph"), GTK_WIDGET(gui_data->graph_drawing_area), NULL);
+  gtk_widget_set_can_focus(GTK_WIDGET(gui_data->graph_drawing_area), TRUE);
+  g_signal_connect(G_OBJECT(gui_data->graph_drawing_area), "draw", G_CALLBACK(_agx_draw_curve), self);
+  gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->graph_drawing_area), _("tone mapping curve"));
 
   // Pack drawing area at the top
-  gtk_box_pack_start(GTK_BOX(area_container), GTK_WIDGET(gui_data->area), TRUE, TRUE, 0);
+  gtk_box_pack_start(GTK_BOX(graph_container), GTK_WIDGET(gui_data->graph_drawing_area), TRUE, TRUE, 0);
+  gtk_box_pack_start(GTK_BOX(graph_box), graph_container, TRUE, TRUE, 0);
+  gtk_box_pack_start(parent_box, graph_box, TRUE, TRUE, 0);
 
-  //separated picker box for black/white  relative exposure
-  GtkWidget *picker_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(box), picker_box, TRUE, TRUE, 0);
-  self->widget = picker_box;
+  self->widget = original_self_widget;
+}
+
+static void _add_exposure_section(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data, GtkBox *parent_box)
+{
+  GtkWidget *original_self_widget = self->widget;
+  self->widget = GTK_WIDGET(parent_box);
 
   // Create section label
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "Input exposure range")));
 
-  // Create black point slider and associate picker
-  gui_data->range_black_exposure = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "range_black_relative_exposure"));
+  // black point slider and picker
+  gui_data->range_black_exposure
+      = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                            dt_bauhaus_slider_from_params(self, "range_black_relative_exposure"));
   dt_bauhaus_slider_set_soft_range(gui_data->range_black_exposure, -20.0f, -1.0f);
   dt_bauhaus_slider_set_format(gui_data->range_black_exposure, _(" EV"));
   gtk_widget_set_tooltip_text(gui_data->range_black_exposure, _("relative exposure below mid-grey (black point)"));
 
-  // Create white point slider and associate picker
-  gui_data->range_white_exposure = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "range_white_relative_exposure"));
+  // white point slider associate picker
+  gui_data->range_white_exposure
+      = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                            dt_bauhaus_slider_from_params(self, "range_white_relative_exposure"));
   dt_bauhaus_slider_set_soft_range(gui_data->range_white_exposure, 1.0f, 20.0f);
   dt_bauhaus_slider_set_format(gui_data->range_white_exposure, _(" EV"));
   gtk_widget_set_tooltip_text(gui_data->range_white_exposure, _("relative exposure above mid-grey (white point)"));
 
-  // Auto tune slider (similar to filmic's)
-  gui_data->auto_tune_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_combobox_new(self));
+  // auto-tune picker
+  gui_data->auto_tune_picker
+      = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_combobox_new(self));
   dt_bauhaus_widget_set_label(gui_data->auto_tune_picker, NULL, N_("auto tune levels"));
-  gtk_widget_set_tooltip_text(gui_data->auto_tune_picker, _("pick image area to automatically set black and white exposure"));
-  gtk_box_pack_start(GTK_BOX(self->widget), gui_data->auto_tune_picker, TRUE, TRUE, 0);
+  gtk_widget_set_tooltip_text(gui_data->auto_tune_picker,
+                              _("pick image area to automatically set black and white exposure"));
+  gtk_box_pack_start(GTK_BOX(self->widget), gui_data->auto_tune_picker, FALSE, FALSE, 0);
+
+  self->widget = original_self_widget;
+}
+
+static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t * gui_data, GtkBox * parent_box)
+{
+  GtkWidget *original_self_widget = self->widget;
+  self->widget = GTK_WIDGET(parent_box);
 
   GtkWidget *curve_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(box), curve_box, TRUE, TRUE, 0);
+  gtk_box_pack_start(parent_box, curve_box, TRUE, TRUE, 0);
   self->widget = curve_box;
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "curve parameters")));
@@ -1539,17 +1569,43 @@ static void _add_base_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_
   dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
   gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
 
-  self->widget = main_box;
+  self->widget = original_self_widget;
 }
 
-static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget* _add_base_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget *original_self_widget = self->widget;
+
+  GtkBox *base_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));
+  _add_exposure_section(self, gui_data, base_box);
+  _add_curve_graph(self, gui_data, base_box);
+  _add_curve_section(self, gui_data, base_box);
+
+  self->widget = original_self_widget;
+  return GTK_WIDGET(base_box);
+}
+
+static GtkWidget *_add_advanced_box(dt_iop_module_t *self, GtkBox *parent_box, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
 
-  // Tone Mapping Section advanced
+  GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  self->widget = advanced_box;
+
   dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
-                                 _("advanced"), GTK_BOX(box), DT_ACTION(self));
+                                 _("advanced"), GTK_BOX(advanced_box), DT_ACTION(self));
   self->widget = GTK_WIDGET(gui_data->advanced_section.container);
+
+  // drawing params for the graph
+  gui_data->line_height = 0;
+  gui_data->sign_width = 0;
+  gui_data->zero_width = 0;
+  gui_data->graph_width = 0;
+  gui_data->graph_height = 0;
+  gui_data->inset = 0;
+  gui_data->inner_padding = 0;
+  gui_data->context = NULL;
+
    // Reuse the slider variable for all sliders
   GtkWidget *slider;
 
@@ -1574,16 +1630,21 @@ static void _add_advanced_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_
   gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
 
   self->widget = main_box;
+
+  return advanced_box;
 }
 
-static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget *_add_primaries_box(dt_iop_module_t *self, GtkBox *parent_box, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
-  GtkWidget *slider;
+
+  GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(parent_box, primaries_box, FALSE, FALSE, 0);
+  self->widget = primaries_box;
 
   // primaries collapsible section
   dt_gui_new_collapsible_section(&gui_data->primaries_section, "plugins/darkroom/agx/expand_primaries",
-                                 _("primaries"), GTK_BOX(box), DT_ACTION(self));
+                                 _("primaries"), GTK_BOX(primaries_box), DT_ACTION(self));
   gtk_widget_set_tooltip_text(gui_data->primaries_section.expander, _("set custom primaries"));
 
   self->widget = GTK_WIDGET(gui_data->primaries_section.container);
@@ -1592,6 +1653,8 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
   GtkWidget *base_primaries_combo = dt_bauhaus_combobox_from_params(self, "base_primaries");
   gtk_widget_set_tooltip_text(base_primaries_combo, _("Color space primaries to use as the base for below adjustments.\n"
                                                       "'export profile' uses the profile set in 'output color profile'."));
+
+  GtkWidget *slider;
 
   const float desaturation = 0.2f;
 #define SETUP_COLOR_COMBO(color, r, g, b, attenuation_suffix, inset_tooltip, rotation_suffix, rotation_tooltip)   \
@@ -1638,13 +1701,11 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
 #undef SETUP_COLOR_COMBO
 
   self->widget = main_box;
+  return primaries_box;
 }
 
 void gui_init(dt_iop_module_t *self)
 {
-  // so we can restore it later
-  GtkWidget *self_widget = self->widget;
-
   dt_iop_agx_gui_data_t *gui_data = IOP_GUI_ALLOC(agx);
   GtkWidget *main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
@@ -1655,40 +1716,24 @@ void gui_init(dt_iop_module_t *self)
   gtk_box_pack_start(GTK_BOX(main_vbox), GTK_WIDGET(gui_data->notebook), TRUE, TRUE, 0);
 
   // 'settings' page
-  GtkWidget *page_settings = dt_ui_notebook_page(gui_data->notebook, N_("settings"), _("main look and curve settings"));
-  self->widget = page_settings;
+  GtkWidget *settings_page = dt_ui_notebook_page(gui_data->notebook, N_("settings"), _("main look and curve settings"));
+  self->widget = settings_page;
 
-  // Initialize drawing cache fields
-  gui_data->line_height = 0;
-  gui_data->sign_width = 0;
-  gui_data->zero_width = 0;
-  gui_data->graph_width = 0;
-  gui_data->graph_height = 0;
-  gui_data->inset = 0;
-  gui_data->inner_padding = 0;
-  gui_data->context = NULL;
+  GtkWidget *look_box = _add_look_box(self, gui_data);
+  GtkWidget *base_box = _add_base_box(self, gui_data);
+  GtkWidget *advanced_box = _add_advanced_box(self, GTK_BOX(settings_page), gui_data);
 
+  GtkBox *settings_box = GTK_BOX(settings_page);
+  gtk_box_pack_start(settings_box, look_box, FALSE, FALSE, 0);
+  gtk_box_pack_start(settings_box, base_box, FALSE, FALSE, 0);
+  gtk_box_pack_start(settings_box, advanced_box, FALSE, FALSE, 0);
 
-  gtk_box_pack_start(GTK_BOX(main_vbox), GTK_WIDGET(gui_data->notebook), TRUE, TRUE, 0);
-
-  // define the boxes
-  GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), look_box, TRUE, TRUE, 0);
-  GtkWidget *tonemap_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), tonemap_box, TRUE, TRUE, 0);
-  GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), advanced_box, TRUE, TRUE, 0);
-  GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(self->widget), primaries_box, TRUE, TRUE, 0);
-
-  _add_look_box(self, look_box, gui_data);
-  _add_base_box(self, tonemap_box, gui_data);
-  _add_advanced_box(self, advanced_box, gui_data);
-  _add_primaries_box(self, primaries_box, gui_data);
+  GtkWidget *page_primaries = dt_ui_notebook_page(gui_data->notebook, N_("primaries"), _("color primaries adjustments"));
+  GtkWidget *primaries_box = _add_primaries_box(self, GTK_BOX(page_primaries), gui_data);
+  gtk_box_pack_start(GTK_BOX(page_primaries), primaries_box, FALSE, FALSE, 0);
 
   self->widget = main_vbox;
 
-//  self->widget = self_widget;
   gui_update(self);
 }
 
