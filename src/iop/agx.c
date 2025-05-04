@@ -129,8 +129,9 @@ typedef struct dt_iop_agx_gui_data_t
   GtkWidget *range_black_exposure;
   GtkWidget *range_white_exposure;
   GtkWidget *curve_pivot_x_shift;
-  GtkNotebook *notebook; // Main tabbed interface
   GtkWidget *curve_pivot_y_linear;
+
+  GtkNotebook *notebook;
 
 } dt_iop_agx_gui_data_t;
 
@@ -1641,7 +1642,21 @@ static void _add_primaries_box(dt_iop_module_t *self, GtkWidget *box, dt_iop_agx
 
 void gui_init(dt_iop_module_t *self)
 {
+  // so we can restore it later
+  GtkWidget *self_widget = self->widget;
+
   dt_iop_agx_gui_data_t *gui_data = IOP_GUI_ALLOC(agx);
+  GtkWidget *main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+
+  // the notebook
+  static dt_action_def_t notebook_def = { };
+  gui_data->notebook = dt_ui_notebook_new(&notebook_def);
+  dt_action_define_iop(self, NULL, N_("page"), GTK_WIDGET(gui_data->notebook), &notebook_def);
+  gtk_box_pack_start(GTK_BOX(main_vbox), GTK_WIDGET(gui_data->notebook), TRUE, TRUE, 0);
+
+  // 'settings' page
+  GtkWidget *page_settings = dt_ui_notebook_page(gui_data->notebook, N_("settings"), _("main look and curve settings"));
+  self->widget = page_settings;
 
   // Initialize drawing cache fields
   gui_data->line_height = 0;
@@ -1653,10 +1668,8 @@ void gui_init(dt_iop_module_t *self)
   gui_data->inner_padding = 0;
   gui_data->context = NULL;
 
-  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
-  // so we can restore it later
-  GtkWidget *self_widget = self->widget;
+  gtk_box_pack_start(GTK_BOX(main_vbox), GTK_WIDGET(gui_data->notebook), TRUE, TRUE, 0);
 
   // define the boxes
   GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
@@ -1668,12 +1681,15 @@ void gui_init(dt_iop_module_t *self)
   GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(self->widget), primaries_box, TRUE, TRUE, 0);
 
-   _add_look_box(self, look_box, gui_data);
-   _add_base_box(self, tonemap_box, gui_data);
-   _add_advanced_box(self, advanced_box, gui_data);
+  _add_look_box(self, look_box, gui_data);
+  _add_base_box(self, tonemap_box, gui_data);
+  _add_advanced_box(self, advanced_box, gui_data);
   _add_primaries_box(self, primaries_box, gui_data);
 
-  self->widget = self_widget;
+  self->widget = main_vbox;
+
+//  self->widget = self_widget;
+  gui_update(self);
 }
 
 static float _degrees_to_radians(float degrees)
