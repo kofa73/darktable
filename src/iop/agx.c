@@ -1467,7 +1467,6 @@ static void _add_curve_graph(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_d
   self->widget = GTK_WIDGET(parent_box);
 
   GtkWidget *graph_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(parent_box), graph_box, TRUE, TRUE, 0);
   self->widget = graph_box;
 
   dt_gui_new_collapsible_section(&gui_data->graph_section, "plugins/darkroom/agx/show_curve", _("show curve"),
@@ -1484,7 +1483,6 @@ static void _add_curve_graph(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_d
 
   // Pack drawing area at the top
   gtk_box_pack_start(GTK_BOX(graph_container), GTK_WIDGET(gui_data->graph_drawing_area), TRUE, TRUE, 0);
-  gtk_box_pack_start(GTK_BOX(graph_box), graph_container, TRUE, TRUE, 0);
   gtk_box_pack_start(parent_box, graph_box, TRUE, TRUE, 0);
 
   self->widget = original_self_widget;
@@ -1578,14 +1576,12 @@ static GtkWidget* _add_base_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gu
 
   GtkBox *base_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));
   _add_exposure_section(self, gui_data, base_box);
-  _add_curve_graph(self, gui_data, base_box);
-  _add_curve_section(self, gui_data, base_box);
 
   self->widget = original_self_widget;
   return GTK_WIDGET(base_box);
 }
 
-static GtkWidget *_add_advanced_box(dt_iop_module_t *self, GtkBox *parent_box, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget* _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
 
@@ -1605,6 +1601,9 @@ static GtkWidget *_add_advanced_box(dt_iop_module_t *self, GtkBox *parent_box, d
   gui_data->inset = 0;
   gui_data->inner_padding = 0;
   gui_data->context = NULL;
+
+  _add_curve_graph(self, gui_data, GTK_BOX(advanced_box));
+  _add_curve_section(self, gui_data, GTK_BOX(advanced_box));
 
    // Reuse the slider variable for all sliders
   GtkWidget *slider;
@@ -1634,12 +1633,11 @@ static GtkWidget *_add_advanced_box(dt_iop_module_t *self, GtkBox *parent_box, d
   return advanced_box;
 }
 
-static GtkWidget *_add_primaries_box(dt_iop_module_t *self, GtkBox *parent_box, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget* _add_primaries_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
 
   GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(parent_box, primaries_box, FALSE, FALSE, 0);
   self->widget = primaries_box;
 
   // primaries collapsible section
@@ -1718,18 +1716,23 @@ void gui_init(dt_iop_module_t *self)
   // 'settings' page
   GtkWidget *settings_page = dt_ui_notebook_page(gui_data->notebook, N_("settings"), _("main look and curve settings"));
   self->widget = settings_page;
+  GtkBox *settings_box = GTK_BOX(settings_page);
 
   GtkWidget *look_box = _add_look_box(self, gui_data);
   GtkWidget *base_box = _add_base_box(self, gui_data);
-  GtkWidget *advanced_box = _add_advanced_box(self, GTK_BOX(settings_page), gui_data);
-
-  GtkBox *settings_box = GTK_BOX(settings_page);
   gtk_box_pack_start(settings_box, look_box, FALSE, FALSE, 0);
   gtk_box_pack_start(settings_box, base_box, FALSE, FALSE, 0);
-  gtk_box_pack_start(settings_box, advanced_box, FALSE, FALSE, 0);
 
+  // 'curve' page
+  GtkWidget *curve_page = dt_ui_notebook_page(gui_data->notebook, N_("curve"), _("detailed curve settings"));
+  self->widget = curve_page;
+  GtkBox *curve_box = GTK_BOX(curve_page);
+  GtkWidget *advanced_box = _add_advanced_box(self, gui_data);
+  gtk_box_pack_start(curve_box, advanced_box, FALSE, FALSE, 0);
+
+  // 'primaries' page
   GtkWidget *page_primaries = dt_ui_notebook_page(gui_data->notebook, N_("primaries"), _("color primaries adjustments"));
-  GtkWidget *primaries_box = _add_primaries_box(self, GTK_BOX(page_primaries), gui_data);
+  GtkWidget *primaries_box = _add_primaries_box(self, gui_data);
   gtk_box_pack_start(GTK_BOX(page_primaries), primaries_box, FALSE, FALSE, 0);
 
   self->widget = main_vbox;
