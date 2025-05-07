@@ -128,8 +128,16 @@ typedef struct dt_iop_agx_gui_data_t
   // Slider widgets for pickers
   GtkWidget *range_black_exposure;
   GtkWidget *range_white_exposure;
-  GtkWidget *curve_pivot_x_shift;
-  GtkWidget *curve_pivot_y_linear;
+  GtkWidget *curve_pivot_x_shift_settings_page;
+  GtkWidget *curve_pivot_y_linear_settings_page;
+  GtkWidget *curve_pivot_x_shift_curve_page;
+  GtkWidget *curve_pivot_y_linear_curve_page;
+  GtkWidget *curve_contrast_around_pivot_settings_page;
+  GtkWidget *curve_contrast_around_pivot_curve_page;
+  GtkWidget *curve_toe_power_settings_page;
+  GtkWidget *curve_toe_power_curve_page;
+  GtkWidget *curve_shoulder_power_settings_page;
+  GtkWidget *curve_shoulder_power_curve_page;
 
   GtkNotebook *notebook;
 
@@ -634,7 +642,6 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   // avoid range altering slope - 16.5 EV is the default AgX range; keep the meaning of slope
   // new Blender defaults: 20 EV range
   params.slope = user_params->curve_contrast_around_pivot * (params.range_in_ev / 16.5f);
-  // params.slope = user_params->curve_contrast_around_pivot * (params.range_in_ev / 20.0f);
   printf("scaled slope = %f from user_contrast_around_pivot = %f\n", params.slope, user_params->curve_contrast_around_pivot);
 
   // toe
@@ -891,8 +898,10 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
 
   // Update the slider visually
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->curve_pivot_x_shift, p->curve_pivot_x_shift);
-  dt_bauhaus_slider_set(g->curve_pivot_y_linear, p->curve_pivot_y_linear);
+  dt_bauhaus_slider_set(g->curve_pivot_x_shift_settings_page, p->curve_pivot_x_shift);
+  dt_bauhaus_slider_set(g->curve_pivot_y_linear_settings_page, p->curve_pivot_y_linear);
+  dt_bauhaus_slider_set(g->curve_pivot_x_shift_curve_page, p->curve_pivot_x_shift);
+  dt_bauhaus_slider_set(g->curve_pivot_y_linear_curve_page, p->curve_pivot_y_linear);
   --darktable.gui->reset;
 
   // Redraw and add history
@@ -1390,12 +1399,41 @@ void cleanup(dt_iop_module_t *self)
   self->default_params = NULL;
 }
 
-// GUI changed
 void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
   const dt_iop_agx_gui_data_t *g = self->gui_data;
+  dt_iop_agx_user_params_t *p = self->params;
+
+  // --- START MANUAL SYNC ---
+  if(!darktable.gui->reset) // Check the global reset guard
+  {
+    darktable.gui->reset++; // Prevent recursion
+
+#define SYNC_SLIDER(param_name, widget1, widget2)                                                                 \
+  if(w == widget1)                                                                                                \
+  {                                                                                                               \
+    dt_bauhaus_slider_set(widget2, dt_bauhaus_slider_get(widget1));                                               \
+  }                                                                                                               \
+  else if(w == widget2)                                                                                           \
+  {                                                                                                               \
+    dt_bauhaus_slider_set(widget1, dt_bauhaus_slider_get(widget2));                                               \
+  }
+
+    SYNC_SLIDER("curve_pivot_x_shift", g->curve_pivot_x_shift_settings_page, g->curve_pivot_x_shift_curve_page);
+    SYNC_SLIDER("curve_pivot_y_linear", g->curve_pivot_y_linear_settings_page, g->curve_pivot_y_linear_curve_page);
+    SYNC_SLIDER("curve_contrast_around_pivot", g->curve_contrast_around_pivot_settings_page, g->curve_contrast_around_pivot_curve_page);
+    SYNC_SLIDER("curve_toe_power", g->curve_toe_power_settings_page, g->curve_toe_power_curve_page);
+    SYNC_SLIDER("curve_toe_power", g->curve_shoulder_power_settings_page, g->curve_shoulder_power_curve_page);
+
+#undef SYNC_SLIDER
+
+    darktable.gui->reset--; // Release the guard
+  }
+  // --- END MANUAL SYNC ---
+
   // Trigger redraw when any parameter changes
-  if (g && g->graph_drawing_area) {
+  if(g && g->graph_drawing_area)
+  {
     gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   }
 }
@@ -1410,6 +1448,76 @@ void gui_update(dt_iop_module_t *self)
   if (g && g->graph_drawing_area) {
     gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
   }
+}
+
+static void _add_basic_curve_controls_settings_page(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget* slider;
+
+  // curve_pivot_x_shift with picker
+  gui_data->curve_pivot_x_shift_settings_page = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
+  slider = gui_data->curve_pivot_x_shift_settings_page;
+  dt_bauhaus_slider_set_soft_range(slider, -0.4f, 0.4f);
+  gtk_widget_set_tooltip_text(slider, _("Pivot x shift towards black(-) or white(+)"));
+
+  // curve_pivot_y_linear
+  gui_data->curve_pivot_y_linear_settings_page = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
+  slider = gui_data->curve_pivot_y_linear_settings_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
+
+  // curve_contrast_around_pivot
+  gui_data->curve_contrast_around_pivot_settings_page = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
+  slider = gui_data->curve_contrast_around_pivot_settings_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
+
+  // curve_toe_power
+  gui_data->curve_toe_power_settings_page = dt_bauhaus_slider_from_params(self, "curve_toe_power");
+  slider = gui_data->curve_toe_power_settings_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("contrast in shadows"));
+
+  // curve_shoulder_power
+  gui_data->curve_shoulder_power_settings_page = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
+  slider = gui_data->curve_shoulder_power_settings_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
+}
+
+static void _add_basic_curve_controls_curve_page(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget* slider;
+
+  // curve_pivot_x_shift with picker
+  gui_data->curve_pivot_x_shift_curve_page = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
+  slider = gui_data->curve_pivot_x_shift_curve_page;
+  dt_bauhaus_slider_set_soft_range(slider, -0.4f, 0.4f);
+  gtk_widget_set_tooltip_text(slider, _("Pivot x shift towards black(-) or white(+)"));
+
+  // curve_pivot_y_linear
+  gui_data->curve_pivot_y_linear_curve_page = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
+  slider = gui_data->curve_pivot_y_linear_curve_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 0.5f);
+  gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
+
+  // curve_contrast_around_pivot
+  gui_data->curve_contrast_around_pivot_curve_page = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
+  slider = gui_data->curve_contrast_around_pivot_curve_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
+
+  // curve_toe_power
+  gui_data->curve_toe_power_curve_page = dt_bauhaus_slider_from_params(self, "curve_toe_power");
+  slider = gui_data->curve_toe_power_curve_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("contrast in shadows"));
+
+  // curve_shoulder_power
+  gui_data->curve_shoulder_power_curve_page = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
+  slider = gui_data->curve_shoulder_power_curve_page;
+  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
 }
 
 static void _add_look_sliders(dt_iop_module_t *self, GtkWidget *parent_widget)
@@ -1534,38 +1642,12 @@ static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t * g
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "curve parameters")));
 
-  // Reuse slider variable for all sliders that use _add_slider_with_tooltip
-  GtkWidget *slider;
+  _add_basic_curve_controls_curve_page(self, gui_data);
 
   // curve_gamma
-  slider = dt_bauhaus_slider_from_params(self, "curve_gamma");
+  GtkWidget *slider = dt_bauhaus_slider_from_params(self, "curve_gamma");
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
   gtk_widget_set_tooltip_text(slider, _("Fine-tune contrast, shifts representation of pivot along the y axis"));
-
-  // curve_pivot_x_shift with picker
-  gui_data->curve_pivot_x_shift = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
-  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_x_shift, -0.4f, 0.4f);
-  gtk_widget_set_tooltip_text(gui_data->curve_pivot_x_shift, _("Pivot x shift towards black(-) or white(+)"));
-
-  // curve_pivot_y_linear
-  gui_data->curve_pivot_y_linear = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
-  dt_bauhaus_slider_set_soft_range(gui_data->curve_pivot_y_linear, 0.0f, 0.5f);
-  gtk_widget_set_tooltip_text(gui_data->curve_pivot_y_linear, _("Pivot y (linear output)"));
-
-  // curve_contrast_around_pivot
-  slider = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
-  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
-
-  // curve_toe_power
-  slider = dt_bauhaus_slider_from_params(self, "curve_toe_power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("contrast in shadows"));
-
-  // curve_shoulder_power
-  slider = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
-  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
 
   self->widget = original_self_widget;
 }
@@ -1576,6 +1658,10 @@ static GtkWidget* _add_base_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gu
 
   GtkBox *base_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));
   _add_exposure_section(self, gui_data, base_box);
+
+  self->widget = GTK_WIDGET(base_box);
+  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "basic curve parameters")));
+  _add_basic_curve_controls_settings_page(self, gui_data);
 
   self->widget = original_self_widget;
   return GTK_WIDGET(base_box);
@@ -1874,5 +1960,5 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
   if(picker == g->range_black_exposure) apply_auto_black_exposure(self);
   else if(picker == g->range_white_exposure) apply_auto_white_exposure(self);
   else if(picker == g->auto_tune_picker) apply_auto_tune_exposure(self);
-  else if(picker == g->curve_pivot_x_shift) apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
+  else if(picker == g->curve_pivot_x_shift_settings_page || picker == g->curve_pivot_x_shift_curve_page) apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
 }
