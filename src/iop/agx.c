@@ -1484,8 +1484,6 @@ static void _add_curve_graph(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_d
 
   // Pack drawing area at the top
   gtk_box_pack_start(GTK_BOX(graph_container), GTK_WIDGET(gui_data->graph_drawing_area), TRUE, TRUE, 0);
-  gtk_box_pack_start(GTK_BOX(graph_box), graph_container, TRUE, TRUE, 0);
-  gtk_box_pack_start(parent_box, graph_box, TRUE, TRUE, 0);
 
   self->widget = original_self_widget;
 }
@@ -1639,7 +1637,6 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self, GtkBox *parent_box, 
   GtkWidget *main_box = self->widget;
 
   GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(parent_box, primaries_box, FALSE, FALSE, 0);
   self->widget = primaries_box;
 
   // primaries collapsible section
