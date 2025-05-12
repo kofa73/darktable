@@ -1607,6 +1607,7 @@ void init_presets(dt_lib_module_t *self)
   AM("lens");
   AM("liquify");
   AM("nlmeans");
+  AM("rasterfile");
   AM("rawdenoise");
   AM("retouch");
   AM("rotatepixels");
@@ -1708,6 +1709,7 @@ void init_presets(dt_lib_module_t *self)
   AM("lens");
   AM("retouch");
   AM("liquify");
+  AM("rasterfile");
   AM("sharpen");
   AM("nlmeans");
 
@@ -1761,6 +1763,7 @@ void init_presets(dt_lib_module_t *self)
   AM("lens");
   AM("retouch");
   AM("liquify");
+  AM("rasterfile");
   AM("sharpen");
   AM("nlmeans");
 
@@ -2661,7 +2664,7 @@ static gboolean _manage_direct_popup(GtkWidget *widget,
                                      GdkEventButton *event,
                                      dt_lib_module_t *self)
 {
-  if(event->type == GDK_BUTTON_PRESS && event->button == 3)
+  if(event->type == GDK_BUTTON_PRESS && event->button == GDK_BUTTON_SECONDARY)
   {
     dt_lib_modulegroups_group_t *gr = g_object_get_data(G_OBJECT(widget), "group");
     if(!g_strcmp0(gr->name, C_("modulegroup", "deprecated"))) return FALSE;
@@ -2676,7 +2679,7 @@ static gboolean _manage_direct_basic_popup(GtkWidget *widget,
                                            GdkEventButton *event,
                                            dt_lib_module_t *self)
 {
-  if(event->type == GDK_BUTTON_PRESS && event->button == 3)
+  if(event->type == GDK_BUTTON_PRESS && event->button == GDK_BUTTON_SECONDARY)
   {
     _manage_basics_add_popup(widget, self, TRUE);
     return TRUE;
@@ -2690,8 +2693,7 @@ static gboolean _manage_direct_module_popup(GtkWidget *widget,
 {
   dt_action_t *module = g_object_get_data(G_OBJECT(widget), "module");
 
-  if(event->type == GDK_BUTTON_PRESS
-     && event->button == 3)
+  if(event->type == GDK_BUTTON_PRESS && event->button == GDK_BUTTON_SECONDARY)
   {
     int nba = 0; // nb of already present items
     GtkWidget *pop = gtk_menu_new();
@@ -2722,7 +2724,7 @@ static gboolean _manage_direct_active_popup(GtkWidget *widget,
                                             GdkEventButton *event,
                                             dt_lib_module_t *self)
 {
-  if(event->type == GDK_BUTTON_PRESS && event->button == 3)
+  if(event->type == GDK_BUTTON_PRESS && event->button == GDK_BUTTON_SECONDARY)
   {
     dt_lib_modulegroups_t *d = self->data;
     GtkWidget *pop = gtk_menu_new();

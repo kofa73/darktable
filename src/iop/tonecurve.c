@@ -1853,7 +1853,7 @@ static gboolean dt_iop_tonecurve_button_press(GtkWidget *widget,
   int nodes = p->tonecurve_nodes[ch];
   dt_iop_tonecurve_node_t *tonecurve = p->tonecurve[ch];
 
-  if(event->button == 1)
+  if(event->button == GDK_BUTTON_PRIMARY)
   {
     if(event->type == GDK_BUTTON_PRESS
        && dt_modifier_is(event->state, GDK_CONTROL_MASK)
@@ -1949,7 +1949,7 @@ static gboolean dt_iop_tonecurve_button_press(GtkWidget *widget,
       return TRUE;
     }
   }
-  else if(event->button == 3 && g->selected >= 0)
+  else if(event->button == GDK_BUTTON_SECONDARY && g->selected >= 0)
   {
     if(g->selected == 0 || g->selected == nodes - 1)
     {
