@@ -44,6 +44,8 @@ typedef enum dt_iop_agx_base_primaries_t
 // Updated struct dt_iop_agx_user_params_t
 typedef struct dt_iop_agx_user_params_t
 {
+  gboolean log_only;  // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "logarithmic tone mapping only"
+
   // look params
   float look_offset; // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "offset"
   float look_slope; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
@@ -88,7 +90,7 @@ typedef struct dt_iop_agx_user_params_t
   float blue_inset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation"
   float blue_rotation;    // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
 
-  float master_outset_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master attenuation reversal"
+  float master_outset_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "recover purity"
   float master_unrotation_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master rotation reversal"
   float red_outset;        // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation reversal"
   float red_unrotation;     // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "red rotation reversal"
@@ -103,6 +105,8 @@ typedef struct dt_iop_agx_gui_data_t
   dt_gui_collapsible_section_t look_section;
   dt_gui_collapsible_section_t graph_section;
   dt_gui_collapsible_section_t advanced_section;
+  GtkWidget* log_only;
+  GtkWidget* curve_box;
   dt_gui_collapsible_section_t primaries_section;
   GtkDrawingArea *graph_drawing_area;
 
@@ -137,6 +141,7 @@ typedef struct dt_iop_agx_gui_data_t
 
 typedef struct curve_and_look_params_t
 {
+  gboolean log_only;
   // shared
   float min_ev;
   float max_ev;
@@ -592,6 +597,8 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
 {
   curve_and_look_params_t params;
 
+  params.log_only = user_params -> log_only;
+
   // look
   params.look_offset = user_params->look_offset;
   params.look_slope = user_params->look_slope;
@@ -750,31 +757,40 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
 
   dt_aligned_pixel_t transformed_pixel = {0.0f};
 
-  for_three_channels(k, aligned(rgb_in_out, transformed_pixel: 16))
+  if (params -> log_only)
   {
-    float log_value = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
-    transformed_pixel[k] = _apply_curve(log_value, params);
-  }
-
-  // Apply AgX look
-  _agxLook(transformed_pixel, params, rendering_profile);
-
-  // Linearize
-  for_three_channels(k, aligned(transformed_pixel: 16))
+    for_three_channels(k, aligned(rgb_in_out: 16))
+    {
+      rgb_in_out[k] = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
+    }
+    _agxLook(rgb_in_out, params, rendering_profile);
+  } else
   {
-    transformed_pixel[k] = powf(fmaxf(0.0f, transformed_pixel[k]), params->curve_gamma);
+    for_three_channels(k, aligned(rgb_in_out, transformed_pixel: 16))
+    {
+      float log_value = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
+      transformed_pixel[k] = _apply_curve(log_value, params);
+    }
+
+    _agxLook(transformed_pixel, params, rendering_profile);
+
+    // Linearize
+    for_three_channels(k, aligned(transformed_pixel: 16))
+    {
+      transformed_pixel[k] = powf(fmaxf(0.0f, transformed_pixel[k]), params->curve_gamma);
+    }
+
+    // get post-curve chroma angle
+    dt_RGB_2_HSV(transformed_pixel, hsv_pixel);
+
+    float h_after = hsv_pixel[0];
+
+    // Mix hue back if requested
+    h_after = _lerp_hue(h_before, h_after, params->look_original_hue_mix_ratio);
+
+    hsv_pixel[0] = h_after;
+    dt_HSV_2_RGB(hsv_pixel, rgb_in_out);
   }
-
-  // get post-curve chroma angle
-  dt_RGB_2_HSV(transformed_pixel, hsv_pixel);
-
-  float h_after = hsv_pixel[0];
-
-  // Mix hue back if requested
-  h_after = _lerp_hue(h_before, h_after, params->look_original_hue_mix_ratio);
-
-  hsv_pixel[0] = h_after;
-  dt_HSV_2_RGB(hsv_pixel, rgb_in_out);
 }
 
 // Apply logic for black point picker
@@ -904,7 +920,7 @@ void _print_curve(const curve_and_look_params_t *curve_params)
 {
   const int steps = 100;
   printf("\nCurve\n");
-  for (int i = 0; i <= steps; i++)
+  for(int i = 0; i <= steps; i++)
   {
     float x = i / (float)steps;
     const float y = _apply_curve(x, curve_params);
@@ -913,6 +929,20 @@ void _print_curve(const curve_and_look_params_t *curve_params)
   printf("\n");
 }
 
+void _print_primaries(char *name, const float (*primaries)[2])
+{
+  printf("%s\n", name);
+  printf("%f, %f\n", primaries[0][0], primaries[0][1]);
+  printf("%f, %f\n", primaries[1][0], primaries[1][1]);
+  printf("%f, %f\n", primaries[2][0], primaries[2][1]);
+  printf("\n\n");
+}
+void _print_whitepoint(char * name, const float * wp)
+{
+  printf("%s\n", name);
+  printf("%f, %f\n", wp[0], wp[1]);
+  printf("\n\n");
+}
 static void _calculate_adjusted_primaries(const primaries_params_t *const params,
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
@@ -938,6 +968,10 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // per-channel process desaturates them.
   // The primaries are also rotated to compensate for Abney etc.
   // and achieve a favourable shift towards yellow.
+
+  _print_transposed_matrix("pipe_work_profile->matrix_in_transposed", pipe_work_profile->matrix_in_transposed);
+  _print_primaries("pipe_work_profile->primaries", pipe_work_profile->primaries);
+  _print_whitepoint("pipe_work_profile->whitepoint", pipe_work_profile->whitepoint);
 
   // First, calculate the matrix from pipe the work profile to the base profile whose primaries
   // will be rotated/inset.
@@ -1067,7 +1101,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   // Calculate curve parameters once
   const curve_and_look_params_t curve_params = _calculate_curve_params(p);
-  _print_curve(&curve_params);
+  // _print_curve(&curve_params);
 
   const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   // Get the base profile based on user selection
@@ -1394,6 +1428,16 @@ void cleanup(dt_iop_module_t *self)
 void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
   const dt_iop_agx_gui_data_t *g = self->gui_data;
+  const dt_iop_agx_user_params_t *p = self->params;
+  // Test which widget was changed.
+  // If allowing w == NULL, this can be called from gui_update, so that
+  // gui configuration adjustments only need to be dealt with once, here.
+  if(g && w == g->log_only)
+  {
+    gtk_widget_set_visible(g->curve_box, !p->log_only);
+  }
+
+
   // Trigger redraw when any parameter changes
   if (g && g->graph_drawing_area) {
     gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
@@ -1405,6 +1449,12 @@ void gui_update(dt_iop_module_t *self)
 {
   const dt_iop_agx_gui_data_t *g = self->gui_data;
   const dt_iop_agx_user_params_t *params = self->params;
+
+  if (g)
+  {
+    gtk_widget_set_visible(g->curve_box, !params->log_only);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->log_only), params->log_only);
+  }
 
   // Ensure the graph is drawn initially
   if (g && g->graph_drawing_area) {
@@ -1523,14 +1573,67 @@ static void _add_exposure_section(dt_iop_module_t *self, dt_iop_agx_gui_data_t *
   self->widget = original_self_widget;
 }
 
+static GtkWidget* _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+{
+  GtkWidget *main_box = self->widget;
+
+  GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  self->widget = advanced_box;
+
+  dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
+                                 _("advanced"), GTK_BOX(advanced_box), DT_ACTION(self));
+  self->widget = GTK_WIDGET(gui_data->advanced_section.container);
+
+  // drawing params for the graph
+  gui_data->line_height = 0;
+  gui_data->sign_width = 0;
+  gui_data->zero_width = 0;
+  gui_data->graph_width = 0;
+  gui_data->graph_height = 0;
+  gui_data->inset = 0;
+  gui_data->inner_padding = 0;
+  gui_data->context = NULL;
+
+  // Reuse the slider variable for all sliders
+  GtkWidget *slider;
+
+  // Toe length
+  slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_below_pivot");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
+  gtk_widget_set_tooltip_text(slider, _("toe length"));
+
+  // Toe intersection point
+  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_y");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
+
+  // Shoulder length
+  slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
+  gtk_widget_set_tooltip_text(slider, _("shoulder length"));
+
+  // Shoulder intersection point
+  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
+  gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
+
+  self->widget = main_box;
+
+  return advanced_box;
+}
+
 static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t * gui_data, GtkBox * parent_box)
 {
   GtkWidget *original_self_widget = self->widget;
   self->widget = GTK_WIDGET(parent_box);
 
-  GtkWidget *curve_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(parent_box, curve_box, TRUE, TRUE, 0);
-  self->widget = curve_box;
+  gui_data->log_only = dt_bauhaus_toggle_from_params(self, "log_only");
+
+  gui_data->curve_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(parent_box, gui_data->curve_box, TRUE, TRUE, 0);
+  self->widget = gui_data->curve_box;
+
+  _add_curve_graph(self, gui_data, GTK_BOX(gui_data->curve_box));
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "curve parameters")));
 
@@ -1567,69 +1670,22 @@ static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t * g
   dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
   gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
 
+  GtkWidget *advanced_box = _add_advanced_box(self, gui_data);
+  gtk_box_pack_start(GTK_BOX(gui_data->curve_box), advanced_box, FALSE, FALSE, 0);
+
   self->widget = original_self_widget;
 }
 
-static GtkWidget* _add_base_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget* _add_tonemapping_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *original_self_widget = self->widget;
 
-  GtkBox *base_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));
-  _add_exposure_section(self, gui_data, base_box);
-  _add_curve_graph(self, gui_data, base_box);
-  _add_curve_section(self, gui_data, base_box);
+  GtkBox *tonemapping_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE));
+  _add_exposure_section(self, gui_data, tonemapping_box);
+  _add_curve_section(self, gui_data, tonemapping_box);
 
   self->widget = original_self_widget;
-  return GTK_WIDGET(base_box);
-}
-
-static GtkWidget *_add_advanced_box(dt_iop_module_t *self, GtkBox *parent_box, dt_iop_agx_gui_data_t *gui_data)
-{
-  GtkWidget *main_box = self->widget;
-
-  GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  self->widget = advanced_box;
-
-  dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
-                                 _("advanced"), GTK_BOX(advanced_box), DT_ACTION(self));
-  self->widget = GTK_WIDGET(gui_data->advanced_section.container);
-
-  // drawing params for the graph
-  gui_data->line_height = 0;
-  gui_data->sign_width = 0;
-  gui_data->zero_width = 0;
-  gui_data->graph_width = 0;
-  gui_data->graph_height = 0;
-  gui_data->inset = 0;
-  gui_data->inner_padding = 0;
-  gui_data->context = NULL;
-
-   // Reuse the slider variable for all sliders
-  GtkWidget *slider;
-
-  // Toe length
-  slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_below_pivot");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
-  gtk_widget_set_tooltip_text(slider, _("toe length"));
-
-  // Toe intersection point
-  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_y");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
-
-  // Shoulder length
-  slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
-  gtk_widget_set_tooltip_text(slider, _("shoulder length"));
-
-  // Shoulder intersection point
-  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
-
-  self->widget = main_box;
-
-  return advanced_box;
+  return GTK_WIDGET(tonemapping_box);
 }
 
 static GtkWidget *_add_primaries_box(dt_iop_module_t *self, GtkBox *parent_box, dt_iop_agx_gui_data_t *gui_data)
@@ -1716,14 +1772,13 @@ void gui_init(dt_iop_module_t *self)
   GtkWidget *settings_page = dt_ui_notebook_page(gui_data->notebook, N_("settings"), _("main look and curve settings"));
   self->widget = settings_page;
 
-  GtkWidget *look_box = _add_look_box(self, gui_data);
-  GtkWidget *base_box = _add_base_box(self, gui_data);
-  GtkWidget *advanced_box = _add_advanced_box(self, GTK_BOX(settings_page), gui_data);
-
   GtkBox *settings_box = GTK_BOX(settings_page);
+
+  GtkWidget *look_box = _add_look_box(self, gui_data);
   gtk_box_pack_start(settings_box, look_box, FALSE, FALSE, 0);
-  gtk_box_pack_start(settings_box, base_box, FALSE, FALSE, 0);
-  gtk_box_pack_start(settings_box, advanced_box, FALSE, FALSE, 0);
+
+  GtkWidget *tonemapping_box = _add_tonemapping_box(self, gui_data);
+  gtk_box_pack_start(settings_box, tonemapping_box, FALSE, FALSE, 0);
 
   GtkWidget *page_primaries = dt_ui_notebook_page(gui_data->notebook, N_("primaries"), _("color primaries adjustments"));
   GtkWidget *primaries_box = _add_primaries_box(self, GTK_BOX(page_primaries), gui_data);
@@ -1741,6 +1796,7 @@ static float _degrees_to_radians(float degrees)
 
 static void _set_neutral_params(dt_iop_agx_user_params_t* p)
 {
+  p-> log_only = FALSE;
   p->look_slope = 1.0f;
   p->look_power = 1.0f;
   p->look_offset = 0.0f;
@@ -1851,6 +1907,10 @@ void init_presets(dt_iop_module_so_t *self)
   p.look_offset = 0.0f;
   p.look_saturation = 1.4f;
   dt_gui_presets_add_generic(_("smooth|punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  _set_neutral_params(&p);
+  p.log_only = TRUE;
+  dt_gui_presets_add_generic(_("log tone mapper"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
 // GUI cleanup
