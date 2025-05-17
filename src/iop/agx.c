@@ -239,8 +239,8 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
 }
 
 // Commit parameters
-void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
-                   dt_dev_pixelpipe_iop_t *piece)
+void commit_params(const dt_iop_module_t *self, const dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
+                   const dt_dev_pixelpipe_iop_t *piece)
 {
   memcpy(piece->data, p1, self->params_size);
 }
@@ -418,7 +418,7 @@ static float _fallback_toe(const float x, const curve_and_look_params_t *curve_p
 {
   return x <= 0 ?
     curve_params->target_black :
-    curve_params->target_black + fmaxf(0, curve_params -> toe_a * powf(x, curve_params -> toe_b));
+    curve_params->target_black + fmaxf(0, curve_params->toe_a * powf(x, curve_params->toe_b));
 }
 
 static float _fallback_shoulder(const float x, const curve_and_look_params_t *curve_params)
@@ -433,13 +433,13 @@ static float _apply_curve(const float x, const curve_and_look_params_t *curve_pa
 {
   float result;
 
-  if(x < curve_params->toe_transition_x)
+  if (x < curve_params->toe_transition_x)
   {
     result = curve_params->need_convex_toe ?
       _fallback_toe(x, curve_params) :
       _exponential_curve(x, curve_params->toe_scale, curve_params->slope, curve_params->toe_power, curve_params->toe_transition_x, curve_params->toe_transition_y);
   }
-  else if(x <= curve_params->shoulder_transition_x)
+  else if (x <= curve_params->shoulder_transition_x)
   {
     result = _line(x, curve_params->slope, curve_params->intercept);
   }
@@ -454,12 +454,12 @@ static float _apply_curve(const float x, const curve_and_look_params_t *curve_pa
 
 static float _agx_sanitise_hue(float hue)
 {
-  if(hue < 0.0f) hue += 1.0f;
-  if(hue >= 1.0f) hue -= 1.0f;
+  if (hue < 0.0f) hue += 1.0f;
+  if (hue >= 1.0f) hue -= 1.0f;
   return hue;
 }
 
-// 'lerp', but take care of the boundary: hue wraps around 1 -> 0
+// 'lerp', but take care of the boundary: hue wraps around 1->0
 static float _lerp_hue(float original_hue, float processed_hue, float mix)
 {
   // can be removed once colorspaces_inline_conversions gets merged
@@ -468,11 +468,11 @@ static float _lerp_hue(float original_hue, float processed_hue, float mix)
 
   const float hue_diff = processed_hue - original_hue;
 
-  if(hue_diff > 0.5)
+  if (hue_diff > 0.5)
   {
     processed_hue -= 1;
   }
-  else if(hue_diff < -0.5)
+  else if (hue_diff < -0.5)
   {
     processed_hue += 1;
   }
@@ -485,7 +485,7 @@ static float _apply_slope_offset(const float x, const float slope, const float o
 {
   // negative offset should darken the image; positive brighten it
   // without the scale: m = 1 / (1 + offset)
-  // offset = 1, slope = 1, x = 0 -> m = 1 / (1+1) = 1/2, b = 1 * 1/2 = 1/2, y = 1/2*0 + 1/2 = 1/2
+  // offset = 1, slope = 1, x = 0->m = 1 / (1+1) = 1/2, b = 1 * 1/2 = 1/2, y = 1/2*0 + 1/2 = 1/2
   const float m = slope / (1 + offset);
   const float b = offset * m;
   return m * x + b;
@@ -549,7 +549,7 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
 
 static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order_iccprofile_info_t *const profile)
 {
-  if(pixel_in_out[0] >= 0.0f && pixel_in_out[1] >= 0.0f && pixel_in_out[2] >= 0.0f)
+  if (pixel_in_out[0] >= 0.0f && pixel_in_out[1] >= 0.0f && pixel_in_out[2] >= 0.0f)
   {
     // No compensation needed
     return;
@@ -580,9 +580,9 @@ static void _compensate_low_side(
 {
   // from sigmoid; can create black pixels
   // e.g.
-  // (-0.2, 0.2, 0.3) -> avg = 0.1, min = -0.2, saturation_factor = -0.1/(-0.2 - 0.1) = 1/3 -> (0, 0.13, 0.17)
+  // (-0.2, 0.2, 0.3)->avg = 0.1, min = -0.2, saturation_factor = -0.1/(-0.2 - 0.1) = 1/3->(0, 0.13, 0.17)
   // but
-  // (-0.3, 0.1, 0.1) -> avg = -0.1/3 => mapped to 0, min = -0.3, saturation_factor = 0; -> (0, 0, 0)
+  // (-0.3, 0.1, 0.1)->avg = -0.1/3 => mapped to 0, min = -0.3, saturation_factor = 0;->(0, 0, 0)
   // average
   const float pixel_average = fmaxf((pixel_in_out[0] + pixel_in_out[1] + pixel_in_out[2]) / 3.0f, 0.0f);
   const float min_value = _min(pixel_in_out);
@@ -596,16 +596,16 @@ static void _compensate_low_side(
   _avoid_negatives(pixel_in_out, profile);
 }
 
-static void _adjust_pivot(dt_iop_agx_user_params_t *user_params, curve_and_look_params_t *curve_and_look_params)
+static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and_look_params_t *curve_and_look_params)
 {
   float pivot_x = fabsf(curve_and_look_params->min_ev / curve_and_look_params->range_in_ev);
-  if(user_params->curve_pivot_x_shift < 0)
+  if (user_params->curve_pivot_x_shift < 0)
   {
     float black_ratio = -user_params->curve_pivot_x_shift;
     float gray_ratio = 1 - black_ratio;
     pivot_x = gray_ratio * pivot_x;
   }
-  else if(user_params->curve_pivot_x_shift > 0)
+  else if (user_params->curve_pivot_x_shift > 0)
   {
     float white_ratio = user_params->curve_pivot_x_shift;
     float gray_ratio = 1 - white_ratio;
@@ -614,7 +614,7 @@ static void _adjust_pivot(dt_iop_agx_user_params_t *user_params, curve_and_look_
 
   curve_and_look_params->pivot_x = pivot_x;
 
-  if(user_params->auto_gamma)
+  if (user_params->auto_gamma)
   {
     curve_and_look_params->curve_gamma = pivot_x > 0 && user_params->curve_pivot_y_linear > 0
                               ? log2f(user_params->curve_pivot_y_linear) / log2f(pivot_x)
@@ -645,11 +645,11 @@ static void _calculate_log_mapping_params(const dt_iop_agx_user_params_t* user_p
   printf("range_in_ev = %f\n", curve_and_look_params->range_in_ev);
 }
 
-static curve_and_look_params_t _calculate_curve_params(dt_iop_agx_user_params_t *user_params)
+static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
 {
   curve_and_look_params_t curve_and_look_params;
 
-  curve_and_look_params.log_only = user_params -> log_only;
+  curve_and_look_params.log_only = user_params->log_only;
 
   // look
   curve_and_look_params.look_offset = user_params->look_offset;
@@ -677,13 +677,13 @@ static curve_and_look_params_t _calculate_curve_params(dt_iop_agx_user_params_t 
   curve_and_look_params.toe_power = user_params->curve_toe_power;
   printf("toe_power = %f\n", curve_and_look_params.toe_power);
 
-  // length of (0 -> pivot_x) is just pivot_x; we take the portion specified using the percentage...
+  // length of (0->pivot_x) is just pivot_x; we take the portion specified using the percentage...
   const float dx_linear_below_pivot = curve_and_look_params.pivot_x * user_params->curve_linear_percent_below_pivot / 100.0f;
   // ...and subtract it from pivot_x to get the x coordinate where the linear section joins the toe
   curve_and_look_params.toe_transition_x = curve_and_look_params.pivot_x - dx_linear_below_pivot;
   printf("toe_transition_x = %f\n", curve_and_look_params.toe_transition_x);
 
-  // from the 'run' pivot_x -> toe_transition_x, we calculate the 'rise'
+  // from the 'run' pivot_x->toe_transition_x, we calculate the 'rise'
   const float toe_y_below_pivot_y = curve_and_look_params.slope * dx_linear_below_pivot;
   curve_and_look_params.toe_transition_y = curve_and_look_params.pivot_y - toe_y_below_pivot_y;
   printf("toe_transition_y = %f\n", curve_and_look_params.toe_transition_y);
@@ -785,7 +785,7 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
 
   dt_aligned_pixel_t transformed_pixel = {0.0f};
 
-  if (params -> log_only)
+  if (params->log_only)
   {
     for_three_channels(k, aligned(rgb_in_out: 16))
     {
@@ -824,84 +824,84 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
 // Apply logic for black point picker
 static void apply_auto_black_exposure(dt_iop_module_t *self)
 {
-  if(darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *p = self->params;
-  dt_iop_agx_gui_data_t *g = self->gui_data;
+  if (darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *user_params= self->params;
+  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
 
   const float black_norm = _min(self->picked_color_min);
-  p->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+  user_params->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->range_black_exposure, p->range_black_relative_exposure);
+  dt_bauhaus_slider_set(gui_data->range_black_exposure, user_params->range_black_relative_exposure);
   --darktable.gui->reset;
 
-  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 // Apply logic for white point picker
 static void apply_auto_white_exposure(dt_iop_module_t *self)
 {
-  if(darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *p = self->params;
-  dt_iop_agx_gui_data_t *g = self->gui_data;
+  if (darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *user_params= self->params;
+  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
 
   const float white_norm = _max(self->picked_color_max);
-  p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+  user_params->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->range_white_exposure, p->range_white_relative_exposure);
+  dt_bauhaus_slider_set(gui_data->range_white_exposure, user_params->range_white_relative_exposure);
   --darktable.gui->reset;
 
-  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 // Apply logic for auto-tuning both black and white points
 static void apply_auto_tune_exposure(dt_iop_module_t *self)
 {
-  if(darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *p = self->params;
-  dt_iop_agx_gui_data_t *g = self->gui_data;
+  if (darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *user_params= self->params;
+  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
 
   // Black point
   const float black_norm = _min(self->picked_color_min);
-  p->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+  user_params->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
 
   // White point
   const float white_norm = _max(self->picked_color_max);
-  p->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+  user_params->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->range_black_exposure, p->range_black_relative_exposure);
-  dt_bauhaus_slider_set(g->range_white_exposure, p->range_white_relative_exposure);
+  dt_bauhaus_slider_set(gui_data->range_black_exposure, user_params->range_black_relative_exposure);
+  dt_bauhaus_slider_set(gui_data->range_white_exposure, user_params->range_white_relative_exposure);
   --darktable.gui->reset;
 
-  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 // Apply logic for pivot x picker
 static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprofile_info_t *profile)
 {
-  if(darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *p = self->params;
-  const dt_iop_agx_gui_data_t *g = self->gui_data;
+  if (darktable.gui->reset) return;
+  dt_iop_agx_user_params_t *user_params= self->params;
+  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
 
   // Calculate norm and EV of the picked color
   const float norm = _luminance(self->picked_color, profile);
   const float picked_ev = log2f(fmaxf(_epsilon, norm) / 0.18f);
 
   // Calculate the target pivot_x based on the picked EV and the current EV range
-  const float min_ev = p->range_black_relative_exposure;
-  const float max_ev = p->range_white_relative_exposure;
+  const float min_ev = user_params->range_black_relative_exposure;
+  const float max_ev = user_params->range_white_relative_exposure;
   const float range_in_ev = fmaxf(_epsilon, max_ev - min_ev);
   const float target_pivot_x = CLAMPF((picked_ev - min_ev) / range_in_ev, 0.0f, 1.0f);
 
   // Calculate the required pivot_x_shift to achieve the target_pivot_x
   const float base_pivot_x = fabsf(min_ev / range_in_ev); // Pivot representing 0 EV (mid-gray)
 
-  dt_iop_agx_user_params_t params_with_mid_gray = *p;
+  dt_iop_agx_user_params_t params_with_mid_gray = *user_params;
   params_with_mid_gray.curve_pivot_y_linear = 0.18;
   params_with_mid_gray.curve_pivot_x_shift = 0;
 
@@ -911,14 +911,14 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
   float target_y = _apply_curve(target_pivot_x, &curve_and_look_params);
   // try to avoid changing the brightness of the pivot
   float target_y_linearised = powf(target_y, curve_and_look_params.curve_gamma);
-  p->curve_pivot_y_linear = target_y_linearised;
+  user_params->curve_pivot_y_linear = target_y_linearised;
 
   float shift;
-  if(fabsf(target_pivot_x - base_pivot_x) < _epsilon)
+  if (fabsf(target_pivot_x - base_pivot_x) < _epsilon)
   {
     shift = 0.0f;
   }
-  else if(base_pivot_x > target_pivot_x)
+  else if (base_pivot_x > target_pivot_x)
   {
     // Solve target_pivot_x = (1 + s) * base_pivot_x for s
     shift = (base_pivot_x > _epsilon) ? (target_pivot_x / base_pivot_x) - 1.0f : -1.0f;
@@ -930,15 +930,15 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
     shift = (denominator > _epsilon) ? (target_pivot_x - base_pivot_x) / denominator : 1.0f;
   }
 
-  p->curve_pivot_x_shift = CLAMPF(shift, -1.0f, 1.0f);
+  user_params->curve_pivot_x_shift = CLAMPF(shift, -1.0f, 1.0f);
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->curve_pivot_x_shift, p->curve_pivot_x_shift);
-  dt_bauhaus_slider_set(g->curve_pivot_y_linear, p->curve_pivot_y_linear);
+  dt_bauhaus_slider_set(gui_data->curve_pivot_x_shift, user_params->curve_pivot_x_shift);
+  dt_bauhaus_slider_set(gui_data->curve_pivot_y_linear, user_params->curve_pivot_y_linear);
   --darktable.gui->reset;
 
   // Redraw and add history
-  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
@@ -946,7 +946,7 @@ void _print_curve(const curve_and_look_params_t *curve_params)
 {
   const int steps = 100;
   printf("\nCurve\n");
-  for(int i = 0; i <= steps; i++)
+  for (int i = 0; i <= steps; i++)
   {
     float x = i / (float)steps;
     const float y = _apply_curve(x, curve_params);
@@ -963,12 +963,14 @@ void _print_primaries(char *name, const float (*primaries)[2])
   printf("%f, %f\n", primaries[2][0], primaries[2][1]);
   printf("\n\n");
 }
+
 void _print_whitepoint(char * name, const float * wp)
 {
   printf("%s\n", name);
   printf("%f, %f\n", wp[0], wp[1]);
   printf("\n\n");
 }
+
 static void _calculate_adjusted_primaries(const primaries_params_t *const params,
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
@@ -1002,19 +1004,19 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // First, calculate the matrix from pipe the work profile to the base profile whose primaries
   // will be rotated/inset.
   dt_colormatrix_mul(pipe_to_base_transposed,
-                     pipe_work_profile->matrix_in_transposed,   // pipe -> XYZ
-                     base_profile->matrix_out_transposed);      // XYZ -> base
+                     pipe_work_profile->matrix_in_transposed,   // pipe->XYZ
+                     base_profile->matrix_out_transposed);      // XYZ->base
   _print_transposed_matrix("pipe_to_base_transposed", pipe_to_base_transposed);
   printf("base_profile.nonlinearlut: %d\n", base_profile->nonlinearlut);
 
   mat3SSEinv(base_to_pipe_transposed, pipe_to_base_transposed);
   _print_transposed_matrix("base_to_pipe_transposed", base_to_pipe_transposed);
 
-  // inbound path, base RGB -> inset and rotated rendering space for the curve
+  // inbound path, base RGB->inset and rotated rendering space for the curve
 
   // Rotated, scaled primaries are calculated based on the base profile.
   float inset_and_rotated_primaries[3][2];
-  for(size_t i = 0; i < 3; i++)
+  for (size_t i = 0; i < 3; i++)
     dt_rotate_and_scale_primary(base_profile, 1.f - params->inset[i], params->rotation[i], i, inset_and_rotated_primaries[i]);
 
   // The matrix to convert from the inset/rotated to XYZ. When applying to the RGB values that are actually
@@ -1031,7 +1033,7 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   rendering_profile->nonlinearlut = FALSE;
 
   // The matrix to convert colors from the original 'base' space to their partially desaturated and skewed
-  // versions, using the inset RGB -> XYZ and the original base XYZ -> RGB matrices.
+  // versions, using the inset RGB->XYZ and the original base XYZ->RGB matrices.
   dt_colormatrix_mul(base_to_rendering_transposed,
                       rendering_profile->matrix_in_transposed,
                       base_profile->matrix_out_transposed
@@ -1041,12 +1043,12 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   dt_colormatrix_mul(pipe_to_rendering_transposed, pipe_to_base_transposed, base_to_rendering_transposed);
   _print_transposed_matrix("pipe_to_rendering_transposed", pipe_to_rendering_transposed);
 
-  // outbound path, inset and rotated working space for the curve -> base RGB
+  // outbound path, inset and rotated working space for the curve->base RGB
 
   // Rotated, primaries, with optional restoration of purity. This is to be applied after the sigmoid curve;
   // it can undo the skew and recover purity (saturation).
   float outset_and_unrotated_primaries[3][2];
-  for(size_t i = 0; i < 3; i++)
+  for (size_t i = 0; i < 3; i++)
   {
     const float scaling = 1.f - params->master_outset_ratio * params->outset[i];
     dt_rotate_and_scale_primary(base_profile, scaling, params->master_unrotation_ratio * params->unrotation[i], i, outset_and_unrotated_primaries[i]);
@@ -1064,8 +1066,8 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
 
   dt_colormatrix_t tmp;
   dt_colormatrix_mul(tmp,
-    outset_and_unrotated_to_xyz_transposed,  // custom (outset, unrotation) -> XYZ
-    base_profile->matrix_out_transposed      // XYZ -> base
+    outset_and_unrotated_to_xyz_transposed,  // custom (outset, unrotation)->XYZ
+    base_profile->matrix_out_transposed      // XYZ->base
     );
   _print_transposed_matrix("tmp (inverse of rendering_to_base_transposed)", tmp);
   // 'tmp' is constructed the same way as inbound_inset_and_rotated_to_xyz_transposed,
@@ -1100,38 +1102,38 @@ static void _create_matrices_and_profiles(
     base_to_pipe_transposed);
 }
 
-void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
+void process(dt_iop_module_t *self, const dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  if(!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out))
+  if (!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out))
   {
     return;
   }
 
-  dt_iop_agx_user_params_t *p = piece->data;
+  dt_iop_agx_user_params_t *user_params= piece->data;
   const float *const in = ivoid;
   float *const out = ovoid;
   const size_t n_pixels = (size_t)roi_in->width * roi_in->height;
 
   printf("================== start ==================\n");
-  printf("range_black_relative_exposure = %f\n", p->range_black_relative_exposure);
-  printf("range_white_relative_exposure = %f\n", p->range_white_relative_exposure);
-  printf("curve_gamma = %f\n", p->curve_gamma);
-  printf("curve_contrast_around_pivot = %f\n", p->curve_contrast_around_pivot);
-  printf("curve_linear_percent_below_pivot = %f\n", p->curve_linear_percent_below_pivot);
-  printf("curve_linear_percent_above_pivot = %f\n", p->curve_linear_percent_above_pivot);
-  printf("curve_toe_power = %f\n", p->curve_toe_power);
-  printf("curve_shoulder_power = %f\n", p->curve_shoulder_power);
-  printf("curve_target_display_black_y = %f\n", p->curve_target_display_black_y);
-  printf("curve_target_display_white_y = %f\n", p->curve_target_display_white_y);
+  printf("range_black_relative_exposure = %f\n", user_params->range_black_relative_exposure);
+  printf("range_white_relative_exposure = %f\n", user_params->range_white_relative_exposure);
+  printf("curve_gamma = %f\n", user_params->curve_gamma);
+  printf("curve_contrast_around_pivot = %f\n", user_params->curve_contrast_around_pivot);
+  printf("curve_linear_percent_below_pivot = %f\n", user_params->curve_linear_percent_below_pivot);
+  printf("curve_linear_percent_above_pivot = %f\n", user_params->curve_linear_percent_above_pivot);
+  printf("curve_toe_power = %f\n", user_params->curve_toe_power);
+  printf("curve_shoulder_power = %f\n", user_params->curve_shoulder_power);
+  printf("curve_target_display_black_y = %f\n", user_params->curve_target_display_black_y);
+  printf("curve_target_display_white_y = %f\n", user_params->curve_target_display_white_y);
 
   // Calculate curve parameters once
-  const curve_and_look_params_t curve_params = _calculate_curve_params(p);
+  const curve_and_look_params_t curve_params = _calculate_curve_params(user_params);
   // _print_curve(&curve_params);
 
   const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   // Get the base profile based on user selection
-  const dt_iop_order_iccprofile_info_t *const base_profile = _agx_get_base_profile(self->dev, pipe_work_profile, p->base_primaries);
+  const dt_iop_order_iccprofile_info_t *const base_profile = _agx_get_base_profile(self->dev, pipe_work_profile, user_params->base_primaries);
 
   // Check if we got a valid base profile, fallback if necessary (already handled in _agx_get_base_profile, but double-check)
   if (!base_profile) {
@@ -1150,7 +1152,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   dt_iop_order_iccprofile_info_t rendering_profile;
 
   _create_matrices_and_profiles(
-          p,
+          user_params,
           pipe_work_profile, base_profile,
           &rendering_profile,
           pipe_to_base_transposed,
@@ -1177,7 +1179,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   _print_transposed_matrix("pipe_to_rendering_and_back_transposed", pipe_to_rendering_and_back_transposed);
 
   DT_OMP_FOR()
-  for(size_t k = 0; k < 4 * n_pixels; k += 4)
+  for (size_t k = 0; k < 4 * n_pixels; k += 4)
   {
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
@@ -1216,20 +1218,20 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 }
 
 // Plot the curve
-static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t *self)
+static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_module_t *self)
 {
-  dt_iop_agx_user_params_t *p = self->params;
-  dt_iop_agx_gui_data_t *g = self->gui_data;
+  dt_iop_agx_user_params_t *user_params= self->params;
+  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
 
-  curve_and_look_params_t curve_params = _calculate_curve_params(p);
+  curve_and_look_params_t curve_params = _calculate_curve_params(user_params);
   // Calculate current curve parameters
 
   // --- Boilerplate cairo/pango setup ---
-  gtk_widget_get_allocation(widget, &g->allocation);
-  g->allocation.height -= DT_RESIZE_HANDLE_SIZE; // Account for resize handle
+  gtk_widget_get_allocation(widget, &gui_data->allocation);
+  gui_data->allocation.height -= DT_RESIZE_HANDLE_SIZE; // Account for resize handle
 
   cairo_surface_t *cst =
-    dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, g->allocation.width, g->allocation.height);
+    dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, gui_data->allocation.width, gui_data->allocation.height);
   PangoFontDescription *desc =
     pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
   cairo_t *cr = cairo_create(cst);
@@ -1237,7 +1239,7 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
 
   pango_layout_set_font_description(layout, desc);
   pango_cairo_context_set_resolution(pango_layout_get_context(layout), darktable.gui->dpi);
-  g->context = gtk_widget_get_style_context(widget);
+  gui_data->context = gtk_widget_get_style_context(widget);
 
   char text[256];
 
@@ -1248,29 +1250,29 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
 
   g_strlcpy(text, "X", sizeof(text));
   pango_layout_set_text(layout, text, -1);
-  pango_layout_get_pixel_extents(layout, &g->ink, NULL);
-  g->line_height = g->ink.height;
+  pango_layout_get_pixel_extents(layout, &gui_data->ink, NULL);
+  gui_data->line_height = gui_data->ink.height;
 
   // Set graph dimensions and margins (simplified from filmic)
-  g->inner_padding = DT_PIXEL_APPLY_DPI(4);
-  g->inset = g->inner_padding;
-  const float margin_left = 3. * g->line_height + 2. * g->inset; // Room for Y labels
-  const float margin_bottom = 2. * g->line_height + 2. * g->inset; // Room for X labels
-  const float margin_top = g->inset + 0.5 * g->line_height;
-  const float margin_right = g->inset;
+  gui_data->inner_padding = DT_PIXEL_APPLY_DPI(4);
+  gui_data->inset = gui_data->inner_padding;
+  const float margin_left = 3. * gui_data->line_height + 2. * gui_data->inset; // Room for Y labels
+  const float margin_bottom = 2. * gui_data->line_height + 2. * gui_data->inset; // Room for X labels
+  const float margin_top = gui_data->inset + 0.5 * gui_data->line_height;
+  const float margin_right = gui_data->inset;
 
-  g->graph_width = g->allocation.width - margin_right - margin_left;
-  g->graph_height = g->allocation.height - margin_bottom - margin_top;
+  gui_data->graph_width = gui_data->allocation.width - margin_right - margin_left;
+  gui_data->graph_height = gui_data->allocation.height - margin_bottom - margin_top;
 
   // --- Drawing starts ---
-  gtk_render_background(g->context, cr, 0, 0, g->allocation.width, g->allocation.height);
+  gtk_render_background(gui_data->context, cr, 0, 0, gui_data->allocation.width, gui_data->allocation.height);
 
   // Translate origin to bottom-left of graph area for easier plotting
-  cairo_translate(cr, margin_left, margin_top + g->graph_height);
+  cairo_translate(cr, margin_left, margin_top + gui_data->graph_height);
   cairo_scale(cr, 1., -1.); // Flip Y axis
 
   // Draw graph background and border
-  cairo_rectangle(cr, 0, 0, g->graph_width, g->graph_height);
+  cairo_rectangle(cr, 0, 0, gui_data->graph_width, gui_data->graph_height);
   set_color(cr, darktable.bauhaus->graph_bg);
   cairo_fill_preserve(cr);
   set_color(cr, darktable.bauhaus->graph_border);
@@ -1281,7 +1283,7 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
   cairo_save(cr);
   cairo_set_source_rgba(cr, darktable.bauhaus->graph_border.red, darktable.bauhaus->graph_border.green, darktable.bauhaus->graph_border.blue, 0.5);
   cairo_move_to(cr, 0, 0);
-  cairo_line_to(cr, g->graph_width, g->graph_height);
+  cairo_line_to(cr, gui_data->graph_width, gui_data->graph_height);
   cairo_stroke(cr);
   cairo_restore(cr);
 
@@ -1305,10 +1307,10 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
       const float y_linear = linear_y_guides[i];
       const float y_pre_gamma = powf(y_linear, 1.0f / curve_params.curve_gamma);
 
-      const float y_graph = y_pre_gamma * g->graph_height;
+      const float y_graph = y_pre_gamma * gui_data->graph_height;
 
       cairo_move_to(cr, 0, y_graph);
-      cairo_line_to(cr, g->graph_width, y_graph);
+      cairo_line_to(cr, gui_data->graph_width, y_graph);
       cairo_stroke(cr);
 
       // Draw label for the guide line
@@ -1318,15 +1320,15 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
 
       snprintf(text, sizeof(text), "%.2f", y_linear); // Format the linear value
       pango_layout_set_text(layout, text, -1);
-      pango_layout_get_pixel_extents(layout, &g->ink, NULL);
+      pango_layout_get_pixel_extents(layout, &gui_data->ink, NULL);
 
       // Position label slightly to the left of the graph
-      float label_x = margin_left - g->ink.width - g->inset / 2.0f;
+      float label_x = margin_left - gui_data->ink.width - gui_data->inset / 2.0f;
       // Vertically center label on the guide line (remember Y is flipped)
-      float label_y = margin_top + g->graph_height - y_graph - g->ink.height / 2.0f - g->ink.y;
+      float label_y = margin_top + gui_data->graph_height - y_graph - gui_data->ink.height / 2.0f - gui_data->ink.y;
 
       // Ensure label stays within vertical bounds of the graph area
-      label_y = CLAMPF(label_y, margin_top - g->ink.height / 2.0f - g->ink.y, margin_top + g->graph_height - g->ink.height / 2.0f - g->ink.y);
+      label_y = CLAMPF(label_y, margin_top - gui_data->ink.height / 2.0f - gui_data->ink.y, margin_top + gui_data->graph_height - gui_data->ink.height / 2.0f - gui_data->ink.y);
 
       cairo_move_to(cr, label_x, label_y);
       pango_cairo_show_layout(cr, layout);
@@ -1359,10 +1361,10 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
       float x_norm = (ev - min_ev) / range_in_ev;
       // Clamp to ensure it stays within the graph bounds if min/max_ev aren't exactly integers
       x_norm = CLAMPF(x_norm, 0.0f, 1.0f);
-      float x_graph = x_norm * g->graph_width;
+      float x_graph = x_norm * gui_data->graph_width;
 
       cairo_move_to(cr, x_graph, 0);
-      cairo_line_to(cr, x_graph, g->graph_height);
+      cairo_line_to(cr, x_graph, gui_data->graph_height);
       cairo_stroke(cr);
 
       // Draw label for the EV guide line
@@ -1373,12 +1375,12 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
         set_color(cr, darktable.bauhaus->graph_fg);
         snprintf(text, sizeof(text), "%d", ev); // Format the EV value
         pango_layout_set_text(layout, text, -1);
-        pango_layout_get_pixel_extents(layout, &g->ink, NULL);
+        pango_layout_get_pixel_extents(layout, &gui_data->ink, NULL);
         // Position label slightly below the x-axis, centered horizontally
-        float label_x = margin_left + x_graph - g->ink.width / 2.0f - g->ink.x;
-        float label_y = margin_top + g->graph_height + g->inset / 2.0f;
+        float label_x = margin_left + x_graph - gui_data->ink.width / 2.0f - gui_data->ink.x;
+        float label_y = margin_top + gui_data->graph_height + gui_data->inset / 2.0f;
         // Ensure label stays within horizontal bounds
-        label_x = CLAMPF(label_x, margin_left - g->ink.width / 2.0f - g->ink.x, margin_left + g->graph_width - g->ink.width / 2.0f - g->ink.x);
+        label_x = CLAMPF(label_x, margin_left - gui_data->ink.width / 2.0f - gui_data->ink.x, margin_left + gui_data->graph_width - gui_data->ink.width / 2.0f - gui_data->ink.x);
         cairo_move_to(cr, label_x, label_y);
         pango_cairo_show_layout(cr, layout);
         cairo_restore(cr);
@@ -1399,8 +1401,8 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
     float y_norm = _apply_curve(x_norm, &curve_params);
 
     // Map normalized coords [0,1] to graph pixel coords
-    const float x_graph = x_norm * g->graph_width;
-    const float y_graph = y_norm * g->graph_height;
+    const float x_graph = x_norm * gui_data->graph_width;
+    const float y_graph = y_norm * gui_data->graph_height;
 
     if (k == 0)
       cairo_move_to(cr, x_graph, y_graph);
@@ -1412,11 +1414,11 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
   // Draw the pivot point
   cairo_save(cr);
   cairo_rectangle(cr, -DT_PIXEL_APPLY_DPI(4.), -DT_PIXEL_APPLY_DPI(4.),
-                  g->graph_width + 2. * DT_PIXEL_APPLY_DPI(4.), g->graph_height + 2. * DT_PIXEL_APPLY_DPI(4.));
+                  gui_data->graph_width + 2. * DT_PIXEL_APPLY_DPI(4.), gui_data->graph_height + 2. * DT_PIXEL_APPLY_DPI(4.));
   cairo_clip(cr);
 
-  const float x_pivot_graph = curve_params.pivot_x * g->graph_width;
-  const float y_pivot_graph = curve_params.pivot_y * g->graph_height;
+  const float x_pivot_graph = curve_params.pivot_x * gui_data->graph_width;
+  const float y_pivot_graph = curve_params.pivot_y * gui_data->graph_height;
   set_color(cr, darktable.bauhaus->graph_fg_active); // Use a distinct color, e.g., active foreground
   cairo_arc(cr, x_pivot_graph, y_pivot_graph, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI); // Adjust radius as needed
   cairo_fill(cr);
@@ -1434,7 +1436,6 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
   return FALSE; // Propagate event further? Usually FALSE for draw signals
 }
 
-
 // Init
 void init(dt_iop_module_t *self)
 {
@@ -1450,48 +1451,48 @@ void cleanup(dt_iop_module_t *self)
   self->default_params = NULL;
 }
 
-void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
+void gui_changed(const dt_iop_module_t *self, const GtkWidget *w, void *previous)
 {
-  const dt_iop_agx_gui_data_t *g = self->gui_data;
-  const dt_iop_agx_user_params_t *p = self->params;
+  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
+  const dt_iop_agx_user_params_t *user_params= self->params;
   // Test which widget was changed.
   // If allowing w == NULL, this can be called from gui_update, so that
   // gui configuration adjustments only need to be dealt with once, here.
-  if (g && w == g->log_only)
+  if (gui_data && w == gui_data->log_only)
   {
-    gtk_widget_set_visible(g->curve_box, !p->log_only);
+    gtk_widget_set_visible(gui_data->curve_box, !user_params->log_only);
   }
 
   // Trigger redraw when any parameter changes
-  if (g && g->graph_drawing_area) {
-    gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+  if (gui_data && gui_data->graph_drawing_area) {
+    gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   }
 
-  if (g && p->auto_gamma)
+  if (gui_data && user_params->auto_gamma)
   {
     curve_and_look_params_t curve_and_look_params;
     _calculate_log_mapping_params(self->params, &curve_and_look_params);
     _adjust_pivot(self->params, &curve_and_look_params);
-    dt_bauhaus_slider_set(g->curve_gamma, curve_and_look_params.curve_gamma);
+    dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
   }
 }
 
 // GUI update (called when module UI is shown/refreshed)
-void gui_update(dt_iop_module_t *self)
+void gui_update(const dt_iop_module_t *self)
 {
-  const dt_iop_agx_gui_data_t *g = self->gui_data;
+  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
   const dt_iop_agx_user_params_t *params = self->params;
 
-  if (g)
+  if (gui_data)
   {
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->log_only), params->log_only);
-    gtk_widget_set_visible(g->curve_box, !params->log_only);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->auto_gamma), params->auto_gamma);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->log_only), params->log_only);
+    gtk_widget_set_visible(gui_data->curve_box, !params->log_only);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), params->auto_gamma);
   }
 
   // Ensure the graph is drawn initially
-  if (g && g->graph_drawing_area) {
-    gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+  if (gui_data && gui_data->graph_drawing_area) {
+    gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   }
 }
 
@@ -1871,7 +1872,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t* p)
   p->base_primaries = DT_AGX_EXPORT_PROFILE;
 }
 
-void init_presets(dt_iop_module_so_t *self)
+void init_presets(const dt_iop_module_so_t *self)
 {
   const char *workflow = dt_conf_get_string_const("plugins/darkroom/workflow");
   const gboolean auto_apply_agx = strcmp(workflow, "scene-referred (agx)") == 0;
@@ -1880,7 +1881,7 @@ void init_presets(dt_iop_module_so_t *self)
 
   _set_neutral_params(&p);
 
-  if(auto_apply_agx)
+  if (auto_apply_agx)
   {
     dt_gui_presets_add_generic(_("scene-referred default"), self->op, self->version(), &p, sizeof(dt_iop_agx_user_params_t), 1,
                                DEVELOP_BLEND_CS_RGB_SCENE);
@@ -1956,15 +1957,15 @@ void gui_cleanup(dt_iop_module_t *self)
 }
 
 // Callback for color pickers
-void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
+void color_picker_apply(dt_iop_module_t *self, const GtkWidget *picker,
                         dt_dev_pixelpipe_t *pipe)
 {
-  const dt_iop_agx_gui_data_t *g = self->gui_data;
+  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
 
-  if(picker == g->range_black_exposure) apply_auto_black_exposure(self);
-  else if(picker == g->range_white_exposure) apply_auto_white_exposure(self);
-  else if(picker == g->auto_tune_picker) apply_auto_tune_exposure(self);
-  else if(picker == g->curve_pivot_x_shift) apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
+  if (picker == gui_data->range_black_exposure) apply_auto_black_exposure(self);
+  else if (picker == gui_data->range_white_exposure) apply_auto_white_exposure(self);
+  else if (picker == gui_data->auto_tune_picker) apply_auto_tune_exposure(self);
+  else if (picker == gui_data->curve_pivot_x_shift) apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
 
   const dt_iop_agx_user_params_t* user_params = self->params;
   if (user_params->auto_gamma)
@@ -1973,7 +1974,7 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
     curve_and_look_params_t curve_and_look_params;
     _calculate_log_mapping_params(self->params, &curve_and_look_params);
     _adjust_pivot(self->params, &curve_and_look_params);
-    dt_bauhaus_slider_set(g->curve_gamma, curve_and_look_params.curve_gamma);
+    dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
     --darktable.gui->reset;
   }
 }
