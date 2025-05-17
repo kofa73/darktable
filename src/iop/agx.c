@@ -238,9 +238,8 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
   return 1; // no conversion possible
 }
 
-// Commit parameters
-void commit_params(const dt_iop_module_t *self, const dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
-                   const dt_dev_pixelpipe_iop_t *piece)
+void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
+                   dt_dev_pixelpipe_iop_t *piece)
 {
   memcpy(piece->data, p1, self->params_size);
 }
@@ -598,40 +597,45 @@ static void _compensate_low_side(
 
 static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and_look_params_t *curve_and_look_params)
 {
-  float pivot_x = fabsf(curve_and_look_params->min_ev / curve_and_look_params->range_in_ev);
+  const float mid_gray_in_log_range = fabsf(curve_and_look_params->min_ev / curve_and_look_params->range_in_ev);
   if (user_params->curve_pivot_x_shift < 0)
   {
     float black_ratio = -user_params->curve_pivot_x_shift;
     float gray_ratio = 1 - black_ratio;
-    pivot_x = gray_ratio * pivot_x;
+    curve_and_look_params->pivot_x = gray_ratio * mid_gray_in_log_range;
   }
   else if (user_params->curve_pivot_x_shift > 0)
   {
     float white_ratio = user_params->curve_pivot_x_shift;
     float gray_ratio = 1 - white_ratio;
-    pivot_x = pivot_x * gray_ratio + white_ratio;
+    curve_and_look_params->pivot_x = mid_gray_in_log_range * gray_ratio + white_ratio;
+  } else
+  {
+    curve_and_look_params->pivot_x = mid_gray_in_log_range;
   }
 
-  curve_and_look_params->pivot_x = pivot_x;
-
-  if (user_params->auto_gamma)
+  if (user_params->log_only)
   {
-    curve_and_look_params->curve_gamma = pivot_x > 0 && user_params->curve_pivot_y_linear > 0
-                              ? log2f(user_params->curve_pivot_y_linear) / log2f(pivot_x)
-                              : user_params->curve_gamma;
+    curve_and_look_params->curve_gamma = log2f(0.18) / log2f(mid_gray_in_log_range);
+  }
+  else if (user_params->auto_gamma)
+  {
+    curve_and_look_params->curve_gamma = curve_and_look_params->pivot_x > 0 && user_params->curve_pivot_y_linear > 0
+                                             ? log2f(user_params->curve_pivot_y_linear) / log2f(curve_and_look_params->pivot_x)
+                                             : user_params->curve_gamma;
   }
   else
   {
     curve_and_look_params->curve_gamma = user_params->curve_gamma;
   }
 
-  printf("curve_gamma = %f, using auto: %d\n", curve_and_look_params->curve_gamma, user_params->auto_gamma);
+  printf("curve_gamma = %f, using auto: %d, log only: %d\n", curve_and_look_params->curve_gamma, user_params->auto_gamma, user_params->log_only);
 
   curve_and_look_params->pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_y,
                                 user_params->curve_target_display_white_y),
                          1.0f / curve_and_look_params->curve_gamma);
 
-  printf("pivot(%f, %f) at gamma = %f, curve_pivot_y_linear = %f\n", pivot_x, curve_and_look_params->pivot_y, curve_and_look_params->curve_gamma,
+  printf("pivot(%f, %f) at gamma = %f, curve_pivot_y_linear = %f\n", curve_and_look_params->pivot_x, curve_and_look_params->pivot_y, curve_and_look_params->curve_gamma,
          user_params->curve_pivot_y_linear);
 }
 
@@ -785,40 +789,36 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
 
   dt_aligned_pixel_t transformed_pixel = {0.0f};
 
-  if (params->log_only)
+  for_three_channels(k, aligned(rgb_in_out, transformed_pixel: 16))
   {
-    for_three_channels(k, aligned(rgb_in_out: 16))
+    float log_value = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
+    if (!params->log_only)
     {
-      rgb_in_out[k] = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
-    }
-    _agxLook(rgb_in_out, params, rendering_profile);
-  } else
-  {
-    for_three_channels(k, aligned(rgb_in_out, transformed_pixel: 16))
-    {
-      float log_value = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
       transformed_pixel[k] = _apply_curve(log_value, params);
-    }
-
-    _agxLook(transformed_pixel, params, rendering_profile);
-
-    // Linearize
-    for_three_channels(k, aligned(transformed_pixel: 16))
+    } else
     {
-      transformed_pixel[k] = powf(fmaxf(0.0f, transformed_pixel[k]), params->curve_gamma);
+      transformed_pixel[k] = log_value;
     }
-
-    // get post-curve chroma angle
-    dt_RGB_2_HSV(transformed_pixel, hsv_pixel);
-
-    float h_after = hsv_pixel[0];
-
-    // Mix hue back if requested
-    h_after = _lerp_hue(h_before, h_after, params->look_original_hue_mix_ratio);
-
-    hsv_pixel[0] = h_after;
-    dt_HSV_2_RGB(hsv_pixel, rgb_in_out);
   }
+
+  _agxLook(transformed_pixel, params, rendering_profile);
+
+  // Linearize
+  for_three_channels(k, aligned(transformed_pixel: 16))
+  {
+    transformed_pixel[k] = powf(fmaxf(0.0f, transformed_pixel[k]), params->curve_gamma);
+  }
+
+  // get post-curve chroma angle
+  dt_RGB_2_HSV(transformed_pixel, hsv_pixel);
+
+  float h_after = hsv_pixel[0];
+
+  // Mix hue back if requested
+  h_after = _lerp_hue(h_before, h_after, params->look_original_hue_mix_ratio);
+
+  hsv_pixel[0] = h_after;
+  dt_HSV_2_RGB(hsv_pixel, rgb_in_out);
 }
 
 // Apply logic for black point picker
@@ -1102,7 +1102,7 @@ static void _create_matrices_and_profiles(
     base_to_pipe_transposed);
 }
 
-void process(dt_iop_module_t *self, const dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
+void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
   if (!dt_iop_have_required_input_format(4, self, piece->colors, ivoid, ovoid, roi_in, roi_out))
@@ -1451,7 +1451,7 @@ void cleanup(dt_iop_module_t *self)
   self->default_params = NULL;
 }
 
-void gui_changed(const dt_iop_module_t *self, const GtkWidget *w, void *previous)
+void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
   const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
   const dt_iop_agx_user_params_t *user_params= self->params;
@@ -1478,7 +1478,7 @@ void gui_changed(const dt_iop_module_t *self, const GtkWidget *w, void *previous
 }
 
 // GUI update (called when module UI is shown/refreshed)
-void gui_update(const dt_iop_module_t *self)
+void gui_update(dt_iop_module_t *self)
 {
   const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
   const dt_iop_agx_user_params_t *params = self->params;
@@ -1872,18 +1872,18 @@ static void _set_neutral_params(dt_iop_agx_user_params_t* p)
   p->base_primaries = DT_AGX_EXPORT_PROFILE;
 }
 
-void init_presets(const dt_iop_module_so_t *self)
+void init_presets(dt_iop_module_so_t *self)
 {
   const char *workflow = dt_conf_get_string_const("plugins/darkroom/workflow");
   const gboolean auto_apply_agx = strcmp(workflow, "scene-referred (agx)") == 0;
 
-  dt_iop_agx_user_params_t p = { 0 };
+  dt_iop_agx_user_params_t user_params = { 0 };
 
-  _set_neutral_params(&p);
+  _set_neutral_params(&user_params);
 
   if (auto_apply_agx)
   {
-    dt_gui_presets_add_generic(_("scene-referred default"), self->op, self->version(), &p, sizeof(dt_iop_agx_user_params_t), 1,
+    dt_gui_presets_add_generic(_("scene-referred default"), self->op, self->version(), &user_params, sizeof(dt_iop_agx_user_params_t), 1,
                                DEVELOP_BLEND_CS_RGB_SCENE);
 
     dt_gui_presets_update_format(_("scene-referred default"), self->op, self->version(), FOR_RAW | FOR_MATRIX);
@@ -1893,61 +1893,61 @@ void init_presets(const dt_iop_module_so_t *self)
 
   // AgX primaries settings from Eary_Chow
   // https://discuss.pixls.us/t/blender-agx-in-darktable-proof-of-concept/48697/1018
-  p.red_inset = 0.32965205f;
-  p.green_inset = 0.28051336f;
-  p.blue_inset = 0.12475368f;
-  p.red_rotation = _degrees_to_radians(2.13976149);
-  p.green_rotation = _degrees_to_radians(-1.22827335f);
-  p.blue_rotation = _degrees_to_radians(-3.05174246f);
-  p.red_outset = 0.32317438f;
-  p.green_outset = 0.28325605f;
-  p.blue_outset = 0.0374326f;
-  p.red_unrotation = _degrees_to_radians(0.0f);
-  p.green_unrotation = _degrees_to_radians(0.0f);
-  p.blue_unrotation = _degrees_to_radians(0.0f);
+  user_params.red_inset = 0.32965205f;
+  user_params.green_inset = 0.28051336f;
+  user_params.blue_inset = 0.12475368f;
+  user_params.red_rotation = _degrees_to_radians(2.13976149);
+  user_params.green_rotation = _degrees_to_radians(-1.22827335f);
+  user_params.blue_rotation = _degrees_to_radians(-3.05174246f);
+  user_params.red_outset = 0.32317438f;
+  user_params.green_outset = 0.28325605f;
+  user_params.blue_outset = 0.0374326f;
+  user_params.red_unrotation = _degrees_to_radians(0.0f);
+  user_params.green_unrotation = _degrees_to_radians(0.0f);
+  user_params.blue_unrotation = _degrees_to_radians(0.0f);
   // Restore purity
-  p.master_outset_ratio = 1.0f;
-  p.master_unrotation_ratio = 1.0f;
-  p.base_primaries = DT_AGX_REC2020;
+  user_params.master_outset_ratio = 1.0f;
+  user_params.master_unrotation_ratio = 1.0f;
+  user_params.base_primaries = DT_AGX_REC2020;
 
-  dt_gui_presets_add_generic(_("blender-like|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  dt_gui_presets_add_generic(_("blender-like|base"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   // Punchy preset
-  p.look_power = 1.35f;
-  p.look_offset = 0.0f;
-  p.look_saturation = 1.4f;
-  dt_gui_presets_add_generic(_("blender-like|punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  user_params.look_power = 1.35f;
+  user_params.look_offset = 0.0f;
+  user_params.look_saturation = 1.4f;
+  dt_gui_presets_add_generic(_("blender-like|punchy"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
-  _set_neutral_params(&p);
+  _set_neutral_params(&user_params);
   // Sigmoid 'smooth' primaries settings
-  p.red_inset = 0.1f;
-  p.green_inset = 0.1f;
-  p.blue_inset = 0.15f;
-  p.red_rotation = _degrees_to_radians(2.f);
-  p.green_rotation = _degrees_to_radians(-1.f);
-  p.blue_rotation = _degrees_to_radians(-3.f);
-  p.red_outset = 0.1f;
-  p.green_outset = 0.1f;
-  p.blue_outset = 0.15f;
-  p.red_unrotation = _degrees_to_radians(2.f);
-  p.green_unrotation = _degrees_to_radians(-1.f);
-  p.blue_unrotation = _degrees_to_radians(-3.f);
+  user_params.red_inset = 0.1f;
+  user_params.green_inset = 0.1f;
+  user_params.blue_inset = 0.15f;
+  user_params.red_rotation = _degrees_to_radians(2.f);
+  user_params.green_rotation = _degrees_to_radians(-1.f);
+  user_params.blue_rotation = _degrees_to_radians(-3.f);
+  user_params.red_outset = 0.1f;
+  user_params.green_outset = 0.1f;
+  user_params.blue_outset = 0.15f;
+  user_params.red_unrotation = _degrees_to_radians(2.f);
+  user_params.green_unrotation = _degrees_to_radians(-1.f);
+  user_params.blue_unrotation = _degrees_to_radians(-3.f);
   // Don't restore purity - try to avoid posterization.
-  p.master_outset_ratio = 0.0f;
-  p.master_unrotation_ratio = 1.0f;
-  p.base_primaries = DT_AGX_WORK_PROFILE;
+  user_params.master_outset_ratio = 0.0f;
+  user_params.master_unrotation_ratio = 1.0f;
+  user_params.base_primaries = DT_AGX_WORK_PROFILE;
 
-  dt_gui_presets_add_generic(_("smooth|base"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  dt_gui_presets_add_generic(_("smooth|base"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   // 'Punchy' look
-  p.look_power = 1.35f;
-  p.look_offset = 0.0f;
-  p.look_saturation = 1.4f;
-  dt_gui_presets_add_generic(_("smooth|punchy"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  user_params.look_power = 1.35f;
+  user_params.look_offset = 0.0f;
+  user_params.look_saturation = 1.4f;
+  dt_gui_presets_add_generic(_("smooth|punchy"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
-  _set_neutral_params(&p);
-  p.log_only = TRUE;
-  dt_gui_presets_add_generic(_("log tone mapper"), self->op, self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  _set_neutral_params(&user_params);
+  user_params.log_only = TRUE;
+  dt_gui_presets_add_generic(_("log tone mapper"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
 // GUI cleanup
@@ -1957,7 +1957,7 @@ void gui_cleanup(dt_iop_module_t *self)
 }
 
 // Callback for color pickers
-void color_picker_apply(dt_iop_module_t *self, const GtkWidget *picker,
+void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
                         dt_dev_pixelpipe_t *pipe)
 {
   const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
