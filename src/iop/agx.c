@@ -41,7 +41,6 @@ typedef enum dt_iop_agx_base_primaries_t
 } dt_iop_agx_base_primaries_t;
 
 // Module parameters struct
-// Updated struct dt_iop_agx_user_params_t
 typedef struct dt_iop_agx_user_params_t
 {
   gboolean log_only;  // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "logarithmic tone mapping only"
@@ -825,8 +824,8 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
 static void apply_auto_black_exposure(dt_iop_module_t *self)
 {
   if (darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *user_params= self->params;
-  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
+  dt_iop_agx_user_params_t *user_params = self->params;
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   const float black_norm = _min(self->picked_color_min);
   user_params->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
@@ -843,8 +842,8 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
 static void apply_auto_white_exposure(dt_iop_module_t *self)
 {
   if (darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *user_params= self->params;
-  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
+  dt_iop_agx_user_params_t *user_params = self->params;
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   const float white_norm = _max(self->picked_color_max);
   user_params->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
@@ -861,8 +860,8 @@ static void apply_auto_white_exposure(dt_iop_module_t *self)
 static void apply_auto_tune_exposure(dt_iop_module_t *self)
 {
   if (darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *user_params= self->params;
-  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
+  dt_iop_agx_user_params_t *user_params = self->params;
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   // Black point
   const float black_norm = _min(self->picked_color_min);
@@ -885,8 +884,8 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
 static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprofile_info_t *profile)
 {
   if (darktable.gui->reset) return;
-  dt_iop_agx_user_params_t *user_params= self->params;
-  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
+  dt_iop_agx_user_params_t *user_params = self->params;
+  const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   // Calculate norm and EV of the picked color
   const float norm = _luminance(self->picked_color, profile);
@@ -1077,7 +1076,7 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
 }
 
 static void _create_matrices_and_profiles(
-    const dt_iop_agx_user_params_t *p,
+    const dt_iop_agx_user_params_t *user_params,
     const dt_iop_order_iccprofile_info_t *pipe_work_profile,
     const dt_iop_order_iccprofile_info_t *base_profile,
     // outputs
@@ -1088,7 +1087,7 @@ static void _create_matrices_and_profiles(
     dt_colormatrix_t rendering_to_base_transposed,
     dt_colormatrix_t base_to_pipe_transposed)
 {
-  const primaries_params_t primaries_params = _get_primaries_params(p);
+  const primaries_params_t primaries_params = _get_primaries_params(user_params);
   _calculate_adjusted_primaries(
     &primaries_params,
     pipe_work_profile,
@@ -1110,7 +1109,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     return;
   }
 
-  dt_iop_agx_user_params_t *user_params= piece->data;
+  dt_iop_agx_user_params_t *user_params = piece->data;
   const float *const in = ivoid;
   float *const out = ovoid;
   const size_t n_pixels = (size_t)roi_in->width * roi_in->height;
@@ -1220,8 +1219,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 // Plot the curve
 static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_module_t *self)
 {
-  dt_iop_agx_user_params_t *user_params= self->params;
-  dt_iop_agx_gui_data_t *gui_data= self->gui_data;
+  dt_iop_agx_user_params_t *user_params = self->params;
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   curve_and_look_params_t curve_params = _calculate_curve_params(user_params);
   // Calculate current curve parameters
@@ -1453,8 +1452,8 @@ void cleanup(dt_iop_module_t *self)
 
 void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
-  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
-  const dt_iop_agx_user_params_t *user_params= self->params;
+  const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
+  const dt_iop_agx_user_params_t *user_params = self->params;
   // Test which widget was changed.
   // If allowing w == NULL, this can be called from gui_update, so that
   // gui configuration adjustments only need to be dealt with once, here.
@@ -1480,14 +1479,14 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 // GUI update (called when module UI is shown/refreshed)
 void gui_update(dt_iop_module_t *self)
 {
-  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
-  const dt_iop_agx_user_params_t *params = self->params;
+  const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
+  const dt_iop_agx_user_params_t *user_params = self->params;
 
   if (gui_data)
   {
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->log_only), params->log_only);
-    gtk_widget_set_visible(gui_data->curve_box, !params->log_only);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), params->auto_gamma);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->log_only), user_params->log_only);
+    gtk_widget_set_visible(gui_data->curve_box, !user_params->log_only);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), user_params->auto_gamma);
   }
 
   // Ensure the graph is drawn initially
@@ -1656,7 +1655,7 @@ static GtkWidget* _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t
   return advanced_box;
 }
 
-static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t * gui_data, GtkBox * parent_box)
+static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t *gui_data, GtkBox * parent_box)
 {
   GtkWidget *original_self_widget = self->widget;
   self->widget = GTK_WIDGET(parent_box);
@@ -1724,7 +1723,7 @@ static GtkWidget* _add_tonemapping_box(dt_iop_module_t *self, dt_iop_agx_gui_dat
   return GTK_WIDGET(tonemapping_box);
 }
 
-static GtkWidget *_add_primaries_box(dt_iop_module_t *self, GtkBox *parent_box, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget *_add_primaries_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *main_box = self->widget;
 
@@ -1817,7 +1816,7 @@ void gui_init(dt_iop_module_t *self)
   gtk_box_pack_start(settings_box, tonemapping_box, FALSE, FALSE, 0);
 
   GtkWidget *page_primaries = dt_ui_notebook_page(gui_data->notebook, N_("primaries"), _("color primaries adjustments"));
-  GtkWidget *primaries_box = _add_primaries_box(self, GTK_BOX(page_primaries), gui_data);
+  GtkWidget *primaries_box = _add_primaries_box(self, gui_data);
   gtk_box_pack_start(GTK_BOX(page_primaries), primaries_box, FALSE, FALSE, 0);
 
   self->widget = main_vbox;
@@ -1829,47 +1828,47 @@ static float _degrees_to_radians(float degrees)
   return degrees * M_PI_F / 180.f;
 }
 
-static void _set_neutral_params(dt_iop_agx_user_params_t* p)
+static void _set_neutral_params(dt_iop_agx_user_params_t* user_params)
 {
-  p-> log_only = FALSE;
-  p->look_slope = 1.0f;
-  p->look_power = 1.0f;
-  p->look_offset = 0.0f;
-  p->look_saturation = 1.0f;
-  p->look_original_hue_mix_ratio = 0.0f;
+  user_params-> log_only = FALSE;
+  user_params->look_slope = 1.0f;
+  user_params->look_power = 1.0f;
+  user_params->look_offset = 0.0f;
+  user_params->look_saturation = 1.0f;
+  user_params->look_original_hue_mix_ratio = 0.0f;
 
-  p->range_black_relative_exposure = -10;
-  p->range_white_relative_exposure = 6.5;
+  user_params->range_black_relative_exposure = -10;
+  user_params->range_white_relative_exposure = 6.5;
 
-  p->curve_contrast_around_pivot = 2.4;
-  p->curve_linear_percent_below_pivot = 0.0;
-  p->curve_linear_percent_below_pivot = 0.0;
-  p->curve_toe_power = 1.5;
-  p->curve_shoulder_power = 1.5;
-  p->curve_target_display_black_y = 0.0;
-  p->curve_target_display_white_y = 1.0;
-  p->auto_gamma = FALSE;
-  p->curve_gamma = 2.2;
-  p->curve_pivot_x_shift = 0.0;
-  p->curve_pivot_y_linear = 0.18;
+  user_params->curve_contrast_around_pivot = 2.4;
+  user_params->curve_linear_percent_below_pivot = 0.0;
+  user_params->curve_linear_percent_below_pivot = 0.0;
+  user_params->curve_toe_power = 1.5;
+  user_params->curve_shoulder_power = 1.5;
+  user_params->curve_target_display_black_y = 0.0;
+  user_params->curve_target_display_white_y = 1.0;
+  user_params->auto_gamma = FALSE;
+  user_params->curve_gamma = 2.2;
+  user_params->curve_pivot_x_shift = 0.0;
+  user_params->curve_pivot_y_linear = 0.18;
 
-  p->red_inset = 0.0f;
-  p->red_rotation = 0.0;
-  p->green_inset = 0.0;
-  p->green_rotation = 0.0f;
-  p->blue_inset = 0.0f;
-  p->blue_rotation = 0.0f;
+  user_params->red_inset = 0.0f;
+  user_params->red_rotation = 0.0;
+  user_params->green_inset = 0.0;
+  user_params->green_rotation = 0.0f;
+  user_params->blue_inset = 0.0f;
+  user_params->blue_rotation = 0.0f;
 
-  p->master_outset_ratio = 1.0f;
-  p->master_unrotation_ratio = 1.0f;
-  p->red_outset = 0.0f;
-  p->red_unrotation = 0.0f;
-  p->green_outset = 0.0f;
-  p->green_unrotation = 0.0f;
-  p->blue_outset = 0.0f;
-  p->blue_unrotation = 0.0f;
+  user_params->master_outset_ratio = 1.0f;
+  user_params->master_unrotation_ratio = 1.0f;
+  user_params->red_outset = 0.0f;
+  user_params->red_unrotation = 0.0f;
+  user_params->green_outset = 0.0f;
+  user_params->green_unrotation = 0.0f;
+  user_params->blue_outset = 0.0f;
+  user_params->blue_unrotation = 0.0f;
 
-  p->base_primaries = DT_AGX_EXPORT_PROFILE;
+  user_params->base_primaries = DT_AGX_EXPORT_PROFILE;
 }
 
 void init_presets(dt_iop_module_so_t *self)
@@ -1960,7 +1959,7 @@ void gui_cleanup(dt_iop_module_t *self)
 void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
                         dt_dev_pixelpipe_t *pipe)
 {
-  const dt_iop_agx_gui_data_t *gui_data= self->gui_data;
+  const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   if (picker == gui_data->range_black_exposure) apply_auto_black_exposure(self);
   else if (picker == gui_data->range_white_exposure) apply_auto_white_exposure(self);
