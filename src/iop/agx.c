@@ -43,8 +43,6 @@ typedef enum dt_iop_agx_base_primaries_t
 // Module parameters struct
 typedef struct dt_iop_agx_user_params_t
 {
-  gboolean log_only;  // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "logarithmic tone mapping only"
-
   // look params
   float look_offset; // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "offset"
   float look_slope; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
@@ -107,8 +105,6 @@ typedef struct dt_iop_agx_gui_data_t
   dt_gui_collapsible_section_t look_section;
   dt_gui_collapsible_section_t graph_section;
   dt_gui_collapsible_section_t advanced_section;
-  GtkWidget* log_only;
-  GtkWidget* curve_box;
   dt_gui_collapsible_section_t primaries_section;
   GtkDrawingArea *graph_drawing_area;
 
@@ -143,7 +139,6 @@ typedef struct dt_iop_agx_gui_data_t
 
 typedef struct curve_and_look_params_t
 {
-  gboolean log_only;
   // shared
   float min_ev;
   float max_ev;
@@ -613,11 +608,7 @@ static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and
     curve_and_look_params->pivot_x = mid_gray_in_log_range;
   }
 
-  if (user_params->log_only)
-  {
-    curve_and_look_params->curve_gamma = log2f(0.18) / log2f(mid_gray_in_log_range);
-  }
-  else if (user_params->auto_gamma)
+  if (user_params->auto_gamma)
   {
     curve_and_look_params->curve_gamma = curve_and_look_params->pivot_x > 0 && user_params->curve_pivot_y_linear > 0
                                              ? log2f(user_params->curve_pivot_y_linear) / log2f(curve_and_look_params->pivot_x)
@@ -628,7 +619,7 @@ static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and
     curve_and_look_params->curve_gamma = user_params->curve_gamma;
   }
 
-  printf("curve_gamma = %f, using auto: %d, log only: %d\n", curve_and_look_params->curve_gamma, user_params->auto_gamma, user_params->log_only);
+  printf("curve_gamma = %f, using auto: %d\n", curve_and_look_params->curve_gamma, user_params->auto_gamma);
 
   curve_and_look_params->pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_y,
                                 user_params->curve_target_display_white_y),
@@ -651,8 +642,6 @@ static void _calculate_log_mapping_params(const dt_iop_agx_user_params_t* user_p
 static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
 {
   curve_and_look_params_t curve_and_look_params;
-
-  curve_and_look_params.log_only = user_params->log_only;
 
   // look
   curve_and_look_params.look_offset = user_params->look_offset;
@@ -791,13 +780,7 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
   for_three_channels(k, aligned(rgb_in_out, transformed_pixel: 16))
   {
     float log_value = _apply_log_encoding(rgb_in_out[k], params->range_in_ev, params->min_ev);
-    if (!params->log_only)
-    {
-      transformed_pixel[k] = _apply_curve(log_value, params);
-    } else
-    {
-      transformed_pixel[k] = log_value;
-    }
+    transformed_pixel[k] = _apply_curve(log_value, params);
   }
 
   _agxLook(transformed_pixel, params, rendering_profile);
@@ -1457,10 +1440,6 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   // Test which widget was changed.
   // If allowing w == NULL, this can be called from gui_update, so that
   // gui configuration adjustments only need to be dealt with once, here.
-  if (gui_data && w == gui_data->log_only)
-  {
-    gtk_widget_set_visible(gui_data->curve_box, !user_params->log_only);
-  }
 
   // Trigger redraw when any parameter changes
   if (gui_data && gui_data->graph_drawing_area) {
@@ -1484,8 +1463,6 @@ void gui_update(dt_iop_module_t *self)
 
   if (gui_data)
   {
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->log_only), user_params->log_only);
-    gtk_widget_set_visible(gui_data->curve_box, !user_params->log_only);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), user_params->auto_gamma);
   }
 
@@ -1660,13 +1637,11 @@ static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t *gu
   GtkWidget *original_self_widget = self->widget;
   self->widget = GTK_WIDGET(parent_box);
 
-  gui_data->log_only = dt_bauhaus_toggle_from_params(self, "log_only");
+  GtkWidget *curve_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(parent_box, curve_box, TRUE, TRUE, 0);
+  self->widget = curve_box;
 
-  gui_data->curve_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(parent_box, gui_data->curve_box, TRUE, TRUE, 0);
-  self->widget = gui_data->curve_box;
-
-  _add_curve_graph(self, gui_data, GTK_BOX(gui_data->curve_box));
+  _add_curve_graph(self, gui_data, GTK_BOX(curve_box));
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "curve parameters")));
 
@@ -1706,7 +1681,7 @@ static void _add_curve_section(dt_iop_module_t * self, dt_iop_agx_gui_data_t *gu
   gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
 
   GtkWidget *advanced_box = _add_advanced_box(self, gui_data);
-  gtk_box_pack_start(GTK_BOX(gui_data->curve_box), advanced_box, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(curve_box), advanced_box, FALSE, FALSE, 0);
 
   self->widget = original_self_widget;
 }
@@ -1830,7 +1805,6 @@ static float _degrees_to_radians(float degrees)
 
 static void _set_neutral_params(dt_iop_agx_user_params_t* user_params)
 {
-  user_params-> log_only = FALSE;
   user_params->look_slope = 1.0f;
   user_params->look_power = 1.0f;
   user_params->look_offset = 0.0f;
@@ -1943,10 +1917,6 @@ void init_presets(dt_iop_module_so_t *self)
   user_params.look_offset = 0.0f;
   user_params.look_saturation = 1.4f;
   dt_gui_presets_add_generic(_("smooth|punchy"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
-
-  _set_neutral_params(&user_params);
-  user_params.log_only = TRUE;
-  dt_gui_presets_add_generic(_("log tone mapper"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
 // GUI cleanup
