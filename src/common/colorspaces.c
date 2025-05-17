@@ -2466,7 +2466,8 @@ void dt_colorspaces_rgb_to_cygm(float *out,
   }
 }
 
-void cmsCIEXYZ_to_xy(const cmsCIEXYZ *const cmsXYZ, float xy[2])
+void cmsCIEXYZ_to_xy(const cmsCIEXYZ *const cmsXYZ,
+                     float xy[2])
 {
   dt_aligned_pixel_t XYZ = { cmsXYZ->X, cmsXYZ->Y, cmsXYZ->Z, 0.f };
   dt_aligned_pixel_t xyY;
@@ -2475,7 +2476,8 @@ void cmsCIEXYZ_to_xy(const cmsCIEXYZ *const cmsXYZ, float xy[2])
   xy[1] = xyY[1];
 }
 
-gboolean dt_colorspaces_get_primaries_and_whitepoint_from_profile(cmsHPROFILE prof, float primaries[3][2],
+gboolean dt_colorspaces_get_primaries_and_whitepoint_from_profile(cmsHPROFILE prof,
+                                                                  float primaries[3][2],
                                                                   float whitepoint[2])
 {
   cmsCIEXYZ *red_color = cmsReadTag(prof, cmsSigRedColorantTag);
@@ -2493,16 +2495,20 @@ gboolean dt_colorspaces_get_primaries_and_whitepoint_from_profile(cmsHPROFILE pr
   return TRUE;
 }
 
-static float _sanitizeY(float y)
+static inline float _sanitizeY(const float y)
 {
-  if (y < 1e-6f && y >= 0)
+  if (y < FLT_EPSILON && y >= 0)
   {
-    y = 1e-6f;
-  } else if (y < 0 && y > -1e-6f)
-  {
-    y = -1e-6f;
+    return FLT_EPSILON;
   }
-  return y;
+  else if (y < 0 && y > -FLT_EPSILON)
+  {
+    return -FLT_EPSILON;
+  }
+  else
+  {
+    return y;
+  }
 }
 
 void dt_make_transposed_matrices_from_primaries_and_whitepoint(const float primaries[3][2],
