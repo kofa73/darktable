@@ -105,7 +105,6 @@ typedef struct dt_iop_agx_gui_data_t
   dt_gui_collapsible_section_t look_section;
   dt_gui_collapsible_section_t graph_section;
   dt_gui_collapsible_section_t advanced_section;
-  dt_gui_collapsible_section_t primaries_section;
   GtkDrawingArea *graph_drawing_area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -1698,7 +1697,7 @@ static GtkWidget* _add_tonemapping_box(dt_iop_module_t *self, dt_iop_agx_gui_dat
   return GTK_WIDGET(tonemapping_box);
 }
 
-static GtkWidget *_add_primaries_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
+static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
 {
   GtkWidget *main_box = self->widget;
 
@@ -1706,11 +1705,6 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self, dt_iop_agx_gui_data_
   self->widget = primaries_box;
 
   // primaries collapsible section
-  dt_gui_new_collapsible_section(&gui_data->primaries_section, "plugins/darkroom/agx/expand_primaries",
-                                 _("primaries"), GTK_BOX(primaries_box), DT_ACTION(self));
-  gtk_widget_set_tooltip_text(gui_data->primaries_section.expander, _("set custom primaries"));
-
-  self->widget = GTK_WIDGET(gui_data->primaries_section.container);
   dt_iop_module_t *sect = DT_IOP_SECTION_FOR_PARAMS(self, N_("primaries"));
 
   GtkWidget *base_primaries_combo = dt_bauhaus_combobox_from_params(self, "base_primaries");
@@ -1791,7 +1785,7 @@ void gui_init(dt_iop_module_t *self)
   gtk_box_pack_start(settings_box, tonemapping_box, FALSE, FALSE, 0);
 
   GtkWidget *page_primaries = dt_ui_notebook_page(gui_data->notebook, N_("primaries"), _("color primaries adjustments"));
-  GtkWidget *primaries_box = _add_primaries_box(self, gui_data);
+  GtkWidget *primaries_box = _add_primaries_box(self);
   gtk_box_pack_start(GTK_BOX(page_primaries), primaries_box, FALSE, FALSE, 0);
 
   self->widget = main_vbox;
