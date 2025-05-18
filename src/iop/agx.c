@@ -12,8 +12,8 @@
 #include "gui/draw.h"
 #include "iop/iop_api.h"
 #include <gtk/gtk.h>
-#include <math.h>             // For math functions
-#include <pango/pangocairo.h> // For text rendering in graph
+#include <math.h>
+#include <pango/pangocairo.h>
 #include <stdlib.h>
 #include "common/math.h"
 #include "gui/gtk.h"
@@ -40,17 +40,16 @@ typedef enum dt_iop_agx_base_primaries_t
   DT_AGX_SRGB = 5,                   // $DESCRIPTION: "sRGB"
 } dt_iop_agx_base_primaries_t;
 
-// Module parameters struct
+// Params exposed on the UI
 typedef struct dt_iop_agx_user_params_t
 {
-  // look params
   float look_offset; // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "offset"
   float look_slope; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
   float look_power; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "power"
   float look_saturation;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "saturation"
   float look_original_hue_mix_ratio; // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "preserve hue"
 
-  // log mapping params
+  // log mapping
   float range_black_relative_exposure;  // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "black relative exposure"
   float range_white_relative_exposure;  // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "white relative exposure"
 
@@ -102,9 +101,6 @@ typedef struct dt_iop_agx_gui_data_t
 {
   GtkWidget* auto_gamma;
   GtkWidget* curve_gamma;
-  dt_gui_collapsible_section_t look_section;
-  dt_gui_collapsible_section_t graph_section;
-  dt_gui_collapsible_section_t advanced_section;
   GtkDrawingArea *graph_drawing_area;
 
   // Cache Pango and Cairo stuff for the graph drawing
@@ -120,20 +116,13 @@ typedef struct dt_iop_agx_gui_data_t
   PangoRectangle ink;
   GtkStyleContext *context;
 
-  // Picker widgets
-  GtkWidget *range_black_picker;
-  GtkWidget *range_white_picker;
+  // Picker and their sliders
   GtkWidget *auto_tune_picker;
-  GtkWidget *pivot_x_picker;
-
-  // Slider widgets for pickers
   GtkWidget *range_black_exposure;
   GtkWidget *range_white_exposure;
+
   GtkWidget *curve_pivot_x_shift;
   GtkWidget *curve_pivot_y_linear;
-
-  GtkNotebook *notebook;
-
 } dt_iop_agx_gui_data_t;
 
 typedef struct curve_and_look_params_t
@@ -246,7 +235,6 @@ void _print_transposed_matrix(const char* name, const dt_colormatrix_t matrix)
   printf("\n\n");
 }
 
-// Helper function to get the dt_colorspaces type from the enum
 static dt_colorspaces_color_profile_type_t _get_base_profile_type_from_enum(const dt_iop_agx_base_primaries_t base_primaries_enum)
 {
   switch(base_primaries_enum)
@@ -343,7 +331,6 @@ static float _min(const dt_aligned_pixel_t pixel)
   return fminf(fminf(pixel[0], pixel[1]), pixel[2]);
 }
 
-// AgX implementation
 static float _luminance(const dt_aligned_pixel_t pixel, const dt_iop_order_iccprofile_info_t *const profile)
 {
   const float lum = dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
@@ -378,8 +365,6 @@ static float _scale(float limit_x, float limit_y, float transition_x, float tran
 
   const float base = dy_to_power * term_b;
   printf("base = %f\n", base);
-
-  // this is t_s or s_s on the chart, what's next?!
 
   float scale_value = powf(base, -1.0f / power);
 
@@ -444,7 +429,7 @@ static float _apply_curve(const float x, const curve_and_look_params_t *curve_pa
   return CLAMPF(result, curve_params->target_black, curve_params->target_white);
 }
 
-static float _agx_sanitise_hue(float hue)
+static float _sanitise_hue(float hue)
 {
   if (hue < 0.0f) hue += 1.0f;
   if (hue >= 1.0f) hue -= 1.0f;
@@ -454,9 +439,8 @@ static float _agx_sanitise_hue(float hue)
 // 'lerp', but take care of the boundary: hue wraps around 1->0
 static float _lerp_hue(float original_hue, float processed_hue, float mix)
 {
-  // can be removed once colorspaces_inline_conversions gets merged
-  original_hue = _agx_sanitise_hue(original_hue);
-  processed_hue = _agx_sanitise_hue(processed_hue);
+  original_hue = _sanitise_hue(original_hue);
+  processed_hue = _sanitise_hue(processed_hue);
 
   const float hue_diff = processed_hue - original_hue;
 
@@ -470,7 +454,7 @@ static float _lerp_hue(float original_hue, float processed_hue, float mix)
   }
 
   float restored_hue = processed_hue + (original_hue - processed_hue) * mix;
-  return _agx_sanitise_hue(restored_hue);
+  return _sanitise_hue(restored_hue);
 }
 
 static float _apply_slope_offset(const float x, const float slope, const float offset)
@@ -498,12 +482,10 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
   const float power = params->look_power;
   const float sat = params->look_saturation;
 
-  // Apply ASC CDL (Slope, Offset, Power) per channel
+  // ASC CDL (Slope, Offset, Power) per channel
   for_three_channels(k, aligned(pixel_in_out: 16))
   {
-    // Apply slope and offset
     const float slope_and_offset_val = _apply_slope_offset(pixel_in_out[k], slope, offset);
-    // Apply power
     pixel_in_out[k] = slope_and_offset_val > 0.0f ? powf(slope_and_offset_val, power) : slope_and_offset_val;
   }
 
@@ -1205,7 +1187,6 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   curve_and_look_params_t curve_params = _calculate_curve_params(user_params);
-  // Calculate current curve parameters
 
   // --- Boilerplate cairo/pango setup ---
   gtk_widget_get_allocation(widget, &gui_data->allocation);
@@ -1513,8 +1494,9 @@ static GtkWidget* _add_look_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gu
 
   GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   self->widget = look_box;
-  dt_gui_new_collapsible_section(&gui_data->look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(look_box), DT_ACTION(self));
-  _add_look_sliders(self, GTK_WIDGET(gui_data->look_section.container));
+  static dt_gui_collapsible_section_t look_section;
+  dt_gui_new_collapsible_section(&look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(look_box), DT_ACTION(self));
+  _add_look_sliders(self, GTK_WIDGET(look_section.container));
 
   self->widget = original_self_widget;
   return look_box;
@@ -1529,9 +1511,10 @@ static void _add_curve_graph(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_d
   gtk_box_pack_start(GTK_BOX(parent_box), graph_box, TRUE, TRUE, 0);
   self->widget = graph_box;
 
-  dt_gui_new_collapsible_section(&gui_data->graph_section, "plugins/darkroom/agx/show_curve", _("show curve"),
+  static dt_gui_collapsible_section_t graph_section;
+  dt_gui_new_collapsible_section(&graph_section, "plugins/darkroom/agx/show_curve", _("show curve"),
                                  GTK_BOX(graph_box), DT_ACTION(self));
-  GtkWidget *graph_container = GTK_WIDGET(gui_data->graph_section.container);
+  GtkWidget *graph_container = GTK_WIDGET(graph_section.container);
   gui_data->graph_drawing_area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
                                                                     0, // Initial height factor
                                                                     "plugins/darkroom/agx/graphheight"));
@@ -1589,9 +1572,10 @@ static GtkWidget* _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t
   GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   self->widget = advanced_box;
 
-  dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
+  static dt_gui_collapsible_section_t advanced_section;
+  dt_gui_new_collapsible_section(&advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
                                  _("advanced"), GTK_BOX(advanced_box), DT_ACTION(self));
-  self->widget = GTK_WIDGET(gui_data->advanced_section.container);
+  self->widget = GTK_WIDGET(advanced_section.container);
 
   // drawing params for the graph
   gui_data->line_height = 0;
@@ -1768,12 +1752,12 @@ void gui_init(dt_iop_module_t *self)
 
   // the notebook
   static dt_action_def_t notebook_def = { };
-  gui_data->notebook = dt_ui_notebook_new(&notebook_def);
-  dt_action_define_iop(self, NULL, N_("page"), GTK_WIDGET(gui_data->notebook), &notebook_def);
-  gtk_box_pack_start(GTK_BOX(main_vbox), GTK_WIDGET(gui_data->notebook), TRUE, TRUE, 0);
+  GtkNotebook *notebook = dt_ui_notebook_new(&notebook_def);
+  dt_action_define_iop(self, NULL, N_("page"), GTK_WIDGET(notebook), &notebook_def);
+  gtk_box_pack_start(GTK_BOX(main_vbox), GTK_WIDGET(notebook), TRUE, TRUE, 0);
 
   // 'settings' page
-  GtkWidget *settings_page = dt_ui_notebook_page(gui_data->notebook, N_("settings"), _("main look and curve settings"));
+  GtkWidget *settings_page = dt_ui_notebook_page(notebook, N_("settings"), _("main look and curve settings"));
   self->widget = settings_page;
 
   GtkBox *settings_box = GTK_BOX(settings_page);
@@ -1784,7 +1768,7 @@ void gui_init(dt_iop_module_t *self)
   GtkWidget *tonemapping_box = _add_tonemapping_box(self, gui_data);
   gtk_box_pack_start(settings_box, tonemapping_box, FALSE, FALSE, 0);
 
-  GtkWidget *page_primaries = dt_ui_notebook_page(gui_data->notebook, N_("primaries"), _("color primaries adjustments"));
+  GtkWidget *page_primaries = dt_ui_notebook_page(notebook, N_("primaries"), _("color primaries adjustments"));
   GtkWidget *primaries_box = _add_primaries_box(self);
   gtk_box_pack_start(GTK_BOX(page_primaries), primaries_box, FALSE, FALSE, 0);
 
