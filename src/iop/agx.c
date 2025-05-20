@@ -99,9 +99,13 @@ typedef struct dt_iop_agx_user_params_t
 
 typedef struct dt_iop_agx_gui_data_t
 {
+  GtkNotebook *notebook;
   GtkWidget* auto_gamma;
   GtkWidget* curve_gamma;
   GtkDrawingArea *graph_drawing_area;
+  dt_gui_collapsible_section_t look_section;
+  dt_gui_collapsible_section_t graph_section;
+  dt_gui_collapsible_section_t advanced_section;
 
   // Cache Pango and Cairo stuff for the graph drawing
   float line_height;
@@ -123,6 +127,8 @@ typedef struct dt_iop_agx_gui_data_t
 
   GtkWidget *curve_pivot_x_shift;
   GtkWidget *curve_pivot_y_linear;
+
+  gboolean curve_tab_enabled;
 } dt_iop_agx_gui_data_t;
 
 typedef struct curve_and_look_params_t
@@ -1494,9 +1500,8 @@ static GtkWidget* _add_look_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gu
 
   GtkWidget *look_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   self->widget = look_box;
-  static dt_gui_collapsible_section_t look_section;
-  dt_gui_new_collapsible_section(&look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(look_box), DT_ACTION(self));
-  _add_look_sliders(self, GTK_WIDGET(look_section.container));
+  dt_gui_new_collapsible_section(&gui_data->look_section, "plugins/darkroom/agx/expand_look_params", _("look"), GTK_BOX(look_box), DT_ACTION(self));
+  _add_look_sliders(self, GTK_WIDGET(gui_data->look_section.container));
 
   self->widget = original_self_widget;
   return look_box;
@@ -1511,10 +1516,9 @@ static void _add_curve_graph(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_d
   gtk_box_pack_start(GTK_BOX(parent_box), graph_box, TRUE, TRUE, 0);
   self->widget = graph_box;
 
-  static dt_gui_collapsible_section_t graph_section;
-  dt_gui_new_collapsible_section(&graph_section, "plugins/darkroom/agx/show_curve", _("show curve"),
+  dt_gui_new_collapsible_section(&gui_data->graph_section, "plugins/darkroom/agx/show_curve", _("show curve"),
                                  GTK_BOX(graph_box), DT_ACTION(self));
-  GtkWidget *graph_container = GTK_WIDGET(graph_section.container);
+  GtkWidget *graph_container = GTK_WIDGET(gui_data->graph_section.container);
   gui_data->graph_drawing_area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
                                                                     0, // Initial height factor
                                                                     "plugins/darkroom/agx/graphheight"));
@@ -1572,10 +1576,9 @@ static GtkWidget* _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t
   GtkWidget *advanced_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   self->widget = advanced_box;
 
-  static dt_gui_collapsible_section_t advanced_section;
-  dt_gui_new_collapsible_section(&advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
+  dt_gui_new_collapsible_section(&gui_data->advanced_section, "plugins/darkroom/agx/expand_curve_advanced",
                                  _("advanced"), GTK_BOX(advanced_box), DT_ACTION(self));
-  self->widget = GTK_WIDGET(advanced_section.container);
+  self->widget = GTK_WIDGET(gui_data->advanced_section.container);
 
   // drawing params for the graph
   gui_data->line_height = 0;
@@ -1750,14 +1753,17 @@ void gui_init(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *gui_data = IOP_GUI_ALLOC(agx);
   GtkWidget *main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
+  gui_data->curve_tab_enabled = dt_conf_get_bool("plugins/darkroom/agx/curve_tab_enabled");
+
   // the notebook
-  static dt_action_def_t notebook_def = { };
-  GtkNotebook *notebook = dt_ui_notebook_new(&notebook_def);
-  dt_action_define_iop(self, NULL, N_("page"), GTK_WIDGET(notebook), &notebook_def);
-  gtk_box_pack_start(GTK_BOX(main_vbox), GTK_WIDGET(notebook), TRUE, TRUE, 0);
+  static dt_action_def_t notebook_def = {};
+  gui_data->notebook = dt_ui_notebook_new(&notebook_def);
+  GtkWidget *notebook_widget = GTK_WIDGET(gui_data->notebook);
+  dt_action_define_iop(self, NULL, N_("page"), notebook_widget, &notebook_def);
+  gtk_box_pack_start(GTK_BOX(main_vbox), notebook_widget, TRUE, TRUE, 0);
 
   // 'settings' page
-  GtkWidget *settings_page = dt_ui_notebook_page(notebook, N_("settings"), _("main look and curve settings"));
+  GtkWidget *settings_page = dt_ui_notebook_page(gui_data->notebook, N_("settings"), _("main look and curve settings"));
   self->widget = settings_page;
 
   GtkBox *settings_box = GTK_BOX(settings_page);
@@ -1768,7 +1774,16 @@ void gui_init(dt_iop_module_t *self)
   GtkWidget *tonemapping_box = _add_tonemapping_box(self, gui_data);
   gtk_box_pack_start(settings_box, tonemapping_box, FALSE, FALSE, 0);
 
-  GtkWidget *page_primaries = dt_ui_notebook_page(notebook, N_("primaries"), _("color primaries adjustments"));
+  if(gui_data->curve_tab_enabled)
+  {
+    GtkWidget *curve_page = dt_ui_notebook_page(gui_data->notebook, N_("curve"), _("detailed curve settings"));
+    self->widget = curve_page;
+    GtkBox *curve_box = GTK_BOX(curve_page);
+    _add_curve_section(self, gui_data, curve_box);
+    gtk_box_pack_start(curve_box, curve_page, FALSE, FALSE, 0);
+  }
+
+  GtkWidget *page_primaries = dt_ui_notebook_page(gui_data->notebook, N_("primaries"), _("color primaries adjustments"));
   GtkWidget *primaries_box = _add_primaries_box(self);
   gtk_box_pack_start(GTK_BOX(page_primaries), primaries_box, FALSE, FALSE, 0);
 
@@ -1781,7 +1796,7 @@ static float _degrees_to_radians(float degrees)
   return degrees * M_PI_F / 180.f;
 }
 
-static void _set_neutral_params(dt_iop_agx_user_params_t* user_params)
+static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
 {
   user_params->look_slope = 1.0f;
   user_params->look_power = 1.0f;
