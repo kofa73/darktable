@@ -127,6 +127,7 @@ typedef struct dt_iop_agx_gui_data_t
   // graph
   GtkAllocation allocation;
   PangoRectangle ink;
+  GtkStyleContext *context;
 
   gboolean curve_tab_enabled;
 } dt_iop_agx_gui_data_t;
@@ -1195,13 +1196,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 // Plot the curve
 static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_module_t *self)
 {
-  // Cache Pango and Cairo stuff for the graph drawing
-  float line_height = 0;
-  float graph_width = 0;
-  float graph_height = 0;
-  int inset = 0;
-  int inner_padding = 0;
-
   dt_iop_agx_user_params_t *user_params = self->params;
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
@@ -1209,7 +1203,7 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
 
   // --- Boilerplate cairo/pango setup ---
   gtk_widget_get_allocation(widget, &gui_data->allocation);
-  gui_data->allocation.height -= DT_RESIZE_HANDLE_SIZE; // Account for resize handle
+  gui_data->allocation.height -= DT_RESIZE_HANDLE_SIZE;
 
   cairo_surface_t *cst =
     dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, gui_data->allocation.width, gui_data->allocation.height);
@@ -1220,7 +1214,7 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
 
   pango_layout_set_font_description(layout, desc);
   pango_cairo_context_set_resolution(pango_layout_get_context(layout), darktable.gui->dpi);
-  GtkStyleContext * context = gtk_widget_get_style_context(widget);
+  gui_data->context = gtk_widget_get_style_context(widget);
 
   char text[256];
 
@@ -1232,21 +1226,21 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
   g_strlcpy(text, "X", sizeof(text));
   pango_layout_set_text(layout, text, -1);
   pango_layout_get_pixel_extents(layout, &gui_data->ink, NULL);
-  line_height = gui_data->ink.height;
+  const float line_height = gui_data->ink.height;
 
   // Set graph dimensions and margins (simplified from filmic)
-  inner_padding = DT_PIXEL_APPLY_DPI(4);
-  inset = inner_padding;
+  const int inner_padding = DT_PIXEL_APPLY_DPI(4);
+  const int inset = inner_padding;
   const float margin_left = 3. * line_height + 2. * inset; // Room for Y labels
   const float margin_bottom = 2. * line_height + 2. * inset; // Room for X labels
   const float margin_top = inset + 0.5 * line_height;
   const float margin_right = inset;
 
-  graph_width = gui_data->allocation.width - margin_right - margin_left;
-  graph_height = gui_data->allocation.height - margin_bottom - margin_top;
+  const float graph_width = gui_data->allocation.width - margin_right - margin_left;
+  const float graph_height = gui_data->allocation.height - margin_bottom - margin_top;
 
   // --- Drawing starts ---
-  gtk_render_background(context, cr, 0, 0, gui_data->allocation.width, gui_data->allocation.height);
+  gtk_render_background(gui_data->context, cr, 0, 0, gui_data->allocation.width, gui_data->allocation.height);
 
   // Translate origin to bottom-left of graph area for easier plotting
   cairo_translate(cr, margin_left, margin_top + graph_height);
@@ -2024,7 +2018,6 @@ void init_presets(dt_iop_module_so_t *self)
   dt_gui_presets_add_generic(_("smooth|punchy"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
-// GUI cleanup
 void gui_cleanup(dt_iop_module_t *self)
 {
    // Nothing specific to clean up beyond default IOP gui alloc
@@ -2054,4 +2047,5 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
     dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
     --darktable.gui->reset;
   }
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
