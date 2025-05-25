@@ -65,9 +65,24 @@ changes (where available).
   what combination of the RGB channels of that pfm file will be used
   for the raster mask.
 
+- Sigmoid module is now the default tonemapper selected for new
+  installation.
+
+- The export module has got a new section multi-preset export which
+  allows to export the selected images with multiple presets in one
+  single export run.
+
 ## UI/UX Improvements
 
-- N/A
+- Replaced the zoom range widget, which controls the number of
+  thumbnails displayed on the thumbnail table, with a spin
+  button. This makes it easier to set the exact value.
+
+- In the 4 ways tab in color balance rgb, ctrl+click now picks the
+  actual color while regular click continues to pick the opposite
+  color. This gives users more flexibility and control when selecting
+  hues.
+
 
 ## Performance Improvements
 
@@ -128,6 +143,8 @@ changes (where available).
 
 - Reduced haze removal visible difference between exports and HQ
   darkroom processing.
+  For some images the algorithm fails to calculate correction
+  parameters, this is reported via control log.
 
 - Lens info is now read from OM-System/Olympus image files taken with
   lenses without electronic data if this info is entered in the
@@ -138,7 +155,7 @@ changes (where available).
 
 - Raster masks got internal improvements and now support the same refinement
   tools as all other masks including details threshold, feathering guide and
-  radius, blurring radius and contrast.
+  radius, blurring radius and contrast. Some UI refinements for rastermasks.
 
 - The highlights module offers a raster mask with information about level above
   clip level.
@@ -146,12 +163,41 @@ changes (where available).
 - Changing orientation (via the flip module) respects changes done in
   crop module.
 
+- The shown dimension while cropping now matches the default export
+  dimension and keeps the exact chosen ratio.
+
 - In the history module item tooltip, fixed the formatting and scaling
   of the changes to match the values as seen in the modules
   themselves.
 
 - Added auto login to the piwigo export module. This can be enabled in
   the security section of the preferences.
+
+- Add 45x35 aspect ratio to the crop module, which is popular on IDs
+  and passports.
+
+- Color assessment conditions: Changed total border width to relative
+  scaling which should work well on small and big screens, independent
+  of physical screen resolution, added pop-up window for
+  parameterization and removed ISO12464 reference.
+
+- Attach export ICC profile to JP2 images.
+
+- Improved visibility of masks in darkroom. This is controlled by the
+  new hidden "darkroom/ui/develop_mask_mix" configuration option.
+
+- Add a new setting to change which images are taken into account for
+  actions: By default, the image under the cursor takes priority. With
+  this parameter enabled, the selected images will take priority, and
+  the image under the cursor will only be taken into account to feed
+  the information modules.
+
+- Added a tag icon on thumbnails to display the list of attached tags
+  when hovering over it.
+
+- In the map view, it is possible to pan the entire track in one of
+  the following ways: by double-clicking on the track segment list, by
+  left-clicking on the list header, or by shortcut option.
 
 ## Bug Fixes
 
@@ -178,6 +224,22 @@ changes (where available).
 
 - Fixed reset button not working in the geotagging module. Also a
   loaded GPX track in the geotagging module is now properly removed.
+
+- Fixed darktable-cli crashing if the darktable database is locked.
+
+- Fixed image not properly layout in the print module after beeing
+  rotated from Lighttable.
+
+- Fixed a bug where the changes in various edit fields are not saved
+  correctly when the field loses the input focus.
+
+- Fixed incorrect reporting of whether a flash was fired in expansion
+  variables $(EXIF.FLASH.ICON) and $(EXIF.FLASH) under certain
+  conditions.
+
+- Fixed the edit style dialog to show all module's duplicates. Also,
+  when creating a new style we don't show the whole history but only
+  the last version of each module.
 
 ## Lua
 

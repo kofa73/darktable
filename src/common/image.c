@@ -863,12 +863,24 @@ void dt_image_update_final_size(const dt_imgid_t imgid)
       }
     }
   }
+  else
+  {
+    // on lighttable, cannot run a pipe, reset to force proper values to be recomputed
+    // later.
+    dt_image_t *imgtmp = dt_image_cache_get(imgid, 'w');
+    if(imgtmp)
+    {
+      imgtmp->final_width = 0;
+      imgtmp->final_height = 0;
+      dt_image_cache_write_release(imgtmp, DT_IMAGE_CACHE_RELAXED);
+    }
+  }
 }
 
 gboolean dt_image_get_final_size(const dt_imgid_t imgid, int *width, int *height)
 {
   if(!dt_is_valid_imgid(imgid)) return TRUE;
-  // get the img strcut
+  // get the img struct
   dt_image_t *timg = dt_image_cache_get(imgid, 'r');
   if(!timg)
   {
