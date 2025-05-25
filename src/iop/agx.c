@@ -806,7 +806,6 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
   --darktable.gui->reset;
 
   gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
-  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 // Apply logic for white point picker
@@ -822,9 +821,6 @@ static void apply_auto_white_exposure(dt_iop_module_t *self)
   ++darktable.gui->reset;
   dt_bauhaus_slider_set(gui_data->white_exposure_picker, user_params->range_white_relative_exposure);
   --darktable.gui->reset;
-
-  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
-  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 // Apply logic for auto-tuning both black and white points
@@ -846,9 +842,6 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
   dt_bauhaus_slider_set(gui_data->black_exposure_picker, user_params->range_black_relative_exposure);
   dt_bauhaus_slider_set(gui_data->white_exposure_picker, user_params->range_white_relative_exposure);
   --darktable.gui->reset;
-
-  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
-  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 // Apply logic for pivot x picker
@@ -912,10 +905,6 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
     dt_bauhaus_slider_set(gui_data->curve_pivot_y_linear_curve_page, user_params->curve_pivot_y_linear);
   }
   --darktable.gui->reset;
-
-  // Redraw and add history
-  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
-  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 void _print_curve(const curve_and_look_params_t *curve_params)
@@ -2048,5 +2037,6 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
     dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
     --darktable.gui->reset;
   }
+  gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }

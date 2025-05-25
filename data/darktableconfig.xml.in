@@ -3080,6 +3080,13 @@
     <longdescription>height of color balance rgb graph in per cent</longdescription>
   </dtconfig>
   <dtconfig>
+    <name>plugins/darkroom/agx/graphheight</name>
+    <type min="100" max="300">int</type>
+    <default>200</default>
+    <shortdescription>height of agx graph in per cent</shortdescription>
+    <longdescription>height of agx graph in per cent</longdescription>
+  </dtconfig>
+  <dtconfig>
     <name>plugins/darkroom/histogram/mode</name>
     <type>
       <enum>
