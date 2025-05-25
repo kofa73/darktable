@@ -72,29 +72,29 @@ typedef struct dt_iop_agx_user_params_t
   // range_black_relative_exposure : range_white_relative_exposure
   // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
   float curve_gamma;                // $MIN: 0.01 $MAX: 100.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
-  gboolean auto_gamma;  // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "keep the pivot on the identity line"
+  gboolean auto_gamma;  // $MIN: 0 $MAX: 1 $DEFAULT: 1 $DESCRIPTION: "keep the pivot on the identity line"
   // t_ly
   float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
   float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
 
-  // custom primaries
+  // custom primaries; 30 degrees = 0.5236 radian for rotation
   dt_iop_agx_base_primaries_t base_primaries; // $DEFAULT: DT_AGX_EXPORT_PROFILE $DESCRIPTION: "base primaries"
   float red_inset;        // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation"
-  float red_rotation;     // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "red rotation"
+  float red_rotation;     // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "red rotation"
   float green_inset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green attenuation"
-  float green_rotation;   // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "green rotation"
+  float green_rotation;   // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "green rotation"
   float blue_inset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation"
-  float blue_rotation;    // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
+  float blue_rotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
 
   float master_outset_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "recover purity"
   float master_unrotation_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master rotation reversal"
   float red_outset;        // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation reversal"
-  float red_unrotation;     // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "red rotation reversal"
+  float red_unrotation;     // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "red rotation reversal"
   float green_outset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green attenuation reversal"
-  float green_unrotation;   // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "green rotation reversal"
+  float green_unrotation;   // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "green rotation reversal"
   float blue_outset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation reversal"
-  float blue_unrotation;    // $MIN: -0.4  $MAX: 0.4  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation reversal"
+  float blue_unrotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation reversal"
 } dt_iop_agx_user_params_t;
 
 typedef struct dt_iop_agx_gui_data_t
@@ -1920,7 +1920,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
   user_params->curve_shoulder_power = 1.5;
   user_params->curve_target_display_black_y = 0.0;
   user_params->curve_target_display_white_y = 1.0;
-  user_params->auto_gamma = FALSE;
+  user_params->auto_gamma = TRUE;
   user_params->curve_gamma = 2.2;
   user_params->curve_pivot_x_shift = 0.0;
   user_params->curve_pivot_y_linear = 0.18;
@@ -1965,6 +1965,7 @@ void init_presets(dt_iop_module_so_t *self)
 
   // AgX primaries settings from Eary_Chow
   // https://discuss.pixls.us/t/blender-agx-in-darktable-proof-of-concept/48697/1018
+  user_params.auto_gamma = FALSE; // uses a pre-configured gamma
   user_params.red_inset = 0.32965205f;
   user_params.green_inset = 0.28051336f;
   user_params.blue_inset = 0.12475368f;
