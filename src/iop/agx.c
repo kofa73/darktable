@@ -1420,7 +1420,6 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
   const dt_iop_agx_user_params_t *user_params = self->params;
 
-
   if(gui_data->curve_tab_enabled)
   {
     // --- START MANUAL SYNC ---
@@ -1482,6 +1481,12 @@ void gui_update(dt_iop_module_t *self)
   if (gui_data)
   {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), user_params->auto_gamma);
+    if (user_params->auto_gamma) {
+      curve_and_look_params_t curve_and_look_params;
+      _calculate_log_mapping_params(self->params, &curve_and_look_params);
+      _adjust_pivot(self->params, &curve_and_look_params);
+      dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
+    }
   }
 
   // Ensure the graph is drawn initially
@@ -1879,8 +1884,6 @@ void gui_init(dt_iop_module_t *self)
   }
 
   _create_primaries_page(self, gui_data);
-
-
 
   self->widget = main_vbox;
   gui_update(self);
