@@ -16,7 +16,6 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -86,7 +85,7 @@ typedef struct dt_rasterfile_cache_t
 
 const char *name()
 {
-  return _("raster mask import");
+  return _("external raster masks");
 }
 
 const char *aliases()
@@ -97,7 +96,7 @@ const char *aliases()
 const char **description(dt_iop_module_t *self)
 {
   return dt_iop_set_description(self,
-      _("import PFM files to be used as raster masks"),
+      _("read PFM files recorded for use as raster masks"),
       _("corrective or creative"),
       _("linear, raw, scene-referred"),
       _("linear, raw"),
@@ -588,7 +587,7 @@ void gui_init(dt_iop_module_t *self)
 
   g->fbutton = dtgtk_button_new(dtgtk_cairo_paint_directory, CPF_NONE, NULL);
   gtk_widget_set_name(g->fbutton, "non-flat");
-  gtk_widget_set_tooltip_text(g->fbutton, _("select a PFM file to be advertized as a raster mask,\n"
+  gtk_widget_set_tooltip_text(g->fbutton, _("select the PFM file recorded as a raster mask,\n"
       "CAUTION: path must be set in preferences/processing before choosing"));
   g_signal_connect(G_OBJECT(g->fbutton), "clicked", G_CALLBACK(_fbutton_clicked), self);
 
