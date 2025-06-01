@@ -74,9 +74,9 @@ typedef struct dt_iop_agx_user_params_t
   float curve_gamma;                // $MIN: 0.01 $MAX: 100.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
   gboolean auto_gamma;  // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "keep the pivot on the identity line"
   // t_ly
-  float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 0.5 $DEFAULT: 0.0 $DESCRIPTION: "target black"
+  float curve_target_display_black_percent;     // $MIN: 0.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
-  float curve_target_display_white_y;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
+  float curve_target_display_white_percent;     // $MIN: 20.0 $MAX: 100.0 $DEFAULT: 100.0 $DESCRIPTION: "target white"
 
   // custom primaries; 30 degrees = 0.5236 radian for rotation
   dt_iop_agx_base_primaries_t base_primaries; // $DEFAULT: DT_AGX_EXPORT_PROFILE $DESCRIPTION: "base primaries"
@@ -610,8 +610,8 @@ static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and
 
   printf("curve_gamma = %f, using auto: %d\n", curve_and_look_params->curve_gamma, user_params->auto_gamma);
 
-  curve_and_look_params->pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_y,
-                                user_params->curve_target_display_white_y),
+  curve_and_look_params->pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_percent / 100.0,
+                                user_params->curve_target_display_white_percent / 100.0),
                          1.0f / curve_and_look_params->curve_gamma);
 
   printf("pivot(%f, %f) at gamma = %f, curve_pivot_y_linear = %f\n", curve_and_look_params->pivot_x, curve_and_look_params->pivot_y, curve_and_look_params->curve_gamma,
@@ -647,19 +647,18 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   _adjust_pivot(user_params, &curve_and_look_params);
 
   // avoid range altering slope - 16.5 EV is the default AgX range; keep the meaning of slope
-  // new Blender defaults: 20 EV range
   curve_and_look_params.slope = user_params->curve_contrast_around_pivot * (curve_and_look_params.range_in_ev / 16.5f);
-  // params.slope = user_params->curve_contrast_around_pivot * (params.range_in_ev / 20.0f);
   printf("scaled slope = %f from user_contrast_around_pivot = %f\n", curve_and_look_params.slope, user_params->curve_contrast_around_pivot);
 
   // toe
-  curve_and_look_params.target_black = user_params->curve_target_display_black_y;
+  curve_and_look_params.target_black = powf(user_params->curve_target_display_black_percent / 100.0f, 1.0f / curve_and_look_params.curve_gamma);
   printf("target_black = %f\n", curve_and_look_params.target_black);
   curve_and_look_params.toe_power = user_params->curve_toe_power;
   printf("toe_power = %f\n", curve_and_look_params.toe_power);
 
-  // length of (0->pivot_x) is just pivot_x; we take the portion specified using the percentage...
-  const float dx_linear_below_pivot = curve_and_look_params.pivot_x * user_params->curve_linear_percent_below_pivot / 100.0f;
+  const float remaining_y_below_pivot = curve_and_look_params.pivot_y - curve_and_look_params.target_black;
+  const float toe_length_y = remaining_y_below_pivot * user_params->curve_linear_percent_below_pivot  / 100.0f;
+  const float dx_linear_below_pivot = toe_length_y / curve_and_look_params.slope;
   // ...and subtract it from pivot_x to get the x coordinate where the linear section joins the toe
   curve_and_look_params.toe_transition_x = curve_and_look_params.pivot_x - dx_linear_below_pivot;
   printf("toe_transition_x = %f\n", curve_and_look_params.toe_transition_x);
@@ -700,14 +699,14 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   printf("intercept = %f\n", curve_and_look_params.intercept);
 
   // shoulder
-  curve_and_look_params.target_white = user_params->curve_target_display_white_y;
+  curve_and_look_params.target_white = powf(user_params->curve_target_display_white_percent / 100.0, 1.0f / curve_and_look_params.curve_gamma);
   printf("target_white = %f\n", curve_and_look_params.target_white);
-  // distance between pivot_x and x = 1, times portion of linear section
-  const float shoulder_x_from_pivot_x = (1 - curve_and_look_params.pivot_x) * user_params->curve_linear_percent_above_pivot / 100.0f;
-  curve_and_look_params.shoulder_transition_x = curve_and_look_params.pivot_x + shoulder_x_from_pivot_x;
+  const float remaining_y_above_pivot = curve_and_look_params.target_white - curve_and_look_params.pivot_y;
+  const float shoulder_length_y = remaining_y_above_pivot * user_params->curve_linear_percent_above_pivot / 100.0f;
+  const float dx_linear_above_pivot = shoulder_length_y / curve_and_look_params.slope;
+  curve_and_look_params.shoulder_transition_x = curve_and_look_params.pivot_x + dx_linear_above_pivot;
   printf("shoulder_transition_x = %f\n", curve_and_look_params.shoulder_transition_x);
-  const float shoulder_y_above_pivot_y = curve_and_look_params.slope * shoulder_x_from_pivot_x;
-  curve_and_look_params.shoulder_transition_y = curve_and_look_params.pivot_y + shoulder_y_above_pivot_y;
+  curve_and_look_params.shoulder_transition_y = curve_and_look_params.pivot_y + shoulder_length_y;
   printf("shoulder_transition_y = %f\n", curve_and_look_params.shoulder_transition_y);
   const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - curve_and_look_params.shoulder_transition_x); // dx to 0, avoid division by 0 later
   const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.target_white - curve_and_look_params.shoulder_transition_y);
@@ -1090,8 +1089,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   printf("curve_linear_percent_above_pivot = %f\n", user_params->curve_linear_percent_above_pivot);
   printf("curve_toe_power = %f\n", user_params->curve_toe_power);
   printf("curve_shoulder_power = %f\n", user_params->curve_shoulder_power);
-  printf("curve_target_display_black_y = %f\n", user_params->curve_target_display_black_y);
-  printf("curve_target_display_white_y = %f\n", user_params->curve_target_display_white_y);
+  printf("curve_target_display_black_percent = %f\n", user_params->curve_target_display_black_percent);
+  printf("curve_target_display_white_percent = %f\n", user_params->curve_target_display_white_percent);
 
   // Calculate curve parameters once
   const curve_and_look_params_t curve_params = _calculate_curve_params(user_params);
@@ -1652,9 +1651,11 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   gtk_widget_set_tooltip_text(slider, _("toe length"));
 
   // Toe intersection point
-  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_y");
+  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_percent");
+  dt_bauhaus_slider_set_digits(slider, 4);
+  dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("toe intersection point"));
+  gtk_widget_set_tooltip_text(slider, _("raise for a faded look"));
 
   // Shoulder length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
@@ -1662,9 +1663,11 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   gtk_widget_set_tooltip_text(slider, _("shoulder length"));
 
   // Shoulder intersection point
-  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_y");
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("shoulder intersection point"));
+  slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_percent");
+  dt_bauhaus_slider_set_soft_range(slider, 50.0f, 100.0f);
+  dt_bauhaus_slider_set_digits(slider, 4);
+  dt_bauhaus_slider_set_format(slider, "%");
+  gtk_widget_set_tooltip_text(slider, _("display white"));
 
   // curve_gamma
   gui_data->auto_gamma = dt_bauhaus_toggle_from_params(self, "auto_gamma");
@@ -1895,8 +1898,8 @@ static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
   user_params->curve_linear_percent_below_pivot = 0.0;
   user_params->curve_toe_power = 1.5;
   user_params->curve_shoulder_power = 1.5;
-  user_params->curve_target_display_black_y = 0.0;
-  user_params->curve_target_display_white_y = 1.0;
+  user_params->curve_target_display_black_percent = 0.0;
+  user_params->curve_target_display_white_percent = 100.0;
   user_params->auto_gamma = FALSE;
   user_params->curve_gamma = 2.2;
   user_params->curve_pivot_x_shift = 0.0;
