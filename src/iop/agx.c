@@ -72,11 +72,11 @@ typedef struct dt_iop_agx_user_params_t
   // range_black_relative_exposure : range_white_relative_exposure
   // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
   float curve_gamma;                // $MIN: 0.01 $MAX: 100.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
-  gboolean auto_gamma;  // $MIN: 0 $MAX: 1 $DEFAULT: 1 $DESCRIPTION: "keep the pivot on the identity line"
+  gboolean auto_gamma;  // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "keep the pivot on the identity line"
   // t_ly
-  float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
+  float curve_target_display_black_y;     // $MIN: 0.0 $MAX: 0.5 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
-  float curve_target_display_white_y;     // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
+  float curve_target_display_white_y;     // $MIN: 0.5 $MAX: 1.0 $DEFAULT: 1.0 $DESCRIPTION: "target white"
 
   // custom primaries; 30 degrees = 0.5236 radian for rotation
   dt_iop_agx_base_primaries_t base_primaries; // $DEFAULT: DT_AGX_EXPORT_PROFILE $DESCRIPTION: "base primaries"
@@ -97,6 +97,15 @@ typedef struct dt_iop_agx_user_params_t
   float blue_unrotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation reversal"
 } dt_iop_agx_user_params_t;
 
+typedef struct dt_iop_basic_curve_controls_t
+{
+  GtkWidget *curve_pivot_x_shift;
+  GtkWidget *curve_pivot_y_linear;
+  GtkWidget *curve_contrast_around_pivot;
+  GtkWidget *curve_toe_power;
+  GtkWidget *curve_shoulder_power;
+} dt_iop_basic_curve_controls_t;
+
 typedef struct dt_iop_agx_gui_data_t
 {
   GtkNotebook *notebook;
@@ -113,16 +122,8 @@ typedef struct dt_iop_agx_gui_data_t
   GtkWidget *white_exposure_picker;
 
   // the duplicated curve controls that appear on both the 'settings' and on the 'curve' page
-  GtkWidget *curve_pivot_x_shift_settings_page;
-  GtkWidget *curve_pivot_x_shift_curve_page;
-  GtkWidget *curve_pivot_y_linear_settings_page;
-  GtkWidget *curve_pivot_y_linear_curve_page;
-  GtkWidget *curve_contrast_around_pivot_settings_page;
-  GtkWidget *curve_contrast_around_pivot_curve_page;
-  GtkWidget *curve_toe_power_settings_page;
-  GtkWidget *curve_toe_power_curve_page;
-  GtkWidget *curve_shoulder_power_settings_page;
-  GtkWidget *curve_shoulder_power_curve_page;
+  dt_iop_basic_curve_controls_t basic_curve_controls_settings_page;
+  dt_iop_basic_curve_controls_t basic_curve_controls_curve_page;
 
   // graph
   GtkAllocation allocation;
@@ -375,8 +376,8 @@ static float _scale(float limit_x, float limit_y, float transition_x, float tran
 
   float scale_value = powf(base, -1.0f / power);
 
-  scale_value = fminf(1e6, scale_value);
-  scale_value = fmaxf(-1e6, scale_value);
+  scale_value = fminf(1e9, scale_value);
+  scale_value = fmaxf(-1e9, scale_value);
 
   printf("scale_value = %f\n", scale_value);
 
@@ -897,12 +898,12 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
 
   // Update the slider visually
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(gui_data->curve_pivot_x_shift_settings_page, user_params->curve_pivot_x_shift);
-  dt_bauhaus_slider_set(gui_data->curve_pivot_y_linear_settings_page, user_params->curve_pivot_y_linear);
+  dt_bauhaus_slider_set(gui_data->basic_curve_controls_settings_page.curve_pivot_x_shift, user_params->curve_pivot_x_shift);
+  dt_bauhaus_slider_set(gui_data->basic_curve_controls_settings_page.curve_pivot_y_linear, user_params->curve_pivot_y_linear);
   if (gui_data->curve_tab_enabled)
   {
-    dt_bauhaus_slider_set(gui_data->curve_pivot_x_shift_curve_page, user_params->curve_pivot_x_shift);
-    dt_bauhaus_slider_set(gui_data->curve_pivot_y_linear_curve_page, user_params->curve_pivot_y_linear);
+    dt_bauhaus_slider_set(gui_data->basic_curve_controls_curve_page.curve_pivot_x_shift, user_params->curve_pivot_x_shift);
+    dt_bauhaus_slider_set(gui_data->basic_curve_controls_curve_page.curve_pivot_y_linear, user_params->curve_pivot_y_linear);
   }
   --darktable.gui->reset;
 }
@@ -1437,15 +1438,16 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
     dt_bauhaus_slider_set(widget1, dt_bauhaus_slider_get(widget2));                                               \
   }
 
-      SYNC_SLIDER("curve_pivot_x_shift", gui_data->curve_pivot_x_shift_settings_page,
-                  gui_data->curve_pivot_x_shift_curve_page);
-      SYNC_SLIDER("curve_pivot_y_linear", gui_data->curve_pivot_y_linear_settings_page,
-                  gui_data->curve_pivot_y_linear_curve_page);
-      SYNC_SLIDER("curve_contrast_around_pivot", gui_data->curve_contrast_around_pivot_settings_page,
-                  gui_data->curve_contrast_around_pivot_curve_page);
-      SYNC_SLIDER("curve_toe_power", gui_data->curve_toe_power_settings_page, gui_data->curve_toe_power_curve_page);
-      SYNC_SLIDER("curve_shoulder_power", gui_data->curve_shoulder_power_settings_page,
-                  gui_data->curve_shoulder_power_curve_page);
+      SYNC_SLIDER("curve_pivot_x_shift", gui_data->basic_curve_controls_settings_page.curve_pivot_x_shift,
+                  gui_data->basic_curve_controls_curve_page.curve_pivot_x_shift);
+      SYNC_SLIDER("curve_pivot_y_linear", gui_data->basic_curve_controls_settings_page.curve_pivot_y_linear,
+      gui_data->basic_curve_controls_curve_page.curve_pivot_y_linear);
+      SYNC_SLIDER("curve_contrast_around_pivot", gui_data->basic_curve_controls_settings_page.curve_contrast_around_pivot,
+                  gui_data->basic_curve_controls_curve_page.curve_contrast_around_pivot);
+      SYNC_SLIDER("curve_toe_power", gui_data->basic_curve_controls_settings_page.curve_toe_power,
+                  gui_data->basic_curve_controls_curve_page.curve_toe_power);
+      SYNC_SLIDER("curve_shoulder_power", gui_data->basic_curve_controls_settings_page.curve_shoulder_power,
+                  gui_data->basic_curve_controls_curve_page.curve_shoulder_power);
 
 #undef SYNC_SLIDER
 
@@ -1495,6 +1497,44 @@ void gui_update(dt_iop_module_t *self)
   }
 }
 
+static void _add_basic_curve_controls(
+  dt_iop_module_t *self,
+  dt_iop_basic_curve_controls_t *controls
+  )
+{
+  GtkWidget* slider;
+
+  // curve_pivot_x_shift with picker
+  slider = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
+  controls->curve_pivot_x_shift = slider;
+  dt_bauhaus_slider_set_soft_range(slider, -0.4f, 0.4f);
+  gtk_widget_set_tooltip_text(slider, _("Pivot x shift towards black(-) or white(+)"));
+
+  // curve_pivot_y_linear
+  slider = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
+  controls->curve_pivot_y_linear = slider;
+  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
+  gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
+
+  // curve_contrast_around_pivot
+  slider = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
+  controls->curve_contrast_around_pivot = slider;
+  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
+
+  // curve_toe_power
+  slider = dt_bauhaus_slider_from_params(self, "curve_toe_power");
+  controls->curve_toe_power = slider;
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("contrast in shadows"));
+
+  // curve_shoulder_power
+  slider = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
+  controls->curve_shoulder_power = slider;
+  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
+  gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
+}
+
 static void _add_basic_curve_controls_settings_page(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
 {
   GtkWidget *parent = self->widget;
@@ -1505,69 +1545,14 @@ static void _add_basic_curve_controls_settings_page(dt_iop_module_t *self, dt_io
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "basic curve parameters")));
 
-  GtkWidget *slider;
-
-  gui_data->curve_pivot_x_shift_settings_page = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
-  slider = gui_data->curve_pivot_x_shift_settings_page;
-  dt_bauhaus_slider_set_soft_range(slider, -0.4f, 0.4f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot x shift towards black(-) or white(+)"));
-
-  gui_data->curve_pivot_y_linear_settings_page = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
-  slider = gui_data->curve_pivot_y_linear_settings_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 0.5f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
-
-  gui_data->curve_contrast_around_pivot_settings_page = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
-  slider = gui_data->curve_contrast_around_pivot_settings_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
-
-  gui_data->curve_toe_power_settings_page = dt_bauhaus_slider_from_params(self, "curve_toe_power");
-  slider = gui_data->curve_toe_power_settings_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("contrast in shadows"));
-
-  gui_data->curve_shoulder_power_settings_page = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
-  slider = gui_data->curve_shoulder_power_settings_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
+  _add_basic_curve_controls(self, &gui_data->basic_curve_controls_settings_page);
 
   self->widget = parent;
 }
 
 static void _add_basic_curve_controls_curve_page(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_data)
 {
-  GtkWidget* slider;
-
-  // curve_pivot_x_shift with picker
-  gui_data->curve_pivot_x_shift_curve_page = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
-  slider = gui_data->curve_pivot_x_shift_curve_page;
-  dt_bauhaus_slider_set_soft_range(slider, -0.4f, 0.4f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot x shift towards black(-) or white(+)"));
-
-  // curve_pivot_y_linear
-  gui_data->curve_pivot_y_linear_curve_page = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
-  slider = gui_data->curve_pivot_y_linear_curve_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.0f, 0.5f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
-
-  // curve_contrast_around_pivot
-  gui_data->curve_contrast_around_pivot_curve_page = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
-  slider = gui_data->curve_contrast_around_pivot_curve_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
-
-  // curve_toe_power
-  gui_data->curve_toe_power_curve_page = dt_bauhaus_slider_from_params(self, "curve_toe_power");
-  slider = gui_data->curve_toe_power_curve_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("contrast in shadows"));
-
-  // curve_shoulder_power
-  gui_data->curve_shoulder_power_curve_page = dt_bauhaus_slider_from_params(self, "curve_shoulder_power");
-  slider = gui_data->curve_shoulder_power_curve_page;
-  dt_bauhaus_slider_set_soft_range(slider, 0.2f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("contrast in highlights"));
+  _add_basic_curve_controls(self, &gui_data->basic_curve_controls_curve_page);
 }
 
 static void _add_look_sliders(dt_iop_module_t *self, GtkWidget *parent_widget)
@@ -1912,7 +1897,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
   user_params->curve_shoulder_power = 1.5;
   user_params->curve_target_display_black_y = 0.0;
   user_params->curve_target_display_white_y = 1.0;
-  user_params->auto_gamma = TRUE;
+  user_params->auto_gamma = FALSE;
   user_params->curve_gamma = 2.2;
   user_params->curve_pivot_x_shift = 0.0;
   user_params->curve_pivot_y_linear = 0.18;
@@ -2025,7 +2010,8 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
   if (picker == gui_data->black_exposure_picker) apply_auto_black_exposure(self);
   else if (picker == gui_data->white_exposure_picker) apply_auto_white_exposure(self);
   else if (picker == gui_data->range_exposure_picker) apply_auto_tune_exposure(self);
-  else if (picker == gui_data->curve_pivot_x_shift_settings_page || (gui_data->curve_tab_enabled && picker == gui_data->curve_pivot_x_shift_curve_page))
+  else if (picker == gui_data->basic_curve_controls_settings_page.curve_pivot_x_shift ||
+    (gui_data->curve_tab_enabled && picker == gui_data->basic_curve_controls_curve_page.curve_pivot_x_shift))
   {
     apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
   }
