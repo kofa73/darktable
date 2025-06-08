@@ -1954,22 +1954,12 @@ static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
 
 void init_presets(dt_iop_module_so_t *self)
 {
-  const char *workflow = dt_conf_get_string_const("plugins/darkroom/workflow");
-  const gboolean auto_apply_agx = strcmp(workflow, "scene-referred (agx)") == 0;
+  // auto-applied scene-referred default
+  self->pref_based_presets = TRUE;
 
   dt_iop_agx_user_params_t user_params = { 0 };
 
   _set_neutral_params(&user_params);
-
-  if (auto_apply_agx)
-  {
-    dt_gui_presets_add_generic(_("scene-referred default"), self->op, self->version(), &user_params, sizeof(dt_iop_agx_user_params_t), 1,
-                               DEVELOP_BLEND_CS_RGB_SCENE);
-
-    dt_gui_presets_update_format(_("scene-referred default"), self->op, self->version(), FOR_RAW | FOR_MATRIX);
-
-    dt_gui_presets_update_autoapply(_("scene-referred default"), self->op, self->version(), TRUE);
-  }
 
   // AgX primaries settings from Eary_Chow
   // https://discuss.pixls.us/t/blender-agx-in-darktable-proof-of-concept/48697/1018
@@ -1991,7 +1981,15 @@ void init_presets(dt_iop_module_so_t *self)
   user_params.master_unrotation_ratio = 1.0f;
   user_params.base_primaries = DT_AGX_REC2020;
 
+  const char *workflow = dt_conf_get_string_const("plugins/darkroom/workflow");
+  const gboolean auto_apply_agx = strcmp(workflow, "scene-referred (agx)") == 0;
+
   dt_gui_presets_add_generic(_("blender-like|base"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  if (auto_apply_agx)
+  {
+    dt_gui_presets_update_format(BUILTIN_PRESET("blender-like|base"), self->op, self->version(), FOR_RAW | FOR_MATRIX);
+    dt_gui_presets_update_autoapply(BUILTIN_PRESET("blender-like|base"), self->op, self->version(), TRUE);
+  }
 
   // Punchy preset
   user_params.look_power = 1.35f;
