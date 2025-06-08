@@ -1725,6 +1725,14 @@ static void _add_exposure_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   // Create section label
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "Input exposure range")));
 
+  // white point slider and picker
+  gui_data->white_exposure_picker
+      = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
+                            dt_bauhaus_slider_from_params(self, "range_white_relative_exposure"));
+  dt_bauhaus_slider_set_soft_range(gui_data->white_exposure_picker, 1.0f, 20.0f);
+  dt_bauhaus_slider_set_format(gui_data->white_exposure_picker, _(" EV"));
+  gtk_widget_set_tooltip_text(gui_data->white_exposure_picker, _("relative exposure above mid-grey (white point)"));
+
   // black point slider and picker
   gui_data->black_exposure_picker
       = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
@@ -1732,14 +1740,6 @@ static void _add_exposure_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   dt_bauhaus_slider_set_soft_range(gui_data->black_exposure_picker, -20.0f, -1.0f);
   dt_bauhaus_slider_set_format(gui_data->black_exposure_picker, _(" EV"));
   gtk_widget_set_tooltip_text(gui_data->black_exposure_picker, _("relative exposure below mid-grey (black point)"));
-
-  // white point slider associate picker
-  gui_data->white_exposure_picker
-      = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE,
-                            dt_bauhaus_slider_from_params(self, "range_white_relative_exposure"));
-  dt_bauhaus_slider_set_soft_range(gui_data->white_exposure_picker, 1.0f, 20.0f);
-  dt_bauhaus_slider_set_format(gui_data->white_exposure_picker, _(" EV"));
-  gtk_widget_set_tooltip_text(gui_data->white_exposure_picker, _("relative exposure above mid-grey (white point)"));
 
   // Dynamic range scaling
   gui_data->security_factor = dt_bauhaus_slider_from_params(self, "security_factor");
