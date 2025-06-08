@@ -52,6 +52,7 @@ typedef struct dt_iop_agx_user_params_t
   // log mapping
   float range_black_relative_exposure;  // $MIN: -20.0 $MAX: -0.1 $DEFAULT: -10 $DESCRIPTION: "black relative exposure"
   float range_white_relative_exposure;  // $MIN: 0.1 $MAX: 20 $DEFAULT: 6.5 $DESCRIPTION: "white relative exposure"
+  float security_factor;                // $MIN: -50 $MAX: 200 $DEFAULT: 10.0 $DESCRIPTION: "dynamic range scaling"
 
   // curve params - comments indicate the original variables from https://www.desmos.com/calculator/yrysofmx8h
   // Corresponds to p_x, but not directly -- allows shifting the default 0.18 towards black or white relative exposure
@@ -120,6 +121,7 @@ typedef struct dt_iop_agx_gui_data_t
   GtkWidget *range_exposure_picker;
   GtkWidget *black_exposure_picker;
   GtkWidget *white_exposure_picker;
+  GtkWidget *security_factor;
 
   // the duplicated curve controls that appear on both the 'settings' and on the 'curve' page
   dt_iop_basic_curve_controls_t basic_curve_controls_settings_page;
@@ -799,7 +801,8 @@ static void apply_auto_black_exposure(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   const float black_norm = _min(self->picked_color_min);
-  user_params->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+  user_params->range_black_relative_exposure
+      = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f) * (1.0f + user_params->security_factor / 100.0f);
 
   ++darktable.gui->reset;
   dt_bauhaus_slider_set(gui_data->black_exposure_picker, user_params->range_black_relative_exposure);
@@ -816,7 +819,8 @@ static void apply_auto_white_exposure(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   const float white_norm = _max(self->picked_color_max);
-  user_params->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+  user_params->range_white_relative_exposure
+      = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f) * (1.0f + user_params->security_factor / 100.0f);
 
   ++darktable.gui->reset;
   dt_bauhaus_slider_set(gui_data->white_exposure_picker, user_params->range_white_relative_exposure);
@@ -832,11 +836,13 @@ static void apply_auto_tune_exposure(dt_iop_module_t *self)
 
   // Black point
   const float black_norm = _min(self->picked_color_min);
-  user_params->range_black_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f);
+  user_params->range_black_relative_exposure
+      = CLAMPF(log2f(fmaxf(_epsilon, black_norm) / 0.18f), -20.0f, -0.1f) * (1.0f + user_params->security_factor / 100.0f);
 
   // White point
   const float white_norm = _max(self->picked_color_max);
-  user_params->range_white_relative_exposure = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f);
+  user_params->range_white_relative_exposure
+      = CLAMPF(log2f(fmaxf(_epsilon, white_norm) / 0.18f), 0.1f, 20.0f) * (1.0f + user_params->security_factor / 100.0f);
 
   ++darktable.gui->reset;
   dt_bauhaus_slider_set(gui_data->black_exposure_picker, user_params->range_black_relative_exposure);
@@ -1417,8 +1423,22 @@ void cleanup(dt_iop_module_t *self)
 
 void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
-  const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
-  const dt_iop_agx_user_params_t *user_params = self->params;
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
+  dt_iop_agx_user_params_t *user_params = self->params;
+
+  if (w == gui_data->security_factor)
+  {
+    darktable.gui->reset++;
+    float prev = *(float *)previous;
+    const float ratio = (user_params->security_factor - prev) / (prev + 100.0f);
+
+    user_params->range_black_relative_exposure *= (1.0f + ratio);
+    user_params->range_white_relative_exposure *= (1.0f + ratio);
+
+    dt_bauhaus_slider_set(gui_data->black_exposure_picker, user_params->range_black_relative_exposure);
+    dt_bauhaus_slider_set(gui_data->white_exposure_picker, user_params->range_white_relative_exposure);
+    darktable.gui->reset--;
+  }
 
   if(gui_data->curve_tab_enabled)
   {
@@ -1721,6 +1741,13 @@ static void _add_exposure_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   dt_bauhaus_slider_set_format(gui_data->white_exposure_picker, _(" EV"));
   gtk_widget_set_tooltip_text(gui_data->white_exposure_picker, _("relative exposure above mid-grey (white point)"));
 
+  // Dynamic range scaling
+  gui_data->security_factor = dt_bauhaus_slider_from_params(self, "security_factor");
+  dt_bauhaus_slider_set_soft_max(gui_data->security_factor, 50);
+  dt_bauhaus_slider_set_format(gui_data->security_factor, "%");
+  gtk_widget_set_tooltip_text(gui_data->security_factor, _("symmetrically increase or decrease the computed dynamic range.\n"
+                                                    "useful to give a safety margin to extreme luminances."));
+
   // auto-tune picker
   gui_data->range_exposure_picker
       = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_combobox_new(self));
@@ -1892,6 +1919,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
 
   user_params->range_black_relative_exposure = -10;
   user_params->range_white_relative_exposure = 6.5;
+  user_params->security_factor = 10.0f;
 
   user_params->curve_contrast_around_pivot = 2.4;
   user_params->curve_linear_percent_below_pivot = 0.0;
