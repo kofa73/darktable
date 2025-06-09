@@ -2,22 +2,23 @@
 #include "common/colorspaces_inline_conversions.h"
 #include "common/custom_primaries.h"
 #include "common/iop_profile.h"
+#include "common/math.h"
 #include "common/matrices.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
+#include "develop/tiling.h"
 #include "gui/accelerators.h"
 #include "gui/color_picker_proxy.h"
 #include "gui/draw.h"
+#include "gui/gtk.h"
+#include "gui/presets.h"
 #include "iop/iop_api.h"
 #include <gtk/gtk.h>
 #include <math.h>
 #include <pango/pangocairo.h>
 #include <stdlib.h>
-#include "common/math.h"
-#include "gui/gtk.h"
-#include "gui/presets.h"
 
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
@@ -192,6 +193,14 @@ typedef struct primaries_params_t
   float unrotation[3];
 } primaries_params_t;
 
+typedef struct dt_iop_agx_data_t
+{
+  curve_and_look_params_t curve_params;
+  dt_colormatrix_t pipe_to_rendering_transposed;
+  dt_colormatrix_t rendering_to_pipe_transposed;
+  dt_iop_order_iccprofile_info_t rendering_profile;
+} dt_iop_agx_data_t;
+
 // Translatable name
 const char *name()
 {
@@ -209,7 +218,7 @@ const char **description(dt_iop_module_t *self)
 
 int flags()
 {
-  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING;
+  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;
 }
 
 int default_group()
@@ -228,12 +237,6 @@ int legacy_params(dt_iop_module_t *self, const void *const old_params, const int
                   int32_t *new_params_size, int *new_version)
 {
   return 1; // no conversion possible
-}
-
-void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
-                   dt_dev_pixelpipe_iop_t *piece)
-{
-  memcpy(piece->data, p1, self->params_size);
 }
 
 void _print_transposed_matrix(const char* name, const dt_colormatrix_t matrix)
@@ -341,13 +344,19 @@ static float _min(const dt_aligned_pixel_t pixel)
   return fminf(fminf(pixel[0], pixel[1]), pixel[2]);
 }
 
-static float _luminance(const dt_aligned_pixel_t pixel, const dt_iop_order_iccprofile_info_t *const profile)
+static inline float _luminance_from_matrix(const dt_aligned_pixel_t pixel, const dt_colormatrix_t rgb_to_xyz_transposed)
 {
-  const float lum = dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
-                                                          profile->unbounded_coeffs_in, profile->lutsize,
-                                                          profile->nonlinearlut);
-  return lum;
+  dt_aligned_pixel_t xyz;
+  dt_apply_transposed_color_matrix(pixel, rgb_to_xyz_transposed, xyz);
+  return xyz[1];
 }
+
+static inline float _luminance_from_profile(dt_aligned_pixel_t pixel, const dt_iop_order_iccprofile_info_t *const profile)
+{
+  return dt_ioppr_get_rgb_matrix_luminance(pixel, profile->matrix_in, profile->lut_in,
+                                           profile->unbounded_coeffs_in, profile->lutsize, profile->nonlinearlut);
+}
+
 
 static float _line(const float x, const float slope, const float intercept)
 {
@@ -484,9 +493,12 @@ static float _apply_slope_offset(const float x, const float slope, const float o
 
 // https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
 DT_OMP_DECLARE_SIMD(aligned(pixel_in_out: 16))
-static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_params_t *params, const dt_iop_order_iccprofile_info_t *const rendering_profile)
+static void _agxLook(
+  dt_aligned_pixel_t pixel_in_out,
+  const curve_and_look_params_t *params,
+  const dt_colormatrix_t rendering_to_xyz_transposed
+)
 {
-  // Default parameters from the curve_and_look_params_t struct
   const float slope = params->look_slope;
   const float offset = params->look_offset;
   const float power = params->look_power;
@@ -499,7 +511,7 @@ static void _agxLook(dt_aligned_pixel_t pixel_in_out, const curve_and_look_param
     pixel_in_out[k] = slope_and_offset_val > 0.0f ? powf(slope_and_offset_val, power) : slope_and_offset_val;
   }
 
-  const float luma = _luminance(pixel_in_out, rendering_profile);
+  const float luma = _luminance_from_matrix(pixel_in_out, rendering_to_xyz_transposed);
 
   // saturation
   for_three_channels(k, aligned(pixel_in_out: 16))
@@ -539,7 +551,7 @@ static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order
     return;
   }
 
-  const float original_luminance = _luminance(pixel_in_out, profile);
+  const float original_luminance = _luminance_from_profile(pixel_in_out, profile);
   const float most_negative_component = _min(pixel_in_out);
 
   // offset, so no component remains negative
@@ -548,7 +560,7 @@ static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order
     pixel_in_out[k] -= most_negative_component;
   }
 
-  const float offset_luminance = _luminance(pixel_in_out, profile);
+  const float offset_luminance = _luminance_from_profile(pixel_in_out, profile);
 
   const float luminance_correction = original_luminance / offset_luminance;
 
@@ -758,7 +770,7 @@ static primaries_params_t _get_primaries_params(const dt_iop_agx_user_params_t *
   return primaries_params;
 }
 
-static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t * params, const dt_iop_order_iccprofile_info_t *const rendering_profile)
+static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t *params, const dt_colormatrix_t rendering_to_xyz_transposed)
 {
   // record current chromaticity angle
   dt_aligned_pixel_t hsv_pixel = {0.0f};
@@ -773,7 +785,7 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
     transformed_pixel[k] = _apply_curve(log_value, params);
   }
 
-  _agxLook(transformed_pixel, params, rendering_profile);
+  _agxLook(transformed_pixel, params, rendering_to_xyz_transposed);
 
   // Linearize
   for_three_channels(k, aligned(transformed_pixel: 16))
@@ -858,7 +870,7 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
   const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
   // Calculate norm and EV of the picked color
-  const float norm = _luminance(self->picked_color, profile);
+  const float norm = _luminance_from_profile(self->picked_color, profile);
   const float picked_ev = log2f(fmaxf(_epsilon, norm) / 0.18f);
 
   // Calculate the target pivot_x based on the picked EV and the current EV range
@@ -946,7 +958,7 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
                                           const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
                                           const dt_iop_order_iccprofile_info_t *const base_profile,
                                           // outputs
-                                          dt_iop_order_iccprofile_info_t *rendering_profile,
+                                          dt_colormatrix_t rendering_to_xyz_transposed,
                                           dt_colormatrix_t pipe_to_base_transposed,
                                           dt_colormatrix_t base_to_rendering_transposed,
                                           dt_colormatrix_t pipe_to_rendering_transposed,
@@ -994,19 +1006,13 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // in the 'base' space, it will convert them to XYZ coordinates that represent colors that are partly
   // desaturated (due to the inset) and skewed (do to the rotation).
   dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_and_rotated_primaries, base_profile->whitepoint,
-                                                            rendering_profile->matrix_in_transposed);
-  _print_transposed_matrix("rendering_profile->matrix_in_transposed", rendering_profile->matrix_in_transposed);
-  dt_colormatrix_transpose(rendering_profile->matrix_in, rendering_profile->matrix_in_transposed);
-
-  mat3SSEinv(rendering_profile->matrix_out_transposed, rendering_profile->matrix_in_transposed);
-  _print_transposed_matrix("rendering_profile->matrix_out_transposed", rendering_profile->matrix_out_transposed);
-  // it just holds the matrix required for luminance calculation
-  rendering_profile->nonlinearlut = FALSE;
+                                                            rendering_to_xyz_transposed);
+  _print_transposed_matrix("rendering_to_xyz_transposed", rendering_to_xyz_transposed);
 
   // The matrix to convert colors from the original 'base' space to their partially desaturated and skewed
   // versions, using the inset RGB->XYZ and the original base XYZ->RGB matrices.
   dt_colormatrix_mul(base_to_rendering_transposed,
-                      rendering_profile->matrix_in_transposed,
+                      rendering_to_xyz_transposed,
                       base_profile->matrix_out_transposed
                       );
   _print_transposed_matrix("base_to_rendering_transposed", base_to_rendering_transposed);
@@ -1047,12 +1053,12 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   _print_transposed_matrix("rendering_to_base_transposed", rendering_to_base_transposed);
 }
 
-static void _create_matrices_and_profiles(
+static void _create_matrices(
     const dt_iop_agx_user_params_t *user_params,
     const dt_iop_order_iccprofile_info_t *pipe_work_profile,
     const dt_iop_order_iccprofile_info_t *base_profile,
     // outputs
-    dt_iop_order_iccprofile_info_t *rendering_profile,
+    dt_colormatrix_t rendering_to_xyz_transposed,
     dt_colormatrix_t pipe_to_base_transposed,
     dt_colormatrix_t base_to_rendering_transposed,
     dt_colormatrix_t pipe_to_rendering_transposed,
@@ -1064,7 +1070,7 @@ static void _create_matrices_and_profiles(
     &primaries_params,
     pipe_work_profile,
     base_profile,
-    rendering_profile,
+    rendering_to_xyz_transposed,
     // outputs
     pipe_to_base_transposed,
     base_to_rendering_transposed,
@@ -1081,73 +1087,12 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     return;
   }
 
-  dt_iop_agx_user_params_t *user_params = piece->data;
+  const dt_iop_agx_data_t *processing_params = piece->data;
   const float *const in = ivoid;
   float *const out = ovoid;
   const size_t n_pixels = (size_t)roi_in->width * roi_in->height;
 
-  printf("================== start ==================\n");
-  printf("range_black_relative_exposure = %f\n", user_params->range_black_relative_exposure);
-  printf("range_white_relative_exposure = %f\n", user_params->range_white_relative_exposure);
-  printf("curve_gamma = %f\n", user_params->curve_gamma);
-  printf("curve_contrast_around_pivot = %f\n", user_params->curve_contrast_around_pivot);
-  printf("curve_linear_percent_below_pivot = %f\n", user_params->curve_linear_percent_below_pivot);
-  printf("curve_linear_percent_above_pivot = %f\n", user_params->curve_linear_percent_above_pivot);
-  printf("curve_toe_power = %f\n", user_params->curve_toe_power);
-  printf("curve_shoulder_power = %f\n", user_params->curve_shoulder_power);
-  printf("curve_target_display_black_percent = %f\n", user_params->curve_target_display_black_percent);
-  printf("curve_target_display_white_percent = %f\n", user_params->curve_target_display_white_percent);
-
-  // Calculate curve parameters once
-  const curve_and_look_params_t curve_params = _calculate_curve_params(user_params);
-  // _print_curve(&curve_params);
-
   const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
-  // Get the base profile based on user selection
-  const dt_iop_order_iccprofile_info_t *const base_profile = _agx_get_base_profile(self->dev, pipe_work_profile, user_params->base_primaries);
-
-  // Check if we got a valid base profile, fallback if necessary (already handled in _agx_get_base_profile, but double-check)
-  if (!base_profile) {
-    dt_print(DT_DEBUG_ALWAYS, "[agx process] Failed to obtain a valid base profile. Cannot proceed.");
-    // Optionally copy input to output to avoid garbage
-    if (in != out) memcpy(out, in, n_pixels * 4 * sizeof(float));
-    return;
-  }
-  dt_print(DT_DEBUG_PIPE, "[agx process] Using base profile: %s", dt_colorspaces_get_name(base_profile->type, base_profile->filename));
-
-  dt_colormatrix_t pipe_to_base_transposed;
-  dt_colormatrix_t base_to_rendering_transposed;
-  dt_colormatrix_t pipe_to_rendering_transposed;
-  dt_colormatrix_t rendering_to_base_transposed;
-  dt_colormatrix_t base_to_pipe_transposed;
-  dt_iop_order_iccprofile_info_t rendering_profile;
-
-  _create_matrices_and_profiles(
-          user_params,
-          pipe_work_profile, base_profile,
-          &rendering_profile,
-          pipe_to_base_transposed,
-          base_to_rendering_transposed,
-          pipe_to_rendering_transposed,
-          rendering_to_base_transposed,
-          base_to_pipe_transposed
-  );
-
-  dt_colormatrix_t pipe_to_base_and_back_transposed;
-  dt_colormatrix_mul(pipe_to_base_and_back_transposed, pipe_to_base_transposed, base_to_pipe_transposed);
-  _print_transposed_matrix("pipe_to_base_and_back_transposed", pipe_to_base_and_back_transposed);
-
-  dt_colormatrix_t base_to_rendering_and_back_transposed;
-  dt_colormatrix_mul(base_to_rendering_and_back_transposed, base_to_rendering_transposed, rendering_to_base_transposed);
-  _print_transposed_matrix("base_to_rendering_and_back_transposed", base_to_rendering_and_back_transposed);
-
-  dt_colormatrix_t rendering_to_pipe_transposed;
-  dt_colormatrix_mul(rendering_to_pipe_transposed, rendering_to_base_transposed, base_to_pipe_transposed);
-  _print_transposed_matrix("rendering_to_pipe_transposed", rendering_to_pipe_transposed);
-
-  dt_colormatrix_t pipe_to_rendering_and_back_transposed;
-  dt_colormatrix_mul(pipe_to_rendering_and_back_transposed, pipe_to_rendering_transposed, rendering_to_pipe_transposed);
-  _print_transposed_matrix("pipe_to_rendering_and_back_transposed", pipe_to_rendering_and_back_transposed);
 
   DT_OMP_FOR()
   for (size_t k = 0; k < 4 * n_pixels; k += 4)
@@ -1155,33 +1100,21 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
 
-    // Convert to "rendering space"
+    // Convert from pipe working space to internal rendering space
     dt_aligned_pixel_t rendering_RGB;
+    dt_apply_transposed_color_matrix(pix_in, processing_params->pipe_to_rendering_transposed, rendering_RGB);
 
-    dt_aligned_pixel_t base_RGB;
+    // Sanitize any negative values that may have resulted from the transform
+    _compensate_low_side(rendering_RGB, &processing_params->rendering_profile);
 
-    // go from pipe to base, compress, move to rendering
-    dt_apply_transposed_color_matrix(pix_in, pipe_to_base_transposed, base_RGB);
+    // Apply the tone mapping curve and look adjustments
+    _agx_tone_mapping(rendering_RGB, &processing_params->curve_params, processing_params->rendering_profile.matrix_in_transposed);
 
-    _compensate_low_side(
-      base_RGB,
-      base_profile
-    );
-    dt_apply_transposed_color_matrix(base_RGB, base_to_rendering_transposed, rendering_RGB);
+    // Convert from internal rendering space back to pipe working space
+    dt_apply_transposed_color_matrix(rendering_RGB, processing_params->rendering_to_pipe_transposed, pix_out);
 
-    // now rendering_RGB pixel holds rendering-profile values with no negative components
-    _agx_tone_mapping(rendering_RGB, &curve_params, &rendering_profile);
-
-    dt_apply_transposed_color_matrix(rendering_RGB, rendering_to_base_transposed, base_RGB);
-
-    // back in base (output) profile, fix any negative we may have introduced
-    _compensate_low_side(
-      base_RGB,
-      base_profile
-    );
-
-    // bring back to pipe working space
-    dt_apply_transposed_color_matrix(base_RGB, base_to_pipe_transposed, pix_out);
+    // Sanitize any negative values that may have resulted from the final transform
+    _compensate_low_side(pix_out, pipe_work_profile);
 
     // Copy over the alpha channel
     pix_out[3] = pix_in[3];
@@ -1412,13 +1345,21 @@ void init(dt_iop_module_t *self)
   dt_iop_default_init(self);
 }
 
+void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  piece->data = dt_calloc1_align_type(dt_iop_agx_data_t);
+}
+
 // Cleanup
 void cleanup(dt_iop_module_t *self)
 {
-  free(self->params);
-  self->params = NULL;
-  free(self->default_params);
-  self->default_params = NULL;
+  dt_iop_default_cleanup(self);
+}
+
+void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  dt_free_align(piece->data);
+  piece->data = NULL;
 }
 
 void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
@@ -2057,4 +1998,90 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
   }
   gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
   dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
+void commit_params(dt_iop_module_t *self, dt_iop_params_t *gui_params, dt_dev_pixelpipe_t *pipe,
+                   dt_dev_pixelpipe_iop_t *piece)
+{
+  dt_iop_agx_data_t *processing_params = piece->data;
+  dt_iop_agx_user_params_t *user_params = gui_params;
+
+  // Calculate curve parameters once
+  processing_params->curve_params = _calculate_curve_params(user_params);
+
+  // Get profiles and create matrices
+  const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+  const dt_iop_order_iccprofile_info_t *const base_profile = _agx_get_base_profile(self->dev, pipe_work_profile, user_params->base_primaries);
+
+  if (!base_profile) {
+    dt_print(DT_DEBUG_ALWAYS, "[agx commit_params] Failed to obtain a valid base profile. Module will not run correctly.");
+    return;
+  }
+
+  dt_colormatrix_t pipe_to_base_transposed;
+  dt_colormatrix_t base_to_rendering_transposed;
+  dt_colormatrix_t rendering_to_base_transposed;
+  dt_colormatrix_t base_to_pipe_transposed;
+  dt_colormatrix_t rendering_to_xyz_transposed;
+
+  _create_matrices(
+          user_params,
+          pipe_work_profile, base_profile,
+          rendering_to_xyz_transposed,
+          pipe_to_base_transposed,
+          base_to_rendering_transposed,
+          processing_params->pipe_to_rendering_transposed,
+          rendering_to_base_transposed,
+          base_to_pipe_transposed
+  );
+
+  dt_colormatrix_mul(processing_params->rendering_to_pipe_transposed, rendering_to_base_transposed, base_to_pipe_transposed);
+
+  memcpy(processing_params->rendering_profile.matrix_in_transposed, rendering_to_xyz_transposed, sizeof(dt_colormatrix_t));
+  dt_colormatrix_transpose(processing_params->rendering_profile.matrix_in, processing_params->rendering_profile.matrix_in_transposed);
+  processing_params->rendering_profile.nonlinearlut = FALSE; // no LUT for this linear transform
+
+  printf("================== commit_params ==================\n");
+  printf("range_black_relative_exposure = %f\n", user_params->range_black_relative_exposure);
+  printf("range_white_relative_exposure = %f\n", user_params->range_white_relative_exposure);
+  printf("curve_gamma = %f\n", user_params->curve_gamma);
+  printf("curve_contrast_around_pivot = %f\n", user_params->curve_contrast_around_pivot);
+  printf("curve_linear_percent_below_pivot = %f\n", user_params->curve_linear_percent_below_pivot);
+  printf("curve_linear_percent_above_pivot = %f\n", user_params->curve_linear_percent_above_pivot);
+  printf("curve_toe_power = %f\n", user_params->curve_toe_power);
+  printf("curve_shoulder_power = %f\n", user_params->curve_shoulder_power);
+  printf("curve_target_display_black_percent = %f\n", user_params->curve_target_display_black_percent);
+  printf("curve_target_display_white_percent = %f\n", user_params->curve_target_display_white_percent);
+
+  dt_colormatrix_t pipe_to_base_and_back_transposed;
+  dt_colormatrix_mul(pipe_to_base_and_back_transposed, pipe_to_base_transposed, base_to_pipe_transposed);
+  _print_transposed_matrix("pipe_to_base_and_back_transposed", pipe_to_base_and_back_transposed);
+
+  dt_colormatrix_t base_to_rendering_and_back_transposed;
+  dt_colormatrix_mul(base_to_rendering_and_back_transposed, base_to_rendering_transposed, rendering_to_base_transposed);
+  _print_transposed_matrix("base_to_rendering_and_back_transposed", base_to_rendering_and_back_transposed);
+
+  dt_colormatrix_t rendering_to_pipe_transposed;
+  dt_colormatrix_mul(rendering_to_pipe_transposed, rendering_to_base_transposed, base_to_pipe_transposed);
+  _print_transposed_matrix("rendering_to_pipe_transposed", rendering_to_pipe_transposed);
+
+  dt_colormatrix_t pipe_to_rendering_and_back_transposed;
+  dt_colormatrix_mul(pipe_to_rendering_and_back_transposed, processing_params->pipe_to_rendering_transposed, rendering_to_pipe_transposed);
+  _print_transposed_matrix("pipe_to_rendering_and_back_transposed", pipe_to_rendering_and_back_transposed);
+}
+
+void tiling_callback(dt_iop_module_t *self,
+                     dt_dev_pixelpipe_iop_t *piece,
+                     const dt_iop_roi_t *roi_in,
+                     const dt_iop_roi_t *roi_out,
+                     dt_develop_tiling_t *tiling)
+{
+  tiling->factor = 2.0f;
+  tiling->factor_cl = 3.0f;
+  tiling->maxbuf = 1.0f;
+  tiling->maxbuf_cl = 1.0f;
+  tiling->overhead = 0;
+  tiling->overlap = 0;
+  tiling->xalign = 1;
+  tiling->yalign = 1;
 }
