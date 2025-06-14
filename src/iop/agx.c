@@ -2099,6 +2099,8 @@ void init_presets(dt_iop_module_so_t *self)
 
   _set_neutral_params(&user_params);
 
+  dt_gui_presets_add_generic(_("neutral primaries"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+
   // AgX primaries settings from Eary_Chow
   // https://discuss.pixls.us/t/blender-agx-in-darktable-proof-of-concept/48697/1018
   user_params.auto_gamma = FALSE; // uses a pre-configured gamma
