@@ -26,7 +26,7 @@
 
 
 // Module introspection version
-DT_MODULE_INTROSPECTION(1, dt_iop_agx_user_params_t)
+DT_MODULE_INTROSPECTION(2, dt_iop_agx_user_params_t)
 
 static const float _epsilon = 1E-6f;
 
@@ -81,7 +81,8 @@ typedef struct dt_iop_agx_user_params_t
   float curve_target_display_white_percent;     // $MIN: 20.0 $MAX: 100.0 $DEFAULT: 100.0 $DESCRIPTION: "target white"
 
   // custom primaries; 30 degrees = 0.5236 radian for rotation
-  dt_iop_agx_base_primaries_t base_primaries; // $DEFAULT: DT_AGX_EXPORT_PROFILE $DESCRIPTION: "base primaries"
+  dt_iop_agx_base_primaries_t base_primaries; // $DEFAULT: DT_AGX_REC2020 $DESCRIPTION: "base primaries"
+  gboolean disable_primaries_adjustments; // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "disable adjustments"
   float red_inset;        // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation"
   float red_rotation;     // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "red rotation"
   float green_inset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green attenuation"
@@ -133,6 +134,8 @@ typedef struct dt_iop_agx_gui_data_t
   PangoRectangle ink;
   GtkStyleContext *context;
 
+  GtkWidget* disable_primaries_adjustments;
+  GtkWidget *primaries_sliders_vbox;
   gboolean curve_tab_enabled;
 } dt_iop_agx_gui_data_t;
 
@@ -232,11 +235,91 @@ dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self, dt_dev_pixelp
   return IOP_CS_RGB;
 }
 
-// Legacy parameters (not needed for version 1)
-int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version, void **new_params,
-                  int32_t *new_params_size, int *new_version)
+int legacy_params(dt_iop_module_t *self,
+                  const void *const old_params,
+                  const int old_version,
+                  void **new_params,
+                  int32_t *new_params_size,
+                  int *new_version)
 {
-  return 1; // no conversion possible
+  typedef dt_iop_agx_user_params_t dt_iop_agx_params_v2_t;
+
+  if(old_version == 1)
+  {
+    typedef struct dt_iop_agx_params_v1_t
+    {
+      float look_offset;
+      float look_slope;
+      float look_power;
+      float look_saturation;
+      float look_original_hue_mix_ratio;
+
+      // log mapping
+      float range_black_relative_exposure;
+      float range_white_relative_exposure;
+      float security_factor;
+
+      // curve params
+      float curve_pivot_x_shift;
+      float curve_pivot_y_linear;
+      float curve_contrast_around_pivot;
+      float curve_linear_percent_below_pivot;
+      float curve_linear_percent_above_pivot;
+      float curve_toe_power;
+      float curve_shoulder_power;
+      float curve_gamma;
+      gboolean auto_gamma;
+      float curve_target_display_black_percent;
+      float curve_target_display_white_percent;
+
+      // custom primaries
+      dt_iop_agx_base_primaries_t base_primaries;
+      // 'disable_primaries_adjustments' is missing here in v1
+      float red_inset;
+      float red_rotation;
+      float green_inset;
+      float green_rotation;
+      float blue_inset;
+      float blue_rotation;
+
+      float master_outset_ratio;
+      float master_unrotation_ratio;
+      float red_outset;
+      float red_unrotation;
+      float green_outset;
+      float green_unrotation;
+      float blue_outset;
+      float blue_unrotation;
+    } dt_iop_agx_params_v1_t;
+
+    dt_iop_agx_params_v2_t *np = calloc(1, sizeof(dt_iop_agx_params_v2_t));
+    const dt_iop_agx_params_v1_t *op = old_params;
+
+    // Because the new 'disable_primaries_adjustments' field was added in the middle of the struct,
+    // we must copy the data in two parts, around the new field.
+
+    // Part 1: All fields before 'disable_primaries_adjustments'.
+    const size_t part1_size = offsetof(dt_iop_agx_params_v2_t, disable_primaries_adjustments);
+    memcpy(np, op, part1_size);
+
+    // Initialize the new parameter to its default value.
+    np->disable_primaries_adjustments = FALSE;
+
+    // Part 2: All fields after 'disable_primaries_adjustments'.
+    const void *old_part2_start = &op->red_inset;
+    void *new_part2_start = &np->red_inset;
+    const size_t part2_size = sizeof(dt_iop_agx_params_v1_t) - offsetof(dt_iop_agx_params_v1_t, red_inset);
+    memcpy(new_part2_start, old_part2_start, part2_size);
+
+    // Set the output parameters for the framework.
+    *new_params = np;
+    *new_params_size = sizeof(dt_iop_agx_params_v2_t);
+    *new_version = 2;
+
+    return 0; // success
+  }
+
+  return 1; // no other conversion possible
 }
 
 void _print_transposed_matrix(const char* name, const dt_colormatrix_t matrix)
@@ -766,6 +849,12 @@ static primaries_params_t _get_primaries_params(const dt_iop_agx_user_params_t *
   primaries_params.unrotation[0] = user_params->red_unrotation;
   primaries_params.unrotation[1] = user_params->green_unrotation;
   primaries_params.unrotation[2] = user_params->blue_unrotation;
+
+  if(user_params->disable_primaries_adjustments)
+  {
+    for(int i = 0; i < 3; i++)
+      primaries_params.inset[i] = primaries_params.rotation[i] = primaries_params.outset[i] = primaries_params.unrotation[i] = 0.0f;
+  }
 
   return primaries_params;
 }
@@ -1362,6 +1451,17 @@ void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelp
   piece->data = NULL;
 }
 
+static void _update_primaries_checkbox_and_sliders(dt_iop_module_t *self)
+{
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
+  const dt_iop_agx_user_params_t *user_params = self->params;
+
+  if(gui_data && gui_data->primaries_sliders_vbox)
+  {
+    gtk_widget_set_visible(gui_data->primaries_sliders_vbox, !user_params->disable_primaries_adjustments);
+  }
+}
+
 void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 {
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
@@ -1416,6 +1516,8 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
     // --- END MANUAL SYNC ---
   }
 
+  _update_primaries_checkbox_and_sliders(self);
+
   // Test which widget was changed.
   // If allowing w == NULL, this can be called from gui_update, so that
   // gui configuration adjustments only need to be dealt with once, here.
@@ -1450,6 +1552,10 @@ void gui_update(dt_iop_module_t *self)
       dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
     }
   }
+
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->disable_primaries_adjustments), user_params->disable_primaries_adjustments);
+
+  _update_primaries_checkbox_and_sliders(self);
 
   // Ensure the graph is drawn initially
   if (gui_data && gui_data->graph_drawing_area) {
@@ -1704,24 +1810,26 @@ static void _add_exposure_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
 
 static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
 {
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
   GtkWidget *main_box = self->widget;
 
   GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   self->widget = primaries_box;
 
-  // primaries collapsible section
-  dt_iop_module_t *sect = DT_IOP_SECTION_FOR_PARAMS(self, N_("primaries"));
-
   GtkWidget *base_primaries_combo = dt_bauhaus_combobox_from_params(self, "base_primaries");
   gtk_widget_set_tooltip_text(base_primaries_combo,
                               _("Color space primaries to use as the base for below adjustments.\n"
                                 "'export profile' uses the profile set in 'output color profile'."));
+  gui_data->disable_primaries_adjustments = dt_bauhaus_toggle_from_params(self, "disable_primaries_adjustments");
+
+  gui_data->primaries_sliders_vbox = self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(primaries_box), self->widget, FALSE, FALSE, 0);
+
 
   GtkWidget *slider;
-
   const float desaturation = 0.2f;
 #define SETUP_COLOR_COMBO(color, r, g, b, attenuation_suffix, inset_tooltip, rotation_suffix, rotation_tooltip)   \
-  slider = dt_bauhaus_slider_from_params(sect, #color attenuation_suffix);                                        \
+  slider = dt_bauhaus_slider_from_params(self, #color attenuation_suffix);                                 \
   dt_bauhaus_slider_set_format(slider, "%");                                                                      \
   dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
   dt_bauhaus_slider_set_factor(slider, 100.f);                                                                    \
@@ -1729,7 +1837,7 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
   dt_bauhaus_slider_set_stop(slider, 0.f, r, g, b);                                                               \
   gtk_widget_set_tooltip_text(slider, inset_tooltip);                                                             \
                                                                                                                   \
-  slider = dt_bauhaus_slider_from_params(sect, #color rotation_suffix);                                           \
+  slider = dt_bauhaus_slider_from_params(self, #color rotation_suffix);                              \
   dt_bauhaus_slider_set_format(slider, "°");                                                                      \
   dt_bauhaus_slider_set_digits(slider, 1);                                                                        \
   dt_bauhaus_slider_set_factor(slider, 180.f / M_PI_F);                                                           \
@@ -1743,13 +1851,13 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
   SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, "_inset",
                     _("attenuate the purity of the blue primary"), "_rotation", _("rotate the blue primary"));
 
-  slider = dt_bauhaus_slider_from_params(sect, "master_outset_ratio");
+  slider = dt_bauhaus_slider_from_params(self, "master_outset_ratio");
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_digits(slider, 0);
   dt_bauhaus_slider_set_factor(slider, 100.f);
   gtk_widget_set_tooltip_text(slider, _("overall purity boost"));
 
-  slider = dt_bauhaus_slider_from_params(sect, "master_unrotation_ratio");
+  slider = dt_bauhaus_slider_from_params(self, "master_unrotation_ratio");
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_digits(slider, 0);
   dt_bauhaus_slider_set_factor(slider, 100.f);
@@ -1874,6 +1982,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
   user_params->curve_pivot_x_shift = 0.0;
   user_params->curve_pivot_y_linear = 0.18;
 
+  user_params->disable_primaries_adjustments = FALSE;
   user_params->red_inset = 0.0f;
   user_params->red_rotation = 0.0;
   user_params->green_inset = 0.0;
@@ -1890,7 +1999,7 @@ static void _set_neutral_params(dt_iop_agx_user_params_t *user_params)
   user_params->blue_outset = 0.0f;
   user_params->blue_unrotation = 0.0f;
 
-  user_params->base_primaries = DT_AGX_EXPORT_PROFILE;
+  user_params->base_primaries = DT_AGX_REC2020;
 }
 
 void init_presets(dt_iop_module_so_t *self)
