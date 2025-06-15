@@ -1538,33 +1538,6 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   }
 }
 
-// GUI update (called when module UI is shown/refreshed)
-void gui_update(dt_iop_module_t *self)
-{
-  const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
-  const dt_iop_agx_user_params_t *user_params = self->params;
-
-  if (gui_data)
-  {
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), user_params->auto_gamma);
-    if (user_params->auto_gamma) {
-      curve_and_look_params_t curve_and_look_params;
-      _calculate_log_mapping_params(self->params, &curve_and_look_params);
-      _adjust_pivot(self->params, &curve_and_look_params);
-      dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
-    }
-  }
-
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->disable_primaries_adjustments), user_params->disable_primaries_adjustments);
-
-  _update_primaries_checkbox_and_sliders(self);
-
-  // Ensure the graph is drawn initially
-  if (gui_data && gui_data->graph_drawing_area) {
-    gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
-  }
-}
-
 static void _add_basic_curve_controls(
   dt_iop_module_t *self,
   dt_iop_basic_curve_controls_t *controls
@@ -1810,59 +1783,109 @@ static void _add_exposure_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   self->widget = parent;
 }
 
-static void _apply_primaries_from_preset_cb(GtkButton *button, dt_iop_module_t *self)
+static void _populate_primaries_presets_combobox(dt_iop_module_t *self)
+{
+  dt_iop_agx_gui_data_t *gui_data = self->gui_data;
+  gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(gui_data->primaries_preset_combo));
+
+  sqlite3_stmt *stmt;
+  DT_DEBUG_SQLITE3_PREPARE_V2(
+      dt_database_get(darktable.db),
+      "SELECT name FROM data.presets WHERE operation = ?1 ORDER BY writeprotect DESC, LOWER(name), rowid", -1,
+      &stmt, NULL);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, self->op, -1, SQLITE_TRANSIENT);
+  gtk_combo_box_text_append(gui_data->primaries_preset_combo, NULL, _("select a preset..."));
+  while(sqlite3_step(stmt) == SQLITE_ROW)
+  {
+    const char *name = (const char *)sqlite3_column_text(stmt, 0);
+    gchar *local_name = dt_util_localize_segmented_name(name, TRUE);
+    gtk_combo_box_text_append(gui_data->primaries_preset_combo, name, local_name);
+    g_free(local_name);
+  }
+  sqlite3_finalize(stmt);
+  gtk_combo_box_set_active(GTK_COMBO_BOX(gui_data->primaries_preset_combo), 0);
+}
+
+static void _apply_primaries_from_preset_callback(GtkButton *button, dt_iop_module_t *self)
 {
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
   dt_iop_agx_user_params_t *current_params = self->params;
   const gchar *preset_name = gtk_combo_box_get_active_id(GTK_COMBO_BOX(gui_data->primaries_preset_combo));
 
-  if(!preset_name)
+  if(preset_name && gtk_combo_box_get_active(GTK_COMBO_BOX(gui_data->primaries_preset_combo)))
   {
-    return;
+    sqlite3_stmt *stmt;
+    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
+                                "SELECT op_params FROM data.presets"
+                                " WHERE operation = ?1 AND name = ?2 AND op_version = ?3",
+                                -1, &stmt, NULL);
+    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, self->op, -1, SQLITE_TRANSIENT);
+    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, preset_name, -1, SQLITE_TRANSIENT);
+    DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, self->version());
+
+    if(sqlite3_step(stmt) == SQLITE_ROW)
+    {
+      const int op_params_size = sqlite3_column_bytes(stmt, 0);
+      if(op_params_size == sizeof(dt_iop_agx_user_params_t))
+      {
+        const dt_iop_agx_user_params_t *preset_params = sqlite3_column_blob(stmt, 0);
+
+        // Copy only the primaries settings
+        current_params->base_primaries = preset_params->base_primaries;
+        current_params->disable_primaries_adjustments = preset_params->disable_primaries_adjustments;
+        current_params->red_inset = preset_params->red_inset;
+        current_params->red_rotation = preset_params->red_rotation;
+        current_params->green_inset = preset_params->green_inset;
+        current_params->green_rotation = preset_params->green_rotation;
+        current_params->blue_inset = preset_params->blue_inset;
+        current_params->blue_rotation = preset_params->blue_rotation;
+        current_params->master_outset_ratio = preset_params->master_outset_ratio;
+        current_params->master_unrotation_ratio = preset_params->master_unrotation_ratio;
+        current_params->red_outset = preset_params->red_outset;
+        current_params->red_unrotation = preset_params->red_unrotation;
+        current_params->green_outset = preset_params->green_outset;
+        current_params->green_unrotation = preset_params->green_unrotation;
+        current_params->blue_outset = preset_params->blue_outset;
+        current_params->blue_unrotation = preset_params->blue_unrotation;
+
+        // Update UI and commit changes
+        dt_iop_gui_update(self);
+        dt_dev_add_history_item(darktable.develop, self, TRUE);
+      }
+    }
+
+    sqlite3_finalize(stmt);
   }
 
-  sqlite3_stmt *stmt;
-  DT_DEBUG_SQLITE3_PREPARE_V2(
-      dt_database_get(darktable.db),
-      "SELECT op_params FROM data.presets"
-      " WHERE operation = ?1 AND name = ?2 AND op_version = ?3",
-      -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, self->op, -1, SQLITE_TRANSIENT);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, preset_name, -1, SQLITE_TRANSIENT);
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, self->version());
+  // refresh the list and set selection prompt
+  _populate_primaries_presets_combobox(self);
+}
 
-  if(sqlite3_step(stmt) == SQLITE_ROW)
+// GUI update (called when module UI is shown/refreshed)
+void gui_update(dt_iop_module_t *self)
+{
+  const dt_iop_agx_gui_data_t *gui_data = self->gui_data;
+  const dt_iop_agx_user_params_t *user_params = self->params;
+
+  if (gui_data)
   {
-    const int op_params_size = sqlite3_column_bytes(stmt, 0);
-    if(op_params_size == sizeof(dt_iop_agx_user_params_t))
-    {
-      const dt_iop_agx_user_params_t *preset_params = sqlite3_column_blob(stmt, 0);
-
-      // Copy only the primaries settings
-      current_params->base_primaries = preset_params->base_primaries;
-      current_params->disable_primaries_adjustments = preset_params->disable_primaries_adjustments;
-      current_params->red_inset = preset_params->red_inset;
-      current_params->red_rotation = preset_params->red_rotation;
-      current_params->green_inset = preset_params->green_inset;
-      current_params->green_rotation = preset_params->green_rotation;
-      current_params->blue_inset = preset_params->blue_inset;
-      current_params->blue_rotation = preset_params->blue_rotation;
-      current_params->master_outset_ratio = preset_params->master_outset_ratio;
-      current_params->master_unrotation_ratio = preset_params->master_unrotation_ratio;
-      current_params->red_outset = preset_params->red_outset;
-      current_params->red_unrotation = preset_params->red_unrotation;
-      current_params->green_outset = preset_params->green_outset;
-      current_params->green_unrotation = preset_params->green_unrotation;
-      current_params->blue_outset = preset_params->blue_outset;
-      current_params->blue_unrotation = preset_params->blue_unrotation;
-
-      // Update UI and commit changes
-      dt_iop_gui_update(self);
-      dt_dev_add_history_item(darktable.develop, self, TRUE);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), user_params->auto_gamma);
+    if (user_params->auto_gamma) {
+      curve_and_look_params_t curve_and_look_params;
+      _calculate_log_mapping_params(self->params, &curve_and_look_params);
+      _adjust_pivot(self->params, &curve_and_look_params);
+      dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
     }
   }
 
-  sqlite3_finalize(stmt);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->disable_primaries_adjustments), user_params->disable_primaries_adjustments);
+
+  _update_primaries_checkbox_and_sliders(self);
+
+  // Ensure the graph is drawn initially
+  if (gui_data && gui_data->graph_drawing_area) {
+    gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
+  }
 }
 
 static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
@@ -1880,26 +1903,10 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->primaries_preset_combo), _("Load primaries settings from a preset"));
   gtk_box_pack_start(GTK_BOX(preset_hbox), GTK_WIDGET(gui_data->primaries_preset_combo), TRUE, TRUE, 0);
 
-  // Populate combobox
-  sqlite3_stmt *stmt;
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
-                              "SELECT name FROM data.presets WHERE operation = ?1 ORDER BY writeprotect DESC, LOWER(name), rowid",
-                              -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, self->op, -1, SQLITE_TRANSIENT);
-  gtk_combo_box_text_append(gui_data->primaries_preset_combo, NULL, _("select a preset..."));
-  while(sqlite3_step(stmt) == SQLITE_ROW)
-  {
-      const char *name = (const char *)sqlite3_column_text(stmt, 0);
-      gchar *local_name = dt_util_localize_segmented_name(name, TRUE);
-      gtk_combo_box_text_append(gui_data->primaries_preset_combo, name, local_name);
-      g_free(local_name);
-  }
-  sqlite3_finalize(stmt);
-  gtk_combo_box_set_active(GTK_COMBO_BOX(gui_data->primaries_preset_combo), 0);
-
+  _populate_primaries_presets_combobox(self);
   gui_data->primaries_preset_apply_button = gtk_button_new_with_label(_("apply"));
   gtk_widget_set_tooltip_text(gui_data->primaries_preset_apply_button, _("Apply primaries settings from the selected preset"));
-  g_signal_connect(gui_data->primaries_preset_apply_button, "clicked", G_CALLBACK(_apply_primaries_from_preset_cb), self);
+  g_signal_connect(gui_data->primaries_preset_apply_button, "clicked", G_CALLBACK(_apply_primaries_from_preset_callback), self);
   gtk_box_pack_start(GTK_BOX(preset_hbox), gui_data->primaries_preset_apply_button, FALSE, FALSE, 0);
 
   gtk_box_pack_start(GTK_BOX(primaries_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 5);
