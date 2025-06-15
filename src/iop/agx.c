@@ -206,6 +206,46 @@ typedef struct dt_iop_agx_data_t
   dt_iop_order_iccprofile_info_t rendering_profile;
 } dt_iop_agx_data_t;
 
+// Primaries preset deduplication: hashtable key type, hash and equality functions
+typedef struct
+{
+  dt_iop_agx_base_primaries_t base_primaries;
+  gboolean disable_primaries_adjustments;
+  float red_inset;
+  float red_rotation;
+  float green_inset;
+  float green_rotation;
+  float blue_inset;
+  float blue_rotation;
+  float master_outset_ratio;
+  float master_unrotation_ratio;
+  float red_outset;
+  float red_unrotation;
+  float green_outset;
+  float green_unrotation;
+  float blue_outset;
+  float blue_unrotation;
+} _agx_primaries_key;
+
+// djb2 hash
+static guint _agx_primaries_hash(gconstpointer p)
+{
+  guint hash = 5381;
+  const unsigned char *data = p;
+  size_t len = sizeof(_agx_primaries_key);
+
+  while(len-- > 0)
+  {
+    hash = (hash << 5) + hash + *data++;
+  }
+  return hash;
+}
+
+static gboolean _agx_primaries_equal(gconstpointer a, gconstpointer b)
+{
+  return memcmp(a, b, sizeof(_agx_primaries_key)) == 0;
+}
+
 // Translatable name
 const char *name()
 {
@@ -1788,21 +1828,71 @@ static void _populate_primaries_presets_combobox(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
   gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(gui_data->primaries_preset_combo));
 
+  // Use a hash table to track unique primaries configurations.
+  GHashTable *seen_presets = g_hash_table_new_full(_agx_primaries_hash, _agx_primaries_equal, g_free, NULL);
+
   sqlite3_stmt *stmt;
+  // Fetch name and parameters, filtering by current module version to ensure struct compatibility.
   DT_DEBUG_SQLITE3_PREPARE_V2(
       dt_database_get(darktable.db),
-      "SELECT name FROM data.presets WHERE operation = ?1 ORDER BY writeprotect DESC, LOWER(name), rowid", -1,
+      "SELECT name, op_params FROM data.presets WHERE operation = ?1 AND op_version = ?2 ORDER BY writeprotect DESC, LOWER(name), rowid", -1,
       &stmt, NULL);
   DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, self->op, -1, SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, self->version());
+
   gtk_combo_box_text_append(gui_data->primaries_preset_combo, NULL, _("select a preset..."));
+
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
-    const char *name = (const char *)sqlite3_column_text(stmt, 0);
-    gchar *local_name = dt_util_localize_segmented_name(name, TRUE);
-    gtk_combo_box_text_append(gui_data->primaries_preset_combo, name, local_name);
-    g_free(local_name);
+    const char *preset_name = (const char *)sqlite3_column_text(stmt, 0);
+    const int op_params_size = sqlite3_column_bytes(stmt, 1);
+    if(op_params_size != sizeof(dt_iop_agx_user_params_t))
+    {
+      dt_print(
+        DT_DEBUG_ALWAYS,
+        "invalid params size %u for preset %s",
+        op_params_size, preset_name);
+      continue;
+    }
+
+    const dt_iop_agx_user_params_t *preset_params = sqlite3_column_blob(stmt, 1);
+
+    _agx_primaries_key *key = g_new0(_agx_primaries_key, 1);
+    key->base_primaries = preset_params->base_primaries;
+    key->disable_primaries_adjustments = preset_params->disable_primaries_adjustments;
+    key->red_inset = preset_params->red_inset;
+    key->red_rotation = preset_params->red_rotation;
+    key->green_inset = preset_params->green_inset;
+    key->green_rotation = preset_params->green_rotation;
+    key->blue_inset = preset_params->blue_inset;
+    key->blue_rotation = preset_params->blue_rotation;
+    key->master_outset_ratio = preset_params->master_outset_ratio;
+    key->master_unrotation_ratio = preset_params->master_unrotation_ratio;
+    key->red_outset = preset_params->red_outset;
+    key->red_unrotation = preset_params->red_unrotation;
+    key->green_outset = preset_params->green_outset;
+    key->green_unrotation = preset_params->green_unrotation;
+    key->blue_outset = preset_params->blue_outset;
+    key->blue_unrotation = preset_params->blue_unrotation;
+
+    if(!g_hash_table_contains(seen_presets, key))
+    {
+      g_hash_table_insert(seen_presets, key, (gpointer)1);
+
+      gchar *local_name = dt_util_localize_segmented_name(preset_name, TRUE);
+      gtk_combo_box_text_append(gui_data->primaries_preset_combo, preset_name, local_name);
+      g_free(local_name); // 'name', OTOH, is managed by sqlite
+    }
+    else
+    {
+      // duplicate, discard
+      g_free(key);
+    }
   }
+
   sqlite3_finalize(stmt);
+  g_hash_table_destroy(seen_presets);
+
   gtk_combo_box_set_active(GTK_COMBO_BOX(gui_data->primaries_preset_combo), 0);
 }
 
