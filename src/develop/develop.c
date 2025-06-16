@@ -92,7 +92,6 @@ void dt_dev_init(dt_develop_t *dev,
 
   if(dev->gui_attached)
   {
-    printf("size: %lu\n", sizeof(dt_dev_pixelpipe_t));
     dev->full.pipe = malloc(sizeof(dt_dev_pixelpipe_t));
     dev->preview_pipe = malloc(sizeof(dt_dev_pixelpipe_t));
     dev->preview2.pipe = malloc(sizeof(dt_dev_pixelpipe_t));
