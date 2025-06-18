@@ -366,7 +366,7 @@ int legacy_params(dt_iop_module_t *self,
 
 void _print_transposed_matrix(const char* name, const dt_colormatrix_t matrix)
 {
-  printf("%s\n", name);
+  printf("%s (no longer transposed)\n", name);
   printf("%f, %f, %f\n", matrix[0][0], matrix[1][0], matrix[2][0]);
   printf("%f, %f, %f\n", matrix[0][1], matrix[1][1], matrix[2][1]);
   printf("%f, %f, %f\n", matrix[0][2], matrix[1][2], matrix[2][2]);
@@ -650,7 +650,7 @@ static float _apply_log_encoding(float x, float range_in_ev, float minEv)
   // Assume input is linear RGB relative to 0.18 mid-gray
   // Ensure value > 0 before log
   x = fmaxf(_epsilon, x / 0.18f);
-  float mapped = log2f(x);
+  float mapped = log2f(fmaxf(x, 0));
   // normalise to [0, 1] based on minEv and range_in_ev
   mapped = (mapped - minEv) / range_in_ev;
   // Clamp result to [0, 1] - this is the input domain for the curve
@@ -699,6 +699,11 @@ static void _compensate_low_side(
   dt_aligned_pixel_t pixel_in_out,
   const dt_iop_order_iccprofile_info_t *const profile)
 {
+  // for_each_channel(c, aligned(pixel_in_out))
+  // {
+  //   pixel_in_out[c] = fmaxf(pixel_in_out[c], 0.0f);
+  // }
+
   // from sigmoid; can create black pixels
   // e.g.
   // (-0.2, 0.2, 0.3) -> avg = 0.1, min = -0.2, saturation_factor = -0.1/(-0.2 - 0.1) = 1/3 -> (0, 0.13, 0.17)
@@ -1231,9 +1236,15 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
 
+    dt_aligned_pixel_t tmp;
+    tmp[0] = pix_in[0];
+    tmp[1] = pix_in[1];
+    tmp[2] = pix_in[2];
+    _compensate_low_side(tmp, pipe_work_profile);
+
     // Convert from pipe working space to internal rendering space
     dt_aligned_pixel_t rendering_RGB;
-    dt_apply_transposed_color_matrix(pix_in, processing_params->pipe_to_rendering_transposed, rendering_RGB);
+    dt_apply_transposed_color_matrix(tmp, processing_params->pipe_to_rendering_transposed, rendering_RGB);
 
     // Sanitize any negative values that may have resulted from the transform
     _compensate_low_side(rendering_RGB, &processing_params->rendering_profile);
@@ -2197,22 +2208,21 @@ void init_presets(dt_iop_module_so_t *self)
   _set_neutral_params(&user_params);
 
   dt_gui_presets_add_generic(_("unmodified base primaries"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+  // D50 Rec2020 settings that result in the same matrix as in the Blender AgX D65 settings
+  user_params.red_inset = 0.29462451;
+  user_params.green_inset = 0.25861925;
+  user_params.blue_inset = 0.14641371;
+  user_params.red_rotation = 0.03540329;
+  user_params.green_rotation = -0.02108586;
+  user_params.blue_rotation = -0.06305724;
 
-  // AgX primaries settings from Eary_Chow
-  // https://discuss.pixls.us/t/blender-agx-in-darktable-proof-of-concept/48697/1018
-  user_params.auto_gamma = FALSE; // uses a pre-configured gamma
-  user_params.red_inset = 0.32965205f;
-  user_params.green_inset = 0.28051336f;
-  user_params.blue_inset = 0.12475368f;
-  user_params.red_rotation = _degrees_to_radians(2.13976149);
-  user_params.green_rotation = _degrees_to_radians(-1.22827335f);
-  user_params.blue_rotation = _degrees_to_radians(-3.05174246f);
-  user_params.red_outset = 0.32317438f;
-  user_params.green_outset = 0.28325605f;
-  user_params.blue_outset = 0.0374326f;
-  user_params.red_unrotation = _degrees_to_radians(0.0f);
-  user_params.green_unrotation = _degrees_to_radians(0.0f);
-  user_params.blue_unrotation = _degrees_to_radians(0.0f);
+  user_params.red_outset = 0.29068848;
+  user_params.green_outset = 0.26049852;
+  user_params.blue_outset = 0.04855311;
+  user_params.red_unrotation = 0;
+  user_params.green_unrotation = 0;
+  user_params.blue_unrotation = 0;
+
   // Restore purity
   user_params.master_outset_ratio = 1.0f;
   user_params.master_unrotation_ratio = 1.0f;
