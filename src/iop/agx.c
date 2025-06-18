@@ -668,58 +668,31 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
   return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
 
-static void _avoid_negatives(dt_aligned_pixel_t pixel_in_out, const dt_iop_order_iccprofile_info_t *const profile)
-{
-  if (pixel_in_out[0] >= 0.0f && pixel_in_out[1] >= 0.0f && pixel_in_out[2] >= 0.0f)
-  {
-    // No compensation needed
-    return;
-  }
-
-  const float original_luminance = _luminance_from_profile(pixel_in_out, profile);
-  const float most_negative_component = _min(pixel_in_out);
-
-  // offset, so no component remains negative
-  for_three_channels(k, aligned(pixel_in_out : 16))
-  {
-    pixel_in_out[k] -= most_negative_component;
-  }
-
-  const float offset_luminance = _luminance_from_profile(pixel_in_out, profile);
-
-  const float luminance_correction = original_luminance / offset_luminance;
-
-  for_three_channels(k, aligned(pixel_in_out : 16))
-  {
-    pixel_in_out[k] *= luminance_correction;
-  }
-}
-
-static void _compensate_low_side(
-  dt_aligned_pixel_t pixel_in_out,
+static void _compress_into_gamut(
+  dt_aligned_pixel_t rgb,
   const dt_iop_order_iccprofile_info_t *const profile)
 {
-  // for_each_channel(c, aligned(pixel_in_out))
-  // {
-  //   pixel_in_out[c] = fmaxf(pixel_in_out[c], 0.0f);
-  // }
+  // Jed Smith- https://github.com/jedypod/gamut-compress
 
-  // from sigmoid; can create black pixels
-  // e.g.
-  // (-0.2, 0.2, 0.3) -> avg = 0.1, min = -0.2, saturation_factor = -0.1/(-0.2 - 0.1) = 1/3 -> (0, 0.13, 0.17)
-  // but
-  // (-0.3, 0.1, 0.1) -> avg = -0.1/3 => mapped to 0, min = -0.3, saturation_factor = 0; -> (0, 0, 0)
-  // average
-  const float pixel_average = fmaxf((pixel_in_out[0] + pixel_in_out[1] + pixel_in_out[2]) / 3.0f, 0.0f);
-  const float min_value = _min(pixel_in_out);
-  const float saturation_factor = min_value < 0.0f ? -pixel_average / (min_value - pixel_average) : 1.0f;
-  for_each_channel(c, aligned(pixel_in_out))
+  // Achromatic axis
+  const float achromatic = fmaxf(rgb[0], fmaxf(rgb[1], rgb[2]));
+
+  // compress into the top 20% of gamut
+  const float th = 1.0 - 0.2;
+  // compress up to 30% oversaturation
+  const float distance_limit = 1.0 + 0.3;
+  for_three_channels(k, aligned(rgb: 16))
   {
-    pixel_in_out[c] = pixel_average + saturation_factor * (pixel_in_out[c] - pixel_average);
+    // Inverse RGB Ratios: distance from achromatic axis
+    const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - rgb[k]) / fabs(achromatic);
+    // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
+    const float scale = (1.0f - th) / sqrtf(fmaxf(1.001f, distance_limit) - 1.0f);
+    // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
+    const float compressed_distance = distance_from_achromatic < th ? distance_from_achromatic :
+            scale * sqrtf(distance_from_achromatic - th + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + th;
+    // Inverse RGB Ratios to RGB
+    rgb[k] = achromatic - compressed_distance * fabsf(achromatic);
   }
-  // just in case any negative remains
-  // Sakari
-  _avoid_negatives(pixel_in_out, profile);
 }
 
 static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and_look_params_t *curve_and_look_params)
@@ -1240,14 +1213,14 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     tmp[0] = pix_in[0];
     tmp[1] = pix_in[1];
     tmp[2] = pix_in[2];
-    _compensate_low_side(tmp, pipe_work_profile);
+    _compress_into_gamut(tmp, pipe_work_profile);
 
     // Convert from pipe working space to internal rendering space
     dt_aligned_pixel_t rendering_RGB;
     dt_apply_transposed_color_matrix(tmp, processing_params->pipe_to_rendering_transposed, rendering_RGB);
 
     // Sanitize any negative values that may have resulted from the transform
-    _compensate_low_side(rendering_RGB, &processing_params->rendering_profile);
+    _compress_into_gamut(rendering_RGB, &processing_params->rendering_profile);
 
     // Apply the tone mapping curve and look adjustments
     _agx_tone_mapping(rendering_RGB, &processing_params->curve_params, processing_params->rendering_profile.matrix_in_transposed);
@@ -1256,7 +1229,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     dt_apply_transposed_color_matrix(rendering_RGB, processing_params->rendering_to_pipe_transposed, pix_out);
 
     // Sanitize any negative values that may have resulted from the final transform
-    _compensate_low_side(pix_out, pipe_work_profile);
+    _compress_into_gamut(pix_out, pipe_work_profile);
 
     // Copy over the alpha channel
     pix_out[3] = pix_in[3];
