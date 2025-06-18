@@ -34,9 +34,9 @@ You are strongly advised to take a backup first.
 
 Since darktable 5.0:
 
-- ??? commits to darktable+rawspeed
-- ??? pull requests handled
-- ??? issues closed
+- 1099 commits to darktable+rawspeed
+- 386 pull requests handled
+- 49 issues closed
 
 _Please note that the darktable documentation is not currently complete for release 5.2
 and contributions are greatly appreciated. Please see the
@@ -181,8 +181,6 @@ changes (where available).
   of physical screen resolution, added pop-up window for
   parameterization and removed ISO12464 reference.
 
-- Attach export ICC profile to JP2 images.
-
 - Improved visibility of masks in darkroom. This is controlled by the
   new hidden "darkroom/ui/develop_mask_mix" configuration option.
 
@@ -234,7 +232,7 @@ changes (where available).
   correctly when the field loses the input focus.
 
 - Fixed incorrect reporting of whether a flash was fired in expansion
-  variables $(EXIF.FLASH.ICON) and $(EXIF.FLASH) under certain
+  variables `$(EXIF.FLASH.ICON)` and `$(EXIF.FLASH)` under certain
   conditions.
 
 - Fixed the edit style dialog to show all module's duplicates. Also,
@@ -246,6 +244,23 @@ changes (where available).
 
 - Fixed display of image using a composite module when the modules are
   reordered.
+
+- Many TIFF loader fixes and improvements:
+
+    - Fixed crash on files for which libtiff would issue warnings or errors
+
+    - Fixed crash on files with missing SAMPLESPERPIXEL tag
+
+    - Enabled CMYK TIFF support
+
+    - Added support for loading TIFF with missing/undefined sample format
+
+    - Fixed reading of grayscale images with min-is-white interpretation
+      (made them not inverted)
+
+    - Fixed regression in support of many more exotic variations
+      of the TIFF format, such as tiled encoding, planar layout,
+      uncommon bit depths (such as 12 or 14 bits, or less than 8)
 
 ## Lua
 
@@ -293,21 +308,81 @@ changes (where available).
 
 ## RawSpeed changes
 
-- Fujifilm GFX cameras now use the vendor supplied crop
+- OM System 14-bit high-resolution ORFs are now supported.
+- Canon EOS 5D Mark II crop was updated.
+- Fujifilm FinePix X100 crop was updated.
+- Samsung EX1 crop and white level were updated.
+- Sony ILCE-1M2 color matrix was updated.
 
-## Camera support, compared to 4.8
+## Camera support, compared to 5.0
 
 ### Base Support
 
-- ???
+- Canon EOS R5 C (requires LibRaw 202502 and later)
+- Fujifilm GFX100RF (compressed)
+- Fujifilm GFX100S II (compressed)
+- Nikon 1 J5
+- Nikon 1 V3
+- Nikon COOLPIX P1100 (12bit-uncompressed)
+- Nikon Coolpix P340
+- Nikon D100
+- Nikon D200
+- Nikon D2Hs
+- Nikon D2X
+- Nikon D3300
+- Nikon D3X
+- Nikon D40
+- Nikon D40X
+- Nikon D5
+- Nikon D5000
+- Nikon D5300
+- Nikon D5500
+- Nikon D5600
+- Nikon D60
+- Nikon D80
+- Nikon D800
+- Nikon D800E
+- Nikon D90
+- Nikon Z5_2 (14bit-compressed)
+- OM System OM-3
+- Olympus SP510UZ
+- Panasonic DC-G97 (4:3)
+- Panasonic DC-G9M2 (4:3)
+- Panasonic DC-GH6 (4:3)
+- Panasonic DC-S1RM2 (3:2)
+- Panasonic DC-S5M2 (3:2)
+- Panasonic DC-S5M2X (3:2)
+- Panasonic DC-S9 (3:2)
+- Panasonic DC-TZ99 (4:3)
+- Panasonic DC-ZS99 (4:3)
+- Phase One IQ150
+- Phase One P40+
+- Samsung GX20
+- Sigma BF (DNG)
+- Sigma DP1 (DNG)
+- Sigma DP1 Merrill (DNG)
+- Sinar Hy6 (DNG)
+- Sony DSC-RX100M7A
+- Sony ILCE-6100A
+- Sony ILCE-6400A
+- Sony ILME-FX3A
+- Sony ZV-1A
+- Sony ZV-E10M2
 
 ### White Balance Presets
 
-- ???
+- Fujifilm GFX100 II
+- OM System OM-3
+- Panasonic DC-S9
 
 ### Noise Profiles
 
-- ???
+- Fujifilm GFX 100
+- Leica SL2
+- OM System OM-3
+- Panasonic DC-S1RM2
+- Panasonic DC-S9
+- Sony ILCE-1M2
 
 ### Missing Compression Mode Support
 
@@ -316,7 +391,7 @@ changes (where available).
 - DNG 1.7 using JPEG XL (Adobe enhanced, Samsung Expert RAW)
 - Fujifilm lossy RAFs
 - Nikon high efficiency NEFs
-- OM System 14-bit high resolution ORFs
+- Phase One other than IIQ L
 - Sony downsized lossless ARWs ("M" for full-frame, "S" for full-frame & APS-C)
 
 ### Suspended Support
@@ -331,7 +406,6 @@ Support for the following cameras is suspended because no samples are available 
 - Leaf Credo 80
 - Olympus SP320
 - Phase One IQ250
-- Sinar Hy6/ Sinarback eXact
 - ST Micro STV680
 
 ## Translations
