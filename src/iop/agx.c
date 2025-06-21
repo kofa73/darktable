@@ -2276,9 +2276,9 @@ void init_presets(dt_iop_module_so_t *self)
   user_params.green_unrotation = 0;
   user_params.blue_unrotation = 0;
 
-  // Restore purity
   user_params.master_outset_ratio = 1.0f;
   user_params.master_unrotation_ratio = 1.0f;
+  user_params.look_original_hue_mix_ratio = 0.4f;
   user_params.base_primaries = DT_AGX_REC2020;
 
   const char *workflow = dt_conf_get_string_const("plugins/darkroom/workflow");
@@ -2296,6 +2296,37 @@ void init_presets(dt_iop_module_so_t *self)
   user_params.look_offset = 0.0f;
   user_params.look_saturation = 1.4f;
   dt_gui_presets_add_generic(_("blender-like|punchy"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  _set_neutral_params(&user_params);
+
+  // AgX primaries settings that produce the same matrices under D50 as those used in the Blender OCIO config
+  // https://github.com/EaryChow/AgX_LUT_Gen/blob/main/AgXBaseRec2020.py
+  user_params.red_inset = 0.29462451;
+  user_params.green_inset = 0.25861925;
+  user_params.blue_inset = 0.14641371;
+  user_params.red_rotation = 0.03540329;
+  user_params.green_rotation = -0.02108586;
+  user_params.blue_rotation = -0.06305724;
+
+  user_params.red_outset = 0.29068848;
+  user_params.green_outset = 0.26049852;
+  user_params.blue_outset = 0.04855311;
+  user_params.red_unrotation = 0;
+  user_params.green_unrotation = 0;
+  user_params.blue_unrotation = 0;
+
+  user_params.master_outset_ratio = 1.0f;
+  user_params.master_unrotation_ratio = 1.0f;
+  user_params.look_original_hue_mix_ratio = 0.4f;
+  user_params.base_primaries = DT_AGX_REC2020;
+
+  dt_gui_presets_add_generic(_("blender-like|tuned"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  // Punchy preset
+  user_params.look_power = 1.35f;
+  user_params.look_offset = 0.0f;
+  user_params.look_saturation = 1.4f;
+  dt_gui_presets_add_generic(_("blender-like|tuned punchy"), self->op, self->version(), &user_params, sizeof(user_params), 1, DEVELOP_BLEND_CS_RGB_SCENE);
 
   _set_neutral_params(&user_params);
   // Sigmoid 'smooth' primaries settings
