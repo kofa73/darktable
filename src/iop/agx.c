@@ -774,9 +774,7 @@ static void _gamut_compress_blender(dt_aligned_pixel_t pixel_in_out)
   }
 }
 
-static void _compress_into_gamut(
-  dt_aligned_pixel_t pixel_in_out,
-  const dt_iop_order_iccprofile_info_t *const profile)
+static void _compress_into_gamut(dt_aligned_pixel_t pixel_in_out)
 {
   _gamut_compress_blender(pixel_in_out);
   //_gamut_compress_jed_smith(pixel_in_out);
@@ -1282,8 +1280,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   float *const out = ovoid;
   const size_t n_pixels = (size_t)roi_in->width * roi_in->height;
 
-  const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
-
   DT_OMP_FOR()
   for (size_t k = 0; k < 4 * n_pixels; k += 4)
   {
@@ -1294,7 +1290,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     dt_aligned_pixel_t base_rgb;
     dt_apply_transposed_color_matrix(pix_in, processing_params->pipe_to_base_transposed, base_rgb);
 
-    _compress_into_gamut(base_rgb, pipe_work_profile);
+    _compress_into_gamut(base_rgb);
 
     dt_aligned_pixel_t rendering_rgb;
     dt_apply_transposed_color_matrix(base_rgb, processing_params->base_to_rendering_transposed, rendering_rgb);
@@ -1304,9 +1300,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     // Convert from internal rendering space back to pipe working space
     dt_apply_transposed_color_matrix(rendering_rgb, processing_params->rendering_to_pipe_transposed, pix_out);
-
-    // Sanitize any negative values that may have resulted from the final transform
-    _compress_into_gamut(pix_out, pipe_work_profile);
 
     // Copy over the alpha channel
     pix_out[3] = pix_in[3];
