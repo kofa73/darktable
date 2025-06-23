@@ -1748,12 +1748,12 @@ static void _add_curve_graph(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_d
   gtk_box_pack_start(GTK_BOX(parent), graph_box, FALSE, FALSE, 0);
   self->widget = graph_box;
 
-  dt_gui_new_collapsible_section(&gui_data->graph_section, "plugins/darkroom/agx/show_curve", _("show curve"),
+  dt_gui_new_collapsible_section(&gui_data->graph_section, "plugins/darkroom/agx/expand_curve_graph", _("show curve"),
                                  GTK_BOX(graph_box), DT_ACTION(self));
   GtkWidget *graph_container = GTK_WIDGET(gui_data->graph_section.container);
   gui_data->graph_drawing_area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
-                                                                    0, // Initial height factor
-                                                                    "plugins/darkroom/agx/graphheight"));
+                                                                    0,
+                                                                    "plugins/darkroom/agx/curve_graph_height"));
   g_object_set_data(G_OBJECT(gui_data->graph_drawing_area), "iop-instance", self);
   dt_action_define_iop(self, NULL, N_("graph"), GTK_WIDGET(gui_data->graph_drawing_area), NULL);
   gtk_widget_set_can_focus(GTK_WIDGET(gui_data->graph_drawing_area), TRUE);
@@ -2170,7 +2170,7 @@ void gui_init(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *gui_data = IOP_GUI_ALLOC(agx);
   GtkWidget *main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
-  gui_data->curve_tab_enabled = dt_conf_get_bool("plugins/darkroom/agx/curve_tab_enabled");
+  gui_data->curve_tab_enabled = dt_conf_get_bool("plugins/darkroom/agx/enable_curve_tab");
 
   // the notebook
   static dt_action_def_t notebook_def = {};
