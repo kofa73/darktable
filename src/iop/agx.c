@@ -20,11 +20,6 @@
 #include <pango/pangocairo.h>
 #include <stdlib.h>
 
-#pragma GCC diagnostic ignored "-Wunused-variable"
-#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-#pragma GCC diagnostic ignored "-Wunused-function"
-
-
 // Module introspection version
 DT_MODULE_INTROSPECTION(2, dt_iop_agx_user_params_t)
 
@@ -32,7 +27,6 @@ static const float _epsilon = 1E-6f;
 
 typedef enum dt_iop_agx_base_primaries_t
 {
-  // NOTE: Keep Export Profile first to make it the default (index 0)
   DT_AGX_EXPORT_PROFILE = 0,         // $DESCRIPTION: "export profile"
   DT_AGX_WORK_PROFILE = 1,           // $DESCRIPTION: "working profile"
   DT_AGX_REC2020 = 2,                // $DESCRIPTION: "Rec2020"
@@ -365,15 +359,6 @@ int legacy_params(dt_iop_module_t *self,
   return 1; // no other conversion possible
 }
 
-void _print_transposed_matrix(const char* name, const dt_colormatrix_t matrix)
-{
-  printf("%s (no longer transposed)\n", name);
-  printf("%f, %f, %f\n", matrix[0][0], matrix[1][0], matrix[2][0]);
-  printf("%f, %f, %f\n", matrix[0][1], matrix[1][1], matrix[2][1]);
-  printf("%f, %f, %f\n", matrix[0][2], matrix[1][2], matrix[2][2]);
-  printf("\n\n");
-}
-
 static dt_colorspaces_color_profile_type_t _get_base_profile_type_from_enum(const dt_iop_agx_base_primaries_t base_primaries_enum)
 {
   switch(base_primaries_enum)
@@ -492,31 +477,23 @@ static float _line(const float x, const float slope, const float intercept)
 static float _scale(float limit_x, float limit_y, float transition_x, float transition_y, float slope, float power)
 {
   const float dy_limit_to_transition_at_constant_slope = slope * (limit_x - transition_x);
-  printf("dy_limit_to_transition = %f\n", dy_limit_to_transition_at_constant_slope);
 
   const float dy_to_power = powf(dy_limit_to_transition_at_constant_slope, -power);
-  printf("dy_to_power = %f\n", dy_to_power);
 
   // in case the linear section extends too far; avoid division by 0
   const float remaining_y_span = fmaxf(_epsilon, limit_y - transition_y);
-  printf("remaining_y_span = %f\n", remaining_y_span);
 
   const float y_delta_ratio = dy_limit_to_transition_at_constant_slope / remaining_y_span;
-  printf("y_delta_ratio = %f\n", y_delta_ratio);
 
   float term_b = powf(y_delta_ratio, power) - 1.0f;
   term_b = fmaxf(term_b, _epsilon);
-  printf("term_b = %f\n", term_b);
 
   const float base = dy_to_power * term_b;
-  printf("base = %f\n", base);
 
   float scale_value = powf(base, -1.0f / power);
 
   scale_value = fminf(1e9, scale_value);
   scale_value = fmaxf(-1e9, scale_value);
-
-  printf("scale_value = %f\n", scale_value);
 
   return scale_value;
 }
@@ -669,60 +646,7 @@ static float _calculate_A(const float dx_transition_to_limit, const float dy_tra
   return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
 
-static void _gamut_compress_jed_smith(dt_aligned_pixel_t pixel_in_out)
-{
-  static float max_distance = 1;
-
-  // Jed Smith- https://github.com/jedypod/gamut-compress
-  // Achromatic axis
-  const float achromatic = fmaxf(pixel_in_out[0], fmaxf(pixel_in_out[1], pixel_in_out[2]));
-
-  // compress into the top 20% of gamut
-  const float compression_buffer_size = 0.2;
-  const float compression_start_distance = 1.0 - compression_buffer_size;
-  // compress up to 30% oversaturation -- darktable's color calibration seems to never produce pixels
-  // with a distance higher than 1.25 with default gamut compression settings
-  const float distance_limit = 1.0 + 0.25;
-  for_three_channels(k, aligned(pixel_in_out : 16))
-  {
-    // Inverse pixel_in_out Ratios: distance from achromatic axis
-    const float distance_from_achromatic
-        = achromatic == 0.0f ? 0.0f : (achromatic - pixel_in_out[k]) / fabs(achromatic);
-    if (distance_from_achromatic > max_distance)
-    {
-      max_distance = fmaxf(max_distance, distance_from_achromatic);
-      printf("Max distance from achromatic: %f\n", max_distance);
-    }
-    // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
-    const float scale = compression_buffer_size / sqrtf(fmaxf(1.001f, distance_limit) - 1.0f);
-    // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
-    const float compressed_distance = distance_from_achromatic < compression_start_distance
-                                          ? distance_from_achromatic
-                                          : scale * sqrtf(distance_from_achromatic - compression_start_distance + scale * scale / 4.0f)
-                                                - scale * sqrtf(scale * scale / 4.0f) + compression_start_distance;
-    // Inverse pixel_in_out Ratios to pixel_in_out
-    pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
-  }
-}
-
-static void _gamut_compress_sigmoid(dt_aligned_pixel_t pixel_in_out)
-{
-  // from sigmoid; can create black pixels
-  // e.g.
-  // (-0.2, 0.2, 0.3) -> avg = 0.1, min = -0.2, saturation_factor = -0.1/(-0.2 - 0.1) = 1/3 -> (0, 0.13, 0.17)
-  // but
-  // (-0.3, 0.1, 0.1) -> avg = -0.1/3 => mapped to 0, min = -0.3, saturation_factor = 0; -> (0, 0, 0)
-  // average
-  const float pixel_average = fmaxf((pixel_in_out[0] + pixel_in_out[1] + pixel_in_out[2]) / 3.0f, 0.0f);
-  const float min_value = _min(pixel_in_out);
-  const float saturation_factor = min_value < 0.0f ? -pixel_average / (min_value - pixel_average) : 1.0f;
-  for_each_channel(c, aligned(pixel_in_out))
-  {
-    pixel_in_out[c] = pixel_average + saturation_factor * (pixel_in_out[c] - pixel_average);
-  }
-}
-
-static void _gamut_compress_blender(dt_aligned_pixel_t pixel_in_out)
+static void _compress_into_gamut(dt_aligned_pixel_t pixel_in_out)
 {
   // Blender: https://github.com/EaryChow/AgX_LUT_Gen/blob/main/luminance_compenstation_bt2020.py
   // Calculate original luminance
@@ -774,12 +698,6 @@ static void _gamut_compress_blender(dt_aligned_pixel_t pixel_in_out)
   }
 }
 
-static void _compress_into_gamut(dt_aligned_pixel_t pixel_in_out)
-{
-  _gamut_compress_blender(pixel_in_out);
-  //_gamut_compress_jed_smith(pixel_in_out);
-}
-
 static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and_look_params_t *curve_and_look_params)
 {
   const float mid_gray_in_log_range = fabsf(curve_and_look_params->min_ev / curve_and_look_params->range_in_ev);
@@ -810,24 +728,16 @@ static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and
     curve_and_look_params->curve_gamma = user_params->curve_gamma;
   }
 
-  printf("curve_gamma = %f, using auto: %d\n", curve_and_look_params->curve_gamma, user_params->auto_gamma);
-
   curve_and_look_params->pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_percent / 100.0,
                                 user_params->curve_target_display_white_percent / 100.0),
                          1.0f / curve_and_look_params->curve_gamma);
-
-  printf("pivot(%f, %f) at gamma = %f, curve_pivot_y_linear = %f\n", curve_and_look_params->pivot_x, curve_and_look_params->pivot_y, curve_and_look_params->curve_gamma,
-         user_params->curve_pivot_y_linear);
 }
 
 static void _calculate_log_mapping_params(const dt_iop_agx_user_params_t* user_params, curve_and_look_params_t* curve_and_look_params)
 {
   curve_and_look_params->max_ev = user_params->range_white_relative_exposure;
-  printf("max_ev = %f\n", curve_and_look_params->max_ev);
   curve_and_look_params->min_ev = user_params->range_black_relative_exposure;
-  printf("min_ev = %f\n", curve_and_look_params->min_ev);
   curve_and_look_params->range_in_ev = curve_and_look_params->max_ev - curve_and_look_params->min_ev;
-  printf("range_in_ev = %f\n", curve_and_look_params->range_in_ev);
 }
 
 static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
@@ -841,8 +751,6 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   curve_and_look_params.look_power = user_params->look_power;
   curve_and_look_params.look_original_hue_mix_ratio = user_params->look_original_hue_mix_ratio;
 
-  printf("===== curve params calculation =====\n");
-
   // log mapping
   _calculate_log_mapping_params(user_params, &curve_and_look_params);
 
@@ -850,25 +758,20 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
 
   // avoid range altering slope - 16.5 EV is the default AgX range; keep the meaning of slope
   curve_and_look_params.slope = user_params->curve_contrast_around_pivot * (curve_and_look_params.range_in_ev / 16.5f);
-  printf("scaled slope = %f from user_contrast_around_pivot = %f\n", curve_and_look_params.slope, user_params->curve_contrast_around_pivot);
 
   // toe
   curve_and_look_params.target_black = powf(user_params->curve_target_display_black_percent / 100.0f, 1.0f / curve_and_look_params.curve_gamma);
-  printf("target_black = %f\n", curve_and_look_params.target_black);
   curve_and_look_params.toe_power = user_params->curve_toe_power;
-  printf("toe_power = %f\n", curve_and_look_params.toe_power);
 
   const float remaining_y_below_pivot = curve_and_look_params.pivot_y - curve_and_look_params.target_black;
   const float toe_length_y = remaining_y_below_pivot * user_params->curve_linear_percent_below_pivot  / 100.0f;
   const float dx_linear_below_pivot = toe_length_y / curve_and_look_params.slope;
   // ...and subtract it from pivot_x to get the x coordinate where the linear section joins the toe
   curve_and_look_params.toe_transition_x = curve_and_look_params.pivot_x - dx_linear_below_pivot;
-  printf("toe_transition_x = %f\n", curve_and_look_params.toe_transition_x);
 
   // from the 'run' pivot_x->toe_transition_x, we calculate the 'rise'
   const float toe_y_below_pivot_y = curve_and_look_params.slope * dx_linear_below_pivot;
   curve_and_look_params.toe_transition_y = curve_and_look_params.pivot_y - toe_y_below_pivot_y;
-  printf("toe_transition_y = %f\n", curve_and_look_params.toe_transition_y);
 
   const float toe_dx_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_x); // limit_x is 0; use epsilon to avoid division by 0 later
   const float toe_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_y - curve_and_look_params.target_black);
@@ -885,53 +788,37 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   curve_and_look_params.toe_scale = -_scale(inverse_toe_limit_x, inverse_toe_limit_y,
                                     inverse_toe_transition_x, inverse_toe_transition_y,
                                     curve_and_look_params.slope, curve_and_look_params.toe_power);
-  printf("toe_scale = %f\n", curve_and_look_params.toe_scale);
 
   curve_and_look_params.need_convex_toe = toe_slope_transition_to_limit > curve_and_look_params.slope;
-  printf("need_convex_toe = %d\n", curve_and_look_params.need_convex_toe);
 
   // toe fallback curve params
   curve_and_look_params.toe_b = _calculate_B(curve_and_look_params.slope, toe_dx_transition_to_limit, toe_dy_transition_to_limit);
-  printf("toe_b = %f\n", curve_and_look_params.toe_b);
   curve_and_look_params.toe_a = _calculate_A(toe_dx_transition_to_limit, toe_dy_transition_to_limit, curve_and_look_params.toe_b);
-  printf("toe_a = %f\n", curve_and_look_params.toe_a);
 
   // if x went from toe_transition_x to 0, at the given slope, starting from toe_transition_y, where would we intersect the y-axis?
   curve_and_look_params.intercept = curve_and_look_params.toe_transition_y - curve_and_look_params.slope * curve_and_look_params.toe_transition_x;
-  printf("intercept = %f\n", curve_and_look_params.intercept);
 
   // shoulder
   curve_and_look_params.target_white = powf(user_params->curve_target_display_white_percent / 100.0, 1.0f / curve_and_look_params.curve_gamma);
-  printf("target_white = %f\n", curve_and_look_params.target_white);
   const float remaining_y_above_pivot = curve_and_look_params.target_white - curve_and_look_params.pivot_y;
   const float shoulder_length_y = remaining_y_above_pivot * user_params->curve_linear_percent_above_pivot / 100.0f;
   const float dx_linear_above_pivot = shoulder_length_y / curve_and_look_params.slope;
   curve_and_look_params.shoulder_transition_x = curve_and_look_params.pivot_x + dx_linear_above_pivot;
-  printf("shoulder_transition_x = %f\n", curve_and_look_params.shoulder_transition_x);
   curve_and_look_params.shoulder_transition_y = curve_and_look_params.pivot_y + shoulder_length_y;
-  printf("shoulder_transition_y = %f\n", curve_and_look_params.shoulder_transition_y);
   const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - curve_and_look_params.shoulder_transition_x); // dx to 0, avoid division by 0 later
   const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.target_white - curve_and_look_params.shoulder_transition_y);
   const float shoulder_slope_transition_to_limit = shoulder_dy_transition_to_limit / shoulder_dx_transition_to_limit;
   curve_and_look_params.shoulder_power = user_params->curve_shoulder_power;
-  printf("shoulder_power = %f\n", curve_and_look_params.shoulder_power);
 
   const float shoulder_limit_x = 1;
   curve_and_look_params.shoulder_scale = _scale(shoulder_limit_x, curve_and_look_params.target_white,
                                     curve_and_look_params.shoulder_transition_x, curve_and_look_params.shoulder_transition_y,
                                     curve_and_look_params.slope, curve_and_look_params.shoulder_power);
-  printf("shoulder_scale = %f\n", curve_and_look_params.shoulder_scale);
   curve_and_look_params.need_concave_shoulder = shoulder_slope_transition_to_limit > curve_and_look_params.slope;
-  printf("need_concave_shoulder = %d\n", curve_and_look_params.need_concave_shoulder);
 
   // shoulder fallback curve params
   curve_and_look_params.shoulder_b = _calculate_B(curve_and_look_params.slope, shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit);
-  printf("shoulder_b = %f\n", curve_and_look_params.shoulder_b);
   curve_and_look_params.shoulder_a = _calculate_A(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, curve_and_look_params.shoulder_b);
-  printf("shoulder_a = %f\n", curve_and_look_params.shoulder_a);
-
-
-  printf("================== end ==================\n");
 
   return curve_and_look_params;
 }
@@ -1119,44 +1006,18 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
   --darktable.gui->reset;
 }
 
-void _print_curve(const curve_and_look_params_t *curve_params)
+static void _create_matrices(
+    const dt_iop_agx_user_params_t *user_params,
+    const dt_iop_order_iccprofile_info_t *pipe_work_profile,
+    const dt_iop_order_iccprofile_info_t *base_profile,
+    // outputs
+    dt_colormatrix_t rendering_to_xyz_transposed,
+    dt_colormatrix_t pipe_to_base_transposed,
+    dt_colormatrix_t base_to_rendering_transposed,
+    dt_colormatrix_t rendering_to_pipe_transposed)
 {
-  const int steps = 100;
-  printf("\nCurve\n");
-  for (int i = 0; i <= steps; i++)
-  {
-    float x = i / (float)steps;
-    const float y = _apply_curve(x, curve_params);
-    printf("%f\t%f\n", x, y);
-  }
-  printf("\n");
-}
-
-void _print_primaries(char *name, const float (*primaries)[2])
-{
-  printf("%s\n", name);
-  printf("%f, %f\n", primaries[0][0], primaries[0][1]);
-  printf("%f, %f\n", primaries[1][0], primaries[1][1]);
-  printf("%f, %f\n", primaries[2][0], primaries[2][1]);
-  printf("\n\n");
-}
-
-void _print_whitepoint(char * name, const float * wp)
-{
-  printf("%s\n", name);
-  printf("%f, %f\n", wp[0], wp[1]);
-  printf("\n\n");
-}
-
-static void _calculate_adjusted_primaries(const primaries_params_t *const params,
-                                          const dt_iop_order_iccprofile_info_t *const pipe_work_profile,
-                                          const dt_iop_order_iccprofile_info_t *const base_profile,
-                                          // outputs
-                                          dt_colormatrix_t rendering_to_xyz_transposed,
-                                          dt_colormatrix_t pipe_to_base_transposed,
-                                          dt_colormatrix_t base_to_rendering_transposed,
-                                          dt_colormatrix_t rendering_to_pipe_transposed)
-{
+  const primaries_params_t params = _get_primaries_params(user_params);
+  
   // Make adjusted primaries for generating the inset matrix
   //
   // References:
@@ -1171,35 +1032,27 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   // The primaries are also rotated to compensate for Abney etc.
   // and achieve a favourable shift towards yellow.
 
-  _print_transposed_matrix("pipe_work_profile->matrix_in_transposed", pipe_work_profile->matrix_in_transposed);
-  _print_primaries("pipe_work_profile->primaries", pipe_work_profile->primaries);
-  _print_whitepoint("pipe_work_profile->whitepoint", pipe_work_profile->whitepoint);
-
   // First, calculate the matrix from pipe the work profile to the base profile whose primaries
   // will be rotated/inset.
   dt_colormatrix_mul(pipe_to_base_transposed,
                      pipe_work_profile->matrix_in_transposed,   // pipe->XYZ
                      base_profile->matrix_out_transposed);      // XYZ->base
-  _print_transposed_matrix("pipe_to_base_transposed", pipe_to_base_transposed);
-  printf("base_profile.nonlinearlut: %d\n", base_profile->nonlinearlut);
 
   dt_colormatrix_t base_to_pipe_transposed;
   mat3SSEinv(base_to_pipe_transposed, pipe_to_base_transposed);
-  _print_transposed_matrix("base_to_pipe_transposed", base_to_pipe_transposed);
 
   // inbound path, base RGB->inset and rotated rendering space for the curve
 
   // Rotated, scaled primaries are calculated based on the base profile.
   float inset_and_rotated_primaries[3][2];
   for (size_t i = 0; i < 3; i++)
-    dt_rotate_and_scale_primary(base_profile, 1.f - params->inset[i], params->rotation[i], i, inset_and_rotated_primaries[i]);
+    dt_rotate_and_scale_primary(base_profile, 1.f - params.inset[i], params.rotation[i], i, inset_and_rotated_primaries[i]);
 
   // The matrix to convert from the inset/rotated to XYZ. When applying to the RGB values that are actually
   // in the 'base' space, it will convert them to XYZ coordinates that represent colors that are partly
   // desaturated (due to the inset) and skewed (do to the rotation).
   dt_make_transposed_matrices_from_primaries_and_whitepoint(inset_and_rotated_primaries, base_profile->whitepoint,
                                                             rendering_to_xyz_transposed);
-  _print_transposed_matrix("rendering_to_xyz_transposed", rendering_to_xyz_transposed);
 
   // The matrix to convert colors from the original 'base' space to their partially desaturated and skewed
   // versions, using the inset RGB->XYZ and the original base XYZ->RGB matrices.
@@ -1207,7 +1060,6 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
                       rendering_to_xyz_transposed,
                       base_profile->matrix_out_transposed
                       );
-  _print_transposed_matrix("base_to_rendering_transposed", base_to_rendering_transposed);
 
   // outbound path, inset and rotated working space for the curve->base RGB
 
@@ -1216,8 +1068,8 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   float outset_and_unrotated_primaries[3][2];
   for (size_t i = 0; i < 3; i++)
   {
-    const float scaling = 1.f - params->master_outset_ratio * params->outset[i];
-    dt_rotate_and_scale_primary(base_profile, scaling, params->master_unrotation_ratio * params->unrotation[i], i, outset_and_unrotated_primaries[i]);
+    const float scaling = 1.f - params.master_outset_ratio * params.outset[i];
+    dt_rotate_and_scale_primary(base_profile, scaling, params.master_unrotation_ratio * params.unrotation[i], i, outset_and_unrotated_primaries[i]);
   }
 
   // The matrix to convert the curve's output to XYZ; the primaries reflect the fact that the curve's output
@@ -1228,43 +1080,19 @@ static void _calculate_adjusted_primaries(const primaries_params_t *const params
   dt_colormatrix_t outset_and_unrotated_to_xyz_transposed;
   dt_make_transposed_matrices_from_primaries_and_whitepoint(outset_and_unrotated_primaries, base_profile->whitepoint,
                                                             outset_and_unrotated_to_xyz_transposed);
-  _print_transposed_matrix("outset_and_unrotated_to_xyz_transposed", outset_and_unrotated_to_xyz_transposed);
 
   dt_colormatrix_t tmp;
   dt_colormatrix_mul(tmp,
     outset_and_unrotated_to_xyz_transposed,  // custom (outset, unrotation)->XYZ
     base_profile->matrix_out_transposed      // XYZ->base
     );
-  _print_transposed_matrix("tmp (inverse of rendering_to_base_transposed)", tmp);
+
   // 'tmp' is constructed the same way as inbound_inset_and_rotated_to_xyz_transposed,
   // but this matrix will be used to remap colours to the 'base' profile, so we need to invert it.
   dt_colormatrix_t rendering_to_base_transposed;
   mat3SSEinv(rendering_to_base_transposed, tmp);
-  _print_transposed_matrix("rendering_to_base_transposed", rendering_to_base_transposed);
 
   dt_colormatrix_mul(rendering_to_pipe_transposed, rendering_to_base_transposed, base_to_pipe_transposed);
-}
-
-static void _create_matrices(
-    const dt_iop_agx_user_params_t *user_params,
-    const dt_iop_order_iccprofile_info_t *pipe_work_profile,
-    const dt_iop_order_iccprofile_info_t *base_profile,
-    // outputs
-    dt_colormatrix_t rendering_to_xyz_transposed,
-    dt_colormatrix_t pipe_to_base_transposed,
-    dt_colormatrix_t base_to_rendering_transposed,
-    dt_colormatrix_t rendering_to_pipe_transposed)
-{
-  const primaries_params_t primaries_params = _get_primaries_params(user_params);
-  _calculate_adjusted_primaries(
-    &primaries_params,
-    pipe_work_profile,
-    base_profile,
-    // outputs
-    rendering_to_xyz_transposed,
-    pipe_to_base_transposed,
-    base_to_rendering_transposed,
-    rendering_to_pipe_transposed);
 }
 
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
@@ -2400,32 +2228,6 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *gui_params, dt_dev_pi
     dt_print(DT_DEBUG_ALWAYS, "[agx commit_params] Failed to obtain a valid base profile. Module will not run correctly.");
     return;
   }
-/*
-  const float red = 0.1;
-  const float green = -0.2;
-  const float blue = 1;
-  dt_aligned_pixel_t rgb;
-  rgb[0] = red; rgb[1] = green; rgb[2] = blue; rgb[3] = 0;
-  _gamut_compress_jed_smith(rgb);
-  printf("original -> jed: %f, %f, %f\n", rgb[0], rgb[1], rgb[2]);
-  _gamut_compress_jed_smith(rgb);
-  printf("compressed -> jed: %f, %f, %f\n", rgb[0], rgb[1], rgb[2]);
-  rgb[0] = 0.2; rgb[1] = 0.3; rgb[2] = 1; rgb[3] = 0;
-  _gamut_compress_jed_smith(rgb);
-  printf("inside protected -> jed: %f, %f, %f\n", rgb[0], rgb[1], rgb[2]);
-
-  rgb[0] = red; rgb[1] = green; rgb[2] = blue; rgb[3] = 0;
-  _gamut_compress_blender(rgb);
-  printf("blender: %f, %f, %f\n", rgb[0], rgb[1], rgb[2]);
-  _gamut_compress_blender(rgb);
-  printf("compressed -> blender: %f, %f, %f\n", rgb[0], rgb[1], rgb[2]);
-
-  rgb[0] = red; rgb[1] = green; rgb[2] = blue; rgb[3] = 0;
-  _gamut_compress_sigmoid(rgb);
-  printf("sigmoid: %f, %f, %f\n", rgb[0], rgb[1], rgb[2]);
-  _gamut_compress_sigmoid(rgb);
-  printf("compressed -> sigmoid: %f, %f, %f\n", rgb[0], rgb[1], rgb[2]);
-*/
   _create_matrices(
           user_params,
           pipe_work_profile, base_profile,
@@ -2437,18 +2239,6 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *gui_params, dt_dev_pi
 
   dt_colormatrix_transpose(processing_params->rendering_profile.matrix_in, processing_params->rendering_profile.matrix_in_transposed);
   processing_params->rendering_profile.nonlinearlut = FALSE; // no LUT for this linear transform
-
-  printf("================== commit_params ==================\n");
-  printf("range_black_relative_exposure = %f\n", user_params->range_black_relative_exposure);
-  printf("range_white_relative_exposure = %f\n", user_params->range_white_relative_exposure);
-  printf("curve_gamma = %f\n", user_params->curve_gamma);
-  printf("curve_contrast_around_pivot = %f\n", user_params->curve_contrast_around_pivot);
-  printf("curve_linear_percent_below_pivot = %f\n", user_params->curve_linear_percent_below_pivot);
-  printf("curve_linear_percent_above_pivot = %f\n", user_params->curve_linear_percent_above_pivot);
-  printf("curve_toe_power = %f\n", user_params->curve_toe_power);
-  printf("curve_shoulder_power = %f\n", user_params->curve_shoulder_power);
-  printf("curve_target_display_black_percent = %f\n", user_params->curve_target_display_black_percent);
-  printf("curve_target_display_white_percent = %f\n", user_params->curve_target_display_white_percent);
 }
 
 void tiling_callback(dt_iop_module_t *self,
