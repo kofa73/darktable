@@ -596,7 +596,7 @@ static float _apply_slope_offset(const float x, const float slope, const float o
 
 // https://docs.acescentral.com/specifications/acescct/#appendix-a-application-of-asc-cdl-parameters-to-acescct-image-data
 DT_OMP_DECLARE_SIMD(aligned(pixel_in_out: 16))
-static void _agxLook(
+static void _agx_look(
   dt_aligned_pixel_t pixel_in_out,
   const curve_and_look_params_t *params,
   const dt_colormatrix_t rendering_to_xyz_transposed
@@ -623,14 +623,14 @@ static void _agxLook(
   }
 }
 
-static float _apply_log_encoding(float x, float range_in_ev, float minEv)
+static float _apply_log_encoding(float x, float range_in_ev, float min_ev)
 {
   // Assume input is linear RGB relative to 0.18 mid-gray
   // Ensure value > 0 before log
   x = fmaxf(_epsilon, x / 0.18f);
   float mapped = log2f(fmaxf(x, 0));
-  // normalise to [0, 1] based on minEv and range_in_ev
-  mapped = (mapped - minEv) / range_in_ev;
+  // normalise to [0, 1] based on min_ev and range_in_ev
+  mapped = (mapped - min_ev) / range_in_ev;
   // Clamp result to [0, 1] - this is the input domain for the curve
   return CLAMPF(mapped, 0.0f, 1.0f);
 }
@@ -778,7 +778,7 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   const float toe_slope_transition_to_limit = toe_dy_transition_to_limit / toe_dx_transition_to_limit;
 
   // we use the same calculation as for the shoulder, so we flip the toe left <-> right, up <-> down
-  const float inverse_toe_limit_x = 1.0f; // 1 - toeLimix_x (toeLimix_x = 0, so inverse = 1)
+  const float inverse_toe_limit_x = 1.0f; // 1 - toe_limix_x (toe_limix_x = 0, so inverse = 1)
   const float inverse_toe_limit_y = 1.0f - curve_and_look_params.target_black; // Inverse limit y
 
   const float inverse_toe_transition_x = 1.0f - curve_and_look_params.toe_transition_x;
@@ -866,7 +866,7 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_loo
     transformed_pixel[k] = _apply_curve(log_value, params);
   }
 
-  _agxLook(transformed_pixel, params, rendering_to_xyz_transposed);
+  _agx_look(transformed_pixel, params, rendering_to_xyz_transposed);
 
   // Linearize
   for_three_channels(k, aligned(transformed_pixel: 16))
