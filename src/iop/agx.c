@@ -84,14 +84,14 @@ typedef struct dt_iop_agx_user_params_t
   float blue_inset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation"
   float blue_rotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
 
-  float master_outset_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "recover purity"
+  float master_outset_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master purity boost"
   float master_unrotation_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master rotation reversal"
-  float red_outset;        // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 0.0 $DESCRIPTION: "red attenuation reversal"
-  float red_unrotation;     // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "red rotation reversal"
-  float green_outset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green attenuation reversal"
-  float green_unrotation;   // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "green rotation reversal"
-  float blue_outset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation reversal"
-  float blue_unrotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation reversal"
+  float red_outset;        // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 0.0 $DESCRIPTION: "red purity boost"
+  float red_unrotation;     // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "red reverse rotation"
+  float green_outset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green purity boost"
+  float green_unrotation;   // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "green reverse rotation"
+  float blue_outset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue purity boost"
+  float blue_unrotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue reverse rotation"
 } dt_iop_agx_user_params_t;
 
 typedef struct dt_iop_basic_curve_controls_t
@@ -1471,19 +1471,19 @@ static void _add_basic_curve_controls(
   slider = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
   controls->curve_pivot_x_shift = slider;
   dt_bauhaus_slider_set_soft_range(slider, -0.4f, 0.4f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot x shift towards black(-) or white(+)"));
+  gtk_widget_set_tooltip_text(slider, _("shift the pivot input towards black(-) or white(+)"));
 
   // curve_pivot_y_linear
   slider = dt_bauhaus_slider_from_params(self, "curve_pivot_y_linear");
   controls->curve_pivot_y_linear = slider;
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("Pivot y (linear output)"));
+  gtk_widget_set_tooltip_text(slider, _("darken or brighten the pivot (output)"));
 
   // curve_contrast_around_pivot
   slider = dt_bauhaus_slider_from_params(self, "curve_contrast_around_pivot");
   controls->curve_contrast_around_pivot = slider;
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("linear section slope"));
+  gtk_widget_set_tooltip_text(slider, _("slope of the linear section"));
 
   // curve_toe_power
   slider = dt_bauhaus_slider_from_params(self, "curve_toe_power");
@@ -1549,7 +1549,7 @@ static void _add_look_sliders(dt_iop_module_t *self, GtkWidget *parent_widget)
   // look_original_hue_mix_ratio
   slider = dt_bauhaus_slider_from_params(self, "look_original_hue_mix_ratio");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
-  gtk_widget_set_tooltip_text(slider, _("Hue mix ratio adjustment"));
+  gtk_widget_set_tooltip_text(slider, _("increase to bring hues closer to original"));
 
   self->widget = original_self_widget;
 }
@@ -1612,7 +1612,10 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   // Toe length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_below_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
-  gtk_widget_set_tooltip_text(slider, _("toe length"));
+  gtk_widget_set_tooltip_text(slider, _(
+    "length to keep curve linear below pivot.\n"
+    "may crush shadows"
+    ));
 
   // Toe intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_percent");
@@ -1624,21 +1627,35 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   // Shoulder length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
-  gtk_widget_set_tooltip_text(slider, _("shoulder length"));
+  gtk_widget_set_tooltip_text(slider, _(
+    "length to keep curve linear above pivot.\n"
+    "may clip highlights"
+    ));
 
   // Shoulder intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_percent");
   dt_bauhaus_slider_set_soft_range(slider, 50.0f, 100.0f);
   dt_bauhaus_slider_set_digits(slider, 4);
   dt_bauhaus_slider_set_format(slider, "%");
-  gtk_widget_set_tooltip_text(slider, _("display white"));
+  gtk_widget_set_tooltip_text(slider, _("max output brightness"));
 
   // curve_gamma
   gui_data->auto_gamma = dt_bauhaus_toggle_from_params(self, "auto_gamma");
+  gtk_widget_set_tooltip_text(gui_data->auto_gamma, _(
+    "tries to make sure the curve always remains S-shaped,\n"
+    "given that contrast is high enough, so toe and shoulder\n"
+    "controls remain effective.\n"
+    "affects overall contrast, you may have to counteract it with the contrast slider."
+    ));
+
   slider = dt_bauhaus_slider_from_params(self, "curve_gamma");
   gui_data->curve_gamma = slider;
   dt_bauhaus_slider_set_soft_range(slider, 1.0f, 5.0f);
-  gtk_widget_set_tooltip_text(slider, _("Fine-tune contrast, shifts representation of pivot along the y axis"));
+  gtk_widget_set_tooltip_text(slider, _(
+    "shifts representation (but not output brightness) of pivot\n"
+    "along the y axis of the curve.\n"
+    "affects overall contrast, you may have to counteract it with the contrast slider."
+    ));
 
   self->widget = parent;
 }
@@ -1667,7 +1684,7 @@ static void _add_exposure_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
   // Create section label
-  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "Input exposure range")));
+  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "input exposure range")));
 
   // white point slider and picker
   gui_data->white_exposure_picker
@@ -1872,12 +1889,12 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
   gtk_box_pack_start(GTK_BOX(primaries_box), preset_hbox, FALSE, FALSE, 0);
 
   gui_data->primaries_preset_combo = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
-  gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->primaries_preset_combo), _("Load primaries settings from a preset"));
+  gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->primaries_preset_combo), _("load primaries settings from a preset"));
   gtk_box_pack_start(GTK_BOX(preset_hbox), GTK_WIDGET(gui_data->primaries_preset_combo), TRUE, TRUE, 0);
 
   _populate_primaries_presets_combobox(self);
   gui_data->primaries_preset_apply_button = gtk_button_new_with_label(_("apply"));
-  gtk_widget_set_tooltip_text(gui_data->primaries_preset_apply_button, _("Apply primaries settings from the selected preset"));
+  gtk_widget_set_tooltip_text(gui_data->primaries_preset_apply_button, _("apply primaries settings from the selected preset"));
   g_signal_connect(gui_data->primaries_preset_apply_button, "clicked", G_CALLBACK(_apply_primaries_from_preset_callback), self);
   gtk_box_pack_start(GTK_BOX(preset_hbox), gui_data->primaries_preset_apply_button, FALSE, FALSE, 0);
 
@@ -1885,13 +1902,21 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
 
   GtkWidget *base_primaries_combo = dt_bauhaus_combobox_from_params(self, "base_primaries");
   gtk_widget_set_tooltip_text(base_primaries_combo,
-                              _("Color space primaries to use as the base for below adjustments.\n"
+                              _("color space primaries to use as the base for below adjustments.\n"
                                 "'export profile' uses the profile set in 'output color profile'."));
   gui_data->disable_primaries_adjustments = dt_bauhaus_toggle_from_params(self, "disable_primaries_adjustments");
+  gtk_widget_set_tooltip_text(gui_data->disable_primaries_adjustments, _(
+      "disable purity adjustments and rotations, only applying the curve.\n"
+      "note that those adjustments are at the heart of AgX,\n"
+      "without them the results are almost always going to be worse,\n"
+      "especially with bright, saturated lights (e.g. LEDs).\n"
+      "mainly intended to be used for experimenting."
+      ));
 
   gui_data->primaries_sliders_vbox = self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   gtk_box_pack_start(GTK_BOX(primaries_box), self->widget, FALSE, FALSE, 0);
 
+  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "before tone mapping")));
 
   GtkWidget *slider;
   const float desaturation = 0.2f;
@@ -1917,6 +1942,8 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
                     _("attenuate the purity of the green primary"), "_rotation", _("rotate the green primary"));
   SETUP_COLOR_COMBO(blue, desaturation, desaturation, 1.f - desaturation, "_inset",
                     _("attenuate the purity of the blue primary"), "_rotation", _("rotate the blue primary"));
+
+  dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "after tone mapping")));
 
   slider = dt_bauhaus_slider_from_params(self, "master_outset_ratio");
   dt_bauhaus_slider_set_format(slider, "%");
