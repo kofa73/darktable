@@ -88,6 +88,7 @@
 #include <limits.h>
 
 #include <exiv2/exv_conf.h>  // for EXV_PACKAGE_VERSION
+#include <lensfun.h>  // for lensfun library version macros
 
 #ifdef HAVE_GRAPHICSMAGICK
 #include <magick/api.h>
@@ -726,6 +727,8 @@ static char *_get_version_string(void)
 {
   const char *exiv2_version = EXV_PACKAGE_VERSION "\n";
 
+  const char *liblensfun_version = g_strdup_printf("%d.%d.%d\n", LF_VERSION_MAJOR, LF_VERSION_MINOR, LF_VERSION_MICRO);
+
 #ifdef HAVE_LIBRAW
   const char *libraw_version = LIBRAW_VERSION_STR "\n";
 #endif
@@ -746,7 +749,7 @@ char *version = g_strdup_printf(
                "Copyright (C) 2012-%s Johannes Hanika and other contributors.\n\n"
                "Compile options:\n"
                "  Bit depth              -> %zu bit\n"
-               "%s%s%s%s%s%s%s\n"
+               "%s%s%s%s%s%s%s%s%s\n"
                "See %s for detailed documentation.\n"
                "See %s to report bugs.\n",
                darktable_package_version,
@@ -754,6 +757,7 @@ char *version = g_strdup_printf(
                CHAR_BIT * sizeof(void *),
 
                "  Exiv2                  -> ", exiv2_version,
+               "  Lensfun                -> ", liblensfun_version,
 #ifdef _DEBUG
                "  Debug                  -> ENABLED\n"
 #else
@@ -1189,10 +1193,13 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
         if(desired > possible)
           dt_print(DT_DEBUG_ALWAYS,
                    "[dt_init --threads] requested %d ompthreads restricted to %d",
-            desired, possible);
+                   desired, possible);
+#ifdef _OPENMP
         dt_print(DT_DEBUG_ALWAYS,
                  "[dt_init --threads] using %d threads of %d for openmp parallel sections %s",
-          darktable.num_openmp_threads, (int)dt_get_num_procs(), omp_get_dynamic() ? "(dynamic)" : "(static)");
+                 darktable.num_openmp_threads, (int)dt_get_num_procs(),
+                 omp_get_dynamic() ? "(dynamic)" : "(static)");
+#endif
         k++;
         argv[k-1] = NULL;
         argv[k] = NULL;
