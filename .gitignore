@@ -26,3 +26,4 @@ Brewfile.lock.json
 CMakeLists.txt.user
 workspace/
 cmake-build-debug/
+.idea/
