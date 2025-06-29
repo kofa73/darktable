@@ -20,8 +20,31 @@
 #include <pango/pangocairo.h>
 #include <stdlib.h>
 
-// Module introspection version
 DT_MODULE_INTROSPECTION(2, dt_iop_agx_user_params_t)
+
+const char *name()
+{
+  return _("agx");
+}
+
+const char **description(dt_iop_module_t *self)
+{
+  return dt_iop_set_description(self,
+                                _("Applies a tone mapping curve.\n"
+                                  "Inspired by Blender's AgX tone mapper"),
+                                _("corrective and creative"), _("linear, RGB, scene-referred"),
+                                _("non-linear, RGB"), _("linear, RGB, display-referred"));
+}
+
+int flags()
+{
+  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;
+}
+
+int default_group()
+{
+  return IOP_GROUP_TONE | IOP_GROUP_TECHNICAL;
+}
 
 static const float _epsilon = 1E-6f;
 
@@ -38,9 +61,9 @@ typedef enum dt_iop_agx_base_primaries_t
 // Params exposed on the UI
 typedef struct dt_iop_agx_user_params_t
 {
-  float look_offset; // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "offset"
-  float look_slope; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
-  float look_power; // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "power"
+  float look_offset;                 // $MIN: -1.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "offset"
+  float look_slope;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "slope"
+  float look_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "power"
   float look_saturation;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.0 $DESCRIPTION: "saturation"
   float look_original_hue_mix_ratio; // $MIN: 0.0 $MAX: 1 $DEFAULT: 0.0 $DESCRIPTION: "preserve hue"
 
@@ -56,10 +79,10 @@ typedef struct dt_iop_agx_user_params_t
   float curve_pivot_y_linear;            // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.18 $DESCRIPTION: "pivot y (linear)"
   // P_slope
   float curve_contrast_around_pivot;      // $MIN: 0.1 $MAX: 10.0 $DEFAULT: 2.4 $DESCRIPTION: "contrast around the pivot"
-  // P_tlength
-  float curve_linear_percent_below_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "toe start %"
-  // P_slength
-  float curve_linear_percent_above_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "shoulder start %"
+  // related to P_tlength; the number expresses the portion of the y range below the pivot
+  float curve_linear_percent_below_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "toe start"
+  // related to P_slength; the number expresses the portion of the y range below the pivot
+  float curve_linear_percent_above_pivot;  // $MIN: 0.0 $MAX: 100.0 $DEFAULT: 0.0 $DESCRIPTION: "shoulder start"
   // t_p
   float curve_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "toe power"
   // s_p
@@ -67,8 +90,8 @@ typedef struct dt_iop_agx_user_params_t
   // we don't have a parameter for pivot_x, it's set to the x value representing mid-gray, splitting [0..1] in the ratio
   // range_black_relative_exposure : range_white_relative_exposure
   // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
-  float curve_gamma;                // $MIN: 0.01 $MAX: 100.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
-  gboolean auto_gamma;  // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "keep the pivot on the identity line"
+  float curve_gamma;                      // $MIN: 0.01 $MAX: 100.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
+  gboolean auto_gamma;                    // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "keep the pivot on the identity line"
   // t_ly
   float curve_target_display_black_percent;     // $MIN: 0.0 $MAX: 15.0 $DEFAULT: 0.0 $DESCRIPTION: "target black"
   // s_ly
@@ -84,14 +107,14 @@ typedef struct dt_iop_agx_user_params_t
   float blue_inset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue attenuation"
   float blue_rotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue rotation"
 
-  float master_outset_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master purity boost"
+  float master_outset_ratio;     // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master purity boost"
   float master_unrotation_ratio; // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "master rotation reversal"
-  float red_outset;        // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 0.0 $DESCRIPTION: "red purity boost"
-  float red_unrotation;     // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "red reverse rotation"
-  float green_outset;      // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green purity boost"
-  float green_unrotation;   // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "green reverse rotation"
-  float blue_outset;       // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue purity boost"
-  float blue_unrotation;    // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue reverse rotation"
+  float red_outset;              // $MIN:  0.0  $MAX: 2.0 $DEFAULT: 0.0 $DESCRIPTION: "red purity boost"
+  float red_unrotation;          // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "red reverse rotation"
+  float green_outset;            // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "green purity boost"
+  float green_unrotation;        // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "green reverse rotation"
+  float blue_outset;             // $MIN:  0.0  $MAX: 0.99 $DEFAULT: 0.0 $DESCRIPTION: "blue purity boost"
+  float blue_unrotation;         // $MIN: -0.5236  $MAX: 0.5236  $DEFAULT: 0.0 $DESCRIPTION: "blue reverse rotation"
 } dt_iop_agx_user_params_t;
 
 typedef struct dt_iop_basic_curve_controls_t
@@ -123,13 +146,13 @@ typedef struct dt_iop_agx_gui_data_t
   dt_iop_basic_curve_controls_t basic_curve_controls_settings_page;
   dt_iop_basic_curve_controls_t basic_curve_controls_curve_page;
 
-  // graph
+  // curve graph/plot
   GtkAllocation allocation;
   PangoRectangle ink;
   GtkStyleContext *context;
 
   GtkWidget* disable_primaries_adjustments;
-  GtkWidget *primaries_sliders_vbox;
+  GtkWidget *primaries_controls_vbox;
   gboolean curve_tab_enabled;
   GtkComboBoxText *primaries_preset_combo;
   GtkWidget *primaries_preset_apply_button;
@@ -137,14 +160,12 @@ typedef struct dt_iop_agx_gui_data_t
 
 typedef struct curve_and_look_params_t
 {
-  // shared
   float min_ev;
   float max_ev;
   float range_in_ev;
   float curve_gamma;
 
-  // the toe runs from (0, target black) to (toe_transition_x, toe_transition_y)
-  // t_lx = 0 for us
+  // the toe runs from (t_lx = 0, target black) to (toe_transition_x, toe_transition_y)
   float pivot_x;
   float pivot_y;
   float target_black; // t_ly
@@ -153,25 +174,24 @@ typedef struct curve_and_look_params_t
   float toe_transition_y; // t_ty
   float toe_scale; // t_s
   gboolean need_convex_toe;
-  float toe_a;
-  float toe_b;
+  float toe_fallback_coefficient;
+  float toe_fallback_power;
 
   // the linear section lies on y = mx + b, running from (toe_transition_x, toe_transition_y) to (shoulder_transition_x, shoulder_transition_y)
   // it can have length 0, in which case it only contains the pivot (pivot_x, pivot_y)
   // the pivot may coincide with toe_transition or shoulder_start or both
-  float slope; // m - for the linear section
+  float slope;     // m - for the linear section
   float intercept; // b parameter of the straight segment (y = mx + b, intersection with the y-axis at (0, b))
 
-  // the shoulder runs from (shoulder_transition_x, shoulder_transition_y) to (1, target_white)
-  // s_lx = 1 for us
+  // the shoulder runs from (shoulder_transition_x, shoulder_transition_y) to (s_lx = 1, target_white)
   float target_white; // s_ly
   float shoulder_power; // s_p
   float shoulder_transition_x; // s_tx
   float shoulder_transition_y; // s_ty
   float shoulder_scale; // s_s
   gboolean need_concave_shoulder;
-  float shoulder_a;
-  float shoulder_b;
+  float shoulder_fallback_coefficient;
+  float shoulder_fallback_power;
 
   // look
   float look_offset;
@@ -239,31 +259,6 @@ static guint _agx_primaries_hash(gconstpointer p)
 static gboolean _agx_primaries_equal(gconstpointer a, gconstpointer b)
 {
   return memcmp(a, b, sizeof(_agx_primaries_key)) == 0;
-}
-
-// Translatable name
-const char *name()
-{
-  return _("agx");
-}
-
-const char **description(dt_iop_module_t *self)
-{
-  return dt_iop_set_description(self,
-                                _("Applies a tone mapping curve.\n"
-                                  "Inspired by Blender's AgX tone mapper"),
-                                _("corrective and creative"), _("linear, RGB, scene-referred"),
-                                _("non-linear, RGB"), _("linear, RGB, display-referred"));
-}
-
-int flags()
-{
-  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;
-}
-
-int default_group()
-{
-  return IOP_GROUP_TONE | IOP_GROUP_TECHNICAL;
 }
 
 dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,
@@ -474,41 +469,58 @@ static float _line(const float x, const float slope, const float intercept)
   return slope * x + intercept;
 }
 
+/*
+ * s_t, s_t at https://www.desmos.com/calculator/yrysofmx8h
+ * The maths has been rewritten for symmetry, but is equivalent.
+ * Original:
+ * projected_rise = slope * (limit_x - transition_x)
+ * projected_rise_to_power = powf(projected_rise, -power)
+ * actual_rise = limit_y - transition_y
+ * linear_overshoot_ratio = projected_rise / actual_rise
+ * scale_adjustment_factor = powf(linear_overshoot_ratio, power) - 1
+ * base = projected_rise_to_power * scale_adjustment_factor
+ * scale_value = powf(base, -1 / power)
+ *
+ * We can substitute scale_adjustment_factor into base:
+ * base = projected_rise_to_power * (powf(linear_overshoot_ratio, power) - 1)
+ * Then substitute projected_rise_to_power and linear_overshoot_ratio:
+ * base = powf(projected_rise, -power) * (powf(projected_rise / actual_rise, power) - 1)
+ * Expand the brackets:
+ * base = powf(projected_rise, -power) * powf(projected_rise / actual_rise, power) - powf(projected_rise, -power)
+ * base = powf(projected_rise, -power) * powf(projected_rise, power) / powf(actual_rise, power) - powf(projected_rise, -power)
+ * base = 1 / powf(actual_rise, power) - powf(projected_rise, -power)
+ * base = powf(actual_rise, -power) - powf(projected_rise, -power)
+ */
 static float _scale(float limit_x, float limit_y, float transition_x, float transition_y, float slope, float power)
 {
-  const float dy_limit_to_transition_at_constant_slope = slope * (limit_x - transition_x);
+  // the hypothetical 'rise' if the linear section were extended to the limit.
+  const float projected_rise = slope * fmaxf(_epsilon, limit_x - transition_x);
 
-  const float dy_to_power = powf(dy_limit_to_transition_at_constant_slope, -power);
+  // the actual 'rise' the curve needs to cover.
+  const float actual_rise = fmaxf(_epsilon, limit_y - transition_y);
 
-  // in case the linear section extends too far; avoid division by 0
-  const float remaining_y_span = fmaxf(_epsilon, limit_y - transition_y);
+  const float transformed_projected_rise = powf(projected_rise, -power);
+  const float transformed_actual_rise = powf(actual_rise, -power);
 
-  const float y_delta_ratio = dy_limit_to_transition_at_constant_slope / remaining_y_span;
+  const float base = fmaxf(_epsilon, transformed_actual_rise - transformed_projected_rise);
 
-  float term_b = powf(y_delta_ratio, power) - 1.0f;
-  term_b = fmaxf(term_b, _epsilon);
+  const float scale_value = powf(base, -1.0f / power);
 
-  const float base = dy_to_power * term_b;
-
-  float scale_value = powf(base, -1.0f / power);
-
-  scale_value = fminf(1e9, scale_value);
-  scale_value = fmaxf(-1e9, scale_value);
-
-  return scale_value;
+  // avoid 'explosions'
+  return fminf(1e9, scale_value);
 }
 
-// this is f_t(x), f_s(x) at https://www.desmos.com/calculator/yrysofmx8h
-static float _exponential(float x, float power)
+// f_t(x), f_s(x) at https://www.desmos.com/calculator/yrysofmx8h
+static float _sigmoid(float x, float power)
 {
   return x / powf(1.0f + powf(x, power), 1.0f / power);
 }
 
-static float _exponential_curve(float x, float scale, float slope, float power, float transition_x,
+// f_ss, f_ts at https://www.desmos.com/calculator/yrysofmx8h
+static float _scaled_sigmoid(float x, float scale, float slope, float power, float transition_x,
                                 float transition_y)
 {
-  // this is f_ss, f_ts on the original curve https://www.desmos.com/calculator/yrysofmx8h
-  return scale * _exponential(slope * (x - transition_x) / scale, power) + transition_y;
+  return scale * _sigmoid(slope * (x - transition_x) / scale, power) + transition_y;
 }
 
 // Fallback toe/shoulder, so we can always reach black and white.
@@ -517,17 +529,16 @@ static float _fallback_toe(const float x, const curve_and_look_params_t *curve_p
 {
   return x <= 0 ?
     curve_params->target_black :
-    curve_params->target_black + fmaxf(0, curve_params->toe_a * powf(x, curve_params->toe_b));
+    curve_params->target_black + fmaxf(0, curve_params->toe_fallback_coefficient * powf(x, curve_params->toe_fallback_power));
 }
 
 static float _fallback_shoulder(const float x, const curve_and_look_params_t *curve_params)
 {
   return x >= 1 ?
     curve_params->target_white :
-    curve_params->target_white - fmaxf(0, curve_params->shoulder_a * powf(1 - x, curve_params->shoulder_b));
+    curve_params->target_white - fmaxf(0, curve_params->shoulder_fallback_coefficient * powf(1 - x, curve_params->shoulder_fallback_power));
 }
 
-// the commented values (t_tx, etc.) are references to https://www.desmos.com/calculator/yrysofmx8h
 static float _apply_curve(const float x, const curve_and_look_params_t *curve_params)
 {
   float result;
@@ -536,7 +547,7 @@ static float _apply_curve(const float x, const curve_and_look_params_t *curve_pa
   {
     result = curve_params->need_convex_toe ?
       _fallback_toe(x, curve_params) :
-      _exponential_curve(x, curve_params->toe_scale, curve_params->slope, curve_params->toe_power, curve_params->toe_transition_x, curve_params->toe_transition_y);
+      _scaled_sigmoid(x, curve_params->toe_scale, curve_params->slope, curve_params->toe_power, curve_params->toe_transition_x, curve_params->toe_transition_y);
   }
   else if (x <= curve_params->shoulder_transition_x)
   {
@@ -546,7 +557,7 @@ static float _apply_curve(const float x, const curve_and_look_params_t *curve_pa
   {
     result = curve_params->need_concave_shoulder ?
       _fallback_shoulder(x, curve_params) :
-      _exponential_curve(x, curve_params->shoulder_scale, curve_params->slope, curve_params->shoulder_power, curve_params->shoulder_transition_x, curve_params->shoulder_transition_y);
+      _scaled_sigmoid(x, curve_params->shoulder_scale, curve_params->slope, curve_params->shoulder_power, curve_params->shoulder_transition_x, curve_params->shoulder_transition_y);
   }
   return CLAMPF(result, curve_params->target_black, curve_params->target_white);
 }
@@ -636,12 +647,12 @@ static float _apply_log_encoding(float x, float range_in_ev, float min_ev)
 }
 
 // see https://www.desmos.com/calculator/gijzff3wlv
-static float _calculate_B(float slope, float dx_transition_to_limit, float dy_transition_to_limit)
+static float _calculate_slope_matching_power(float slope, float dx_transition_to_limit, float dy_transition_to_limit)
 {
   return slope * dx_transition_to_limit / dy_transition_to_limit;
 }
 
-static float _calculate_A(const float dx_transition_to_limit, const float dy_transition_to_limit, const float B)
+static float _calculate_fallback_curve_coefficient(const float dx_transition_to_limit, const float dy_transition_to_limit, const float B)
 {
   return dy_transition_to_limit / powf(dx_transition_to_limit, B);
 }
@@ -717,6 +728,9 @@ static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and
     curve_and_look_params->pivot_x = mid_gray_in_log_range;
   }
 
+  // don't allow pivot_x to touch the endpoints
+  curve_and_look_params->pivot_x = CLAMPF(curve_and_look_params->pivot_x, _epsilon, 1 - _epsilon);
+
   if (user_params->auto_gamma)
   {
     curve_and_look_params->curve_gamma = curve_and_look_params->pivot_x > 0 && user_params->curve_pivot_y_linear > 0
@@ -767,15 +781,12 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   const float toe_length_y = remaining_y_below_pivot * user_params->curve_linear_percent_below_pivot  / 100.0f;
   const float dx_linear_below_pivot = toe_length_y / curve_and_look_params.slope;
   // ...and subtract it from pivot_x to get the x coordinate where the linear section joins the toe
-  curve_and_look_params.toe_transition_x = curve_and_look_params.pivot_x - dx_linear_below_pivot;
+  // ... but keep the transition point above x = 0
+  curve_and_look_params.toe_transition_x = fmaxf(_epsilon, curve_and_look_params.pivot_x - dx_linear_below_pivot);
 
   // from the 'run' pivot_x->toe_transition_x, we calculate the 'rise'
   const float toe_y_below_pivot_y = curve_and_look_params.slope * dx_linear_below_pivot;
   curve_and_look_params.toe_transition_y = curve_and_look_params.pivot_y - toe_y_below_pivot_y;
-
-  const float toe_dx_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_x); // limit_x is 0; use epsilon to avoid division by 0 later
-  const float toe_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_y - curve_and_look_params.target_black);
-  const float toe_slope_transition_to_limit = toe_dy_transition_to_limit / toe_dx_transition_to_limit;
 
   // we use the same calculation as for the shoulder, so we flip the toe left <-> right, up <-> down
   const float inverse_toe_limit_x = 1.0f; // 1 - toe_limix_x (toe_limix_x = 0, so inverse = 1)
@@ -789,11 +800,18 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
                                     inverse_toe_transition_x, inverse_toe_transition_y,
                                     curve_and_look_params.slope, curve_and_look_params.toe_power);
 
+  // limit_x is 0 -> dx to limit is just toe_transition_x
+  // use epsilon to avoid division by 0 later
+  const float toe_dx_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_x);
+  const float toe_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_y - curve_and_look_params.target_black);
+  const float toe_slope_transition_to_limit = toe_dy_transition_to_limit / toe_dx_transition_to_limit;
   curve_and_look_params.need_convex_toe = toe_slope_transition_to_limit > curve_and_look_params.slope;
 
   // toe fallback curve params
-  curve_and_look_params.toe_b = _calculate_B(curve_and_look_params.slope, toe_dx_transition_to_limit, toe_dy_transition_to_limit);
-  curve_and_look_params.toe_a = _calculate_A(toe_dx_transition_to_limit, toe_dy_transition_to_limit, curve_and_look_params.toe_b);
+  curve_and_look_params.toe_fallback_power =
+    _calculate_slope_matching_power(curve_and_look_params.slope, toe_dx_transition_to_limit, toe_dy_transition_to_limit);
+  curve_and_look_params.toe_fallback_coefficient =
+    _calculate_fallback_curve_coefficient(toe_dx_transition_to_limit, toe_dy_transition_to_limit, curve_and_look_params.toe_fallback_power);
 
   // if x went from toe_transition_x to 0, at the given slope, starting from toe_transition_y, where would we intersect the y-axis?
   curve_and_look_params.intercept = curve_and_look_params.toe_transition_y - curve_and_look_params.slope * curve_and_look_params.toe_transition_x;
@@ -803,22 +821,27 @@ static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_par
   const float remaining_y_above_pivot = curve_and_look_params.target_white - curve_and_look_params.pivot_y;
   const float shoulder_length_y = remaining_y_above_pivot * user_params->curve_linear_percent_above_pivot / 100.0f;
   const float dx_linear_above_pivot = shoulder_length_y / curve_and_look_params.slope;
-  curve_and_look_params.shoulder_transition_x = curve_and_look_params.pivot_x + dx_linear_above_pivot;
+
+  // don't allow shoulder_transition_x to reach 1
+  curve_and_look_params.shoulder_transition_x = fminf(1 - _epsilon, curve_and_look_params.pivot_x + dx_linear_above_pivot);
   curve_and_look_params.shoulder_transition_y = curve_and_look_params.pivot_y + shoulder_length_y;
-  const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - curve_and_look_params.shoulder_transition_x); // dx to 0, avoid division by 0 later
-  const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.target_white - curve_and_look_params.shoulder_transition_y);
-  const float shoulder_slope_transition_to_limit = shoulder_dy_transition_to_limit / shoulder_dx_transition_to_limit;
   curve_and_look_params.shoulder_power = user_params->curve_shoulder_power;
 
   const float shoulder_limit_x = 1;
   curve_and_look_params.shoulder_scale = _scale(shoulder_limit_x, curve_and_look_params.target_white,
                                     curve_and_look_params.shoulder_transition_x, curve_and_look_params.shoulder_transition_y,
                                     curve_and_look_params.slope, curve_and_look_params.shoulder_power);
+
+  const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - curve_and_look_params.shoulder_transition_x); // dx to 0, avoid division by 0 later
+  const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.target_white - curve_and_look_params.shoulder_transition_y);
+  const float shoulder_slope_transition_to_limit = shoulder_dy_transition_to_limit / shoulder_dx_transition_to_limit;
   curve_and_look_params.need_concave_shoulder = shoulder_slope_transition_to_limit > curve_and_look_params.slope;
 
   // shoulder fallback curve params
-  curve_and_look_params.shoulder_b = _calculate_B(curve_and_look_params.slope, shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit);
-  curve_and_look_params.shoulder_a = _calculate_A(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, curve_and_look_params.shoulder_b);
+  curve_and_look_params.shoulder_fallback_power =
+    _calculate_slope_matching_power(curve_and_look_params.slope, shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit);
+  curve_and_look_params.shoulder_fallback_coefficient =
+    _calculate_fallback_curve_coefficient(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, curve_and_look_params.shoulder_fallback_power);
 
   return curve_and_look_params;
 }
@@ -1380,9 +1403,9 @@ static void _update_primaries_checkbox_and_sliders(dt_iop_module_t *self)
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
   const dt_iop_agx_user_params_t *user_params = self->params;
 
-  if(gui_data && gui_data->primaries_sliders_vbox)
+  if(gui_data && gui_data->primaries_controls_vbox)
   {
-    gtk_widget_set_visible(gui_data->primaries_sliders_vbox, !user_params->disable_primaries_adjustments);
+    gtk_widget_set_visible(gui_data->primaries_controls_vbox, !user_params->disable_primaries_adjustments);
   }
 }
 
@@ -1470,7 +1493,7 @@ static void _add_basic_curve_controls(
   // curve_pivot_x_shift with picker
   slider = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, dt_bauhaus_slider_from_params(self, "curve_pivot_x_shift"));
   controls->curve_pivot_x_shift = slider;
-  dt_bauhaus_slider_set_soft_range(slider, -0.4f, 0.4f);
+  dt_bauhaus_slider_set_soft_range(slider, -0.5f, 0.5f);
   gtk_widget_set_tooltip_text(slider, _("shift the pivot input towards black(-) or white(+)"));
 
   // curve_pivot_y_linear
@@ -1612,6 +1635,7 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   // Toe length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_below_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
+  dt_bauhaus_slider_set_format(slider, "%");
   gtk_widget_set_tooltip_text(slider, _(
     "length to keep curve linear below pivot.\n"
     "may crush shadows"
@@ -1619,7 +1643,7 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
 
   // Toe intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_black_percent");
-  dt_bauhaus_slider_set_digits(slider, 4);
+  dt_bauhaus_slider_set_digits(slider, 3);
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 1.0f);
   gtk_widget_set_tooltip_text(slider, _("raise for a faded look"));
@@ -1627,6 +1651,7 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   // Shoulder length
   slider = dt_bauhaus_slider_from_params(self, "curve_linear_percent_above_pivot");
   dt_bauhaus_slider_set_soft_range(slider, 0.0f, 100.0f);
+  dt_bauhaus_slider_set_format(slider, "%");
   gtk_widget_set_tooltip_text(slider, _(
     "length to keep curve linear above pivot.\n"
     "may clip highlights"
@@ -1635,7 +1660,7 @@ static void _add_advanced_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *gui_
   // Shoulder intersection point
   slider = dt_bauhaus_slider_from_params(self, "curve_target_display_white_percent");
   dt_bauhaus_slider_set_soft_range(slider, 50.0f, 100.0f);
-  dt_bauhaus_slider_set_digits(slider, 4);
+  dt_bauhaus_slider_set_digits(slider, 0);
   dt_bauhaus_slider_set_format(slider, "%");
   gtk_widget_set_tooltip_text(slider, _("max output brightness"));
 
@@ -1885,8 +1910,26 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
   GtkWidget *primaries_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
   self->widget = primaries_box;
 
+  gui_data->disable_primaries_adjustments = dt_bauhaus_toggle_from_params(self, "disable_primaries_adjustments");
+  gtk_widget_set_tooltip_text(gui_data->disable_primaries_adjustments, _(
+      "disable purity adjustments and rotations, only applying the curve.\n"
+      "note that those adjustments are at the heart of AgX,\n"
+      "without them the results are almost always going to be worse,\n"
+      "especially with bright, saturated lights (e.g. LEDs).\n"
+      "mainly intended to be used for experimenting."
+      ));
+
+  gui_data->primaries_controls_vbox = self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(primaries_box), self->widget, FALSE, FALSE, 0);
+
+  GtkWidget *base_primaries_combo = dt_bauhaus_combobox_from_params(self, "base_primaries");
+  gtk_widget_set_tooltip_text(base_primaries_combo,
+                              _("color space primaries to use as the base for below adjustments.\n"
+                                "'export profile' uses the profile set in 'output color profile'."));
+
+
   GtkWidget *preset_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(primaries_box), preset_hbox, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(gui_data->primaries_controls_vbox), preset_hbox, FALSE, FALSE, 0);
 
   gui_data->primaries_preset_combo = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
   gtk_widget_set_tooltip_text(GTK_WIDGET(gui_data->primaries_preset_combo), _("load primaries settings from a preset"));
@@ -1897,24 +1940,6 @@ static GtkWidget *_add_primaries_box(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(gui_data->primaries_preset_apply_button, _("apply primaries settings from the selected preset"));
   g_signal_connect(gui_data->primaries_preset_apply_button, "clicked", G_CALLBACK(_apply_primaries_from_preset_callback), self);
   gtk_box_pack_start(GTK_BOX(preset_hbox), gui_data->primaries_preset_apply_button, FALSE, FALSE, 0);
-
-  gtk_box_pack_start(GTK_BOX(primaries_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 5);
-
-  GtkWidget *base_primaries_combo = dt_bauhaus_combobox_from_params(self, "base_primaries");
-  gtk_widget_set_tooltip_text(base_primaries_combo,
-                              _("color space primaries to use as the base for below adjustments.\n"
-                                "'export profile' uses the profile set in 'output color profile'."));
-  gui_data->disable_primaries_adjustments = dt_bauhaus_toggle_from_params(self, "disable_primaries_adjustments");
-  gtk_widget_set_tooltip_text(gui_data->disable_primaries_adjustments, _(
-      "disable purity adjustments and rotations, only applying the curve.\n"
-      "note that those adjustments are at the heart of AgX,\n"
-      "without them the results are almost always going to be worse,\n"
-      "especially with bright, saturated lights (e.g. LEDs).\n"
-      "mainly intended to be used for experimenting."
-      ));
-
-  gui_data->primaries_sliders_vbox = self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  gtk_box_pack_start(GTK_BOX(primaries_box), self->widget, FALSE, FALSE, 0);
 
   dt_gui_box_add(self->widget, dt_ui_section_label_new(C_("section", "before tone mapping")));
 
@@ -2123,16 +2148,16 @@ void init_presets(dt_iop_module_so_t *self)
   user_params.master_outset_ratio = 1.0f;
   user_params.master_unrotation_ratio = 1.0f;
 
-  user_params.red_outset = 0.29068848;
-  user_params.green_outset = 0.26049852;
-  user_params.blue_outset = 0.04855311;
+  user_params.red_outset = 0.290696322918;
+  user_params.green_outset = 0.261332511902;
+  user_params.blue_outset = 0.047416660935;
   user_params.red_unrotation = 0;
   user_params.green_unrotation = 0;
   user_params.blue_unrotation = 0;
 
   // In Blender, a related param is set to 40%, but is actually used as 1 - param,
   // so 60% would give almost identical results; however, Eary_Chow suggested
-  // that we leave this as 0, based on feedback he received
+  // that we leave this as 0, based on feedback he had received
   user_params.look_original_hue_mix_ratio = 0;
   user_params.base_primaries = DT_AGX_REC2020;
 
@@ -2231,6 +2256,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *gui_params, dt_dev_pi
     dt_print(DT_DEBUG_ALWAYS, "[agx commit_params] Failed to obtain a valid base profile. Module will not run correctly.");
     return;
   }
+
   _create_matrices(
           user_params,
           pipe_work_profile, base_profile,
