@@ -87,9 +87,6 @@ typedef struct dt_iop_agx_user_params_t
   float curve_toe_power;                  // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "toe power"
   // s_p
   float curve_shoulder_power;             // $MIN: 0.0 $MAX: 10.0 $DEFAULT: 1.5 $DESCRIPTION: "shoulder power"
-  // we don't have a parameter for pivot_x, it's set to the x value representing mid-gray, splitting [0..1] in the ratio
-  // range_black_relative_exposure : range_white_relative_exposure
-  // not a parameter of the original curve, they used p_x, p_y to directly set the pivot
   float curve_gamma;                      // $MIN: 0.01 $MAX: 100.0 $DEFAULT: 2.2 $DESCRIPTION: "curve y gamma"
   gboolean auto_gamma;                    // $MIN: 0 $MAX: 1 $DEFAULT: 0 $DESCRIPTION: "keep the pivot on the identity line"
   // t_ly
@@ -199,7 +196,7 @@ typedef struct curve_and_look_params_t
   float look_power;
   float look_saturation;
   float look_original_hue_mix_ratio;
-} curve_and_look_params_t;
+} tone_mapping_params_t;
 
 typedef struct primaries_params_t
 {
@@ -214,7 +211,7 @@ typedef struct primaries_params_t
 
 typedef struct dt_iop_agx_data_t
 {
-  curve_and_look_params_t curve_params;
+  tone_mapping_params_t tone_mapping_params;
   dt_colormatrix_t pipe_to_base_transposed;
   dt_colormatrix_t base_to_rendering_transposed;
   dt_colormatrix_t rendering_to_pipe_transposed;
@@ -525,44 +522,45 @@ static float _scaled_sigmoid(float x, float scale, float slope, float power, flo
 
 // Fallback toe/shoulder, so we can always reach black and white.
 // See https://www.desmos.com/calculator/gijzff3wlv
-static float _fallback_toe(const float x, const curve_and_look_params_t *curve_params)
+static float _fallback_toe(const float x, const tone_mapping_params_t *params)
 {
   return x <= 0 ?
-    curve_params->target_black :
-    curve_params->target_black + fmaxf(0, curve_params->toe_fallback_coefficient * powf(x, curve_params->toe_fallback_power));
+    params->target_black :
+    params->target_black + fmaxf(0, params->toe_fallback_coefficient * powf(x, params->toe_fallback_power));
 }
 
-static float _fallback_shoulder(const float x, const curve_and_look_params_t *curve_params)
+static float _fallback_shoulder(const float x, const tone_mapping_params_t *params)
 {
   return x >= 1 ?
-    curve_params->target_white :
-    curve_params->target_white - fmaxf(0, curve_params->shoulder_fallback_coefficient * powf(1 - x, curve_params->shoulder_fallback_power));
+    params->target_white :
+    params->target_white -
+      fmaxf(0, params->shoulder_fallback_coefficient * powf(1 - x, params->shoulder_fallback_power));
 }
 
-static float _apply_curve(const float x, const curve_and_look_params_t *curve_params)
+static float _apply_curve(const float x, const tone_mapping_params_t *params)
 {
   float result;
 
-  if (x < curve_params->toe_transition_x)
+  if (x < params->toe_transition_x)
   {
-    result = curve_params->need_convex_toe ?
-      _fallback_toe(x, curve_params) :
-      _scaled_sigmoid(x, curve_params->toe_scale, curve_params->slope, curve_params->toe_power, curve_params->toe_transition_x, curve_params->toe_transition_y);
+    result = params->need_convex_toe ?
+      _fallback_toe(x, params) :
+      _scaled_sigmoid(x, params->toe_scale, params->slope, params->toe_power, params->toe_transition_x, params->toe_transition_y);
   }
-  else if (x <= curve_params->shoulder_transition_x)
+  else if (x <= params->shoulder_transition_x)
   {
-    result = _line(x, curve_params->slope, curve_params->intercept);
+    result = _line(x, params->slope, params->intercept);
   }
   else
   {
-    result = curve_params->need_concave_shoulder ?
-      _fallback_shoulder(x, curve_params) :
-      _scaled_sigmoid(x, curve_params->shoulder_scale, curve_params->slope, curve_params->shoulder_power, curve_params->shoulder_transition_x, curve_params->shoulder_transition_y);
+    result = params->need_concave_shoulder ?
+      _fallback_shoulder(x, params) :
+      _scaled_sigmoid(x, params->shoulder_scale, params->slope, params->shoulder_power, params->shoulder_transition_x, params->shoulder_transition_y);
   }
-  return CLAMPF(result, curve_params->target_black, curve_params->target_white);
+  return CLAMPF(result, params->target_black, params->target_white);
 }
 
-static float _sanitise_hue(float hue)
+static inline float _sanitize_hue(float hue)
 {
   if (hue < 0.0f) hue += 1.0f;
   if (hue >= 1.0f) hue -= 1.0f;
@@ -570,10 +568,10 @@ static float _sanitise_hue(float hue)
 }
 
 // 'lerp', but take care of the boundary: hue wraps around 1->0
-static float _lerp_hue(float original_hue, float processed_hue, float mix)
+static inline float _lerp_hue(float original_hue, float processed_hue, float mix)
 {
-  original_hue = _sanitise_hue(original_hue);
-  processed_hue = _sanitise_hue(processed_hue);
+  original_hue = _sanitize_hue(original_hue);
+  processed_hue = _sanitize_hue(processed_hue);
 
   const float hue_diff = processed_hue - original_hue;
 
@@ -587,7 +585,7 @@ static float _lerp_hue(float original_hue, float processed_hue, float mix)
   }
 
   float restored_hue = processed_hue + (original_hue - processed_hue) * mix;
-  return _sanitise_hue(restored_hue);
+  return _sanitize_hue(restored_hue);
 }
 
 static float _apply_slope_offset(const float x, const float slope, const float offset)
@@ -609,7 +607,7 @@ static float _apply_slope_offset(const float x, const float slope, const float o
 DT_OMP_DECLARE_SIMD(aligned(pixel_in_out: 16))
 static void _agx_look(
   dt_aligned_pixel_t pixel_in_out,
-  const curve_and_look_params_t *params,
+  const tone_mapping_params_t *params,
   const dt_colormatrix_t rendering_to_xyz_transposed
 )
 {
@@ -709,141 +707,141 @@ static void _compress_into_gamut(dt_aligned_pixel_t pixel_in_out)
   }
 }
 
-static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, curve_and_look_params_t *curve_and_look_params)
+static void _adjust_pivot(const dt_iop_agx_user_params_t *user_params, tone_mapping_params_t *params)
 {
-  const float mid_gray_in_log_range = fabsf(curve_and_look_params->min_ev / curve_and_look_params->range_in_ev);
+  const float mid_gray_in_log_range = fabsf(params->min_ev / params->range_in_ev);
   if (user_params->curve_pivot_x_shift < 0)
   {
     float black_ratio = -user_params->curve_pivot_x_shift;
     float gray_ratio = 1 - black_ratio;
-    curve_and_look_params->pivot_x = gray_ratio * mid_gray_in_log_range;
+    params->pivot_x = gray_ratio * mid_gray_in_log_range;
   }
   else if (user_params->curve_pivot_x_shift > 0)
   {
     float white_ratio = user_params->curve_pivot_x_shift;
     float gray_ratio = 1 - white_ratio;
-    curve_and_look_params->pivot_x = mid_gray_in_log_range * gray_ratio + white_ratio;
+    params->pivot_x = mid_gray_in_log_range * gray_ratio + white_ratio;
   } else
   {
-    curve_and_look_params->pivot_x = mid_gray_in_log_range;
+    params->pivot_x = mid_gray_in_log_range;
   }
 
   // don't allow pivot_x to touch the endpoints
-  curve_and_look_params->pivot_x = CLAMPF(curve_and_look_params->pivot_x, _epsilon, 1 - _epsilon);
+  params->pivot_x = CLAMPF(params->pivot_x, _epsilon, 1 - _epsilon);
 
   if (user_params->auto_gamma)
   {
-    curve_and_look_params->curve_gamma = curve_and_look_params->pivot_x > 0 && user_params->curve_pivot_y_linear > 0
-                                             ? log2f(user_params->curve_pivot_y_linear) / log2f(curve_and_look_params->pivot_x)
+    params->curve_gamma = params->pivot_x > 0 && user_params->curve_pivot_y_linear > 0
+                                             ? log2f(user_params->curve_pivot_y_linear) / log2f(params->pivot_x)
                                              : user_params->curve_gamma;
   }
   else
   {
-    curve_and_look_params->curve_gamma = user_params->curve_gamma;
+    params->curve_gamma = user_params->curve_gamma;
   }
 
-  curve_and_look_params->pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_percent / 100.0,
+  params->pivot_y = powf(CLAMPF(user_params->curve_pivot_y_linear, user_params->curve_target_display_black_percent / 100.0,
                                 user_params->curve_target_display_white_percent / 100.0),
-                         1.0f / curve_and_look_params->curve_gamma);
+                         1.0f / params->curve_gamma);
 }
 
-static void _calculate_log_mapping_params(const dt_iop_agx_user_params_t* user_params, curve_and_look_params_t* curve_and_look_params)
+static void _calculate_log_mapping_params(const dt_iop_agx_user_params_t* user_params, tone_mapping_params_t* curve_and_look_params)
 {
   curve_and_look_params->max_ev = user_params->range_white_relative_exposure;
   curve_and_look_params->min_ev = user_params->range_black_relative_exposure;
   curve_and_look_params->range_in_ev = curve_and_look_params->max_ev - curve_and_look_params->min_ev;
 }
 
-static curve_and_look_params_t _calculate_curve_params(const dt_iop_agx_user_params_t *user_params)
+static tone_mapping_params_t _calculate_tone_mapping_params(const dt_iop_agx_user_params_t *user_params)
 {
-  curve_and_look_params_t curve_and_look_params;
+  tone_mapping_params_t tone_mapping_params;
 
   // look
-  curve_and_look_params.look_offset = user_params->look_offset;
-  curve_and_look_params.look_slope = user_params->look_slope;
-  curve_and_look_params.look_saturation = user_params->look_saturation;
-  curve_and_look_params.look_power = user_params->look_power;
-  curve_and_look_params.look_original_hue_mix_ratio = user_params->look_original_hue_mix_ratio;
+  tone_mapping_params.look_offset = user_params->look_offset;
+  tone_mapping_params.look_slope = user_params->look_slope;
+  tone_mapping_params.look_saturation = user_params->look_saturation;
+  tone_mapping_params.look_power = user_params->look_power;
+  tone_mapping_params.look_original_hue_mix_ratio = user_params->look_original_hue_mix_ratio;
 
   // log mapping
-  _calculate_log_mapping_params(user_params, &curve_and_look_params);
+  _calculate_log_mapping_params(user_params, &tone_mapping_params);
 
-  _adjust_pivot(user_params, &curve_and_look_params);
+  _adjust_pivot(user_params, &tone_mapping_params);
 
   // avoid range altering slope - 16.5 EV is the default AgX range; keep the meaning of slope
-  curve_and_look_params.slope = user_params->curve_contrast_around_pivot * (curve_and_look_params.range_in_ev / 16.5f);
+  tone_mapping_params.slope = user_params->curve_contrast_around_pivot * (tone_mapping_params.range_in_ev / 16.5f);
 
   // toe
-  curve_and_look_params.target_black = powf(user_params->curve_target_display_black_percent / 100.0f, 1.0f / curve_and_look_params.curve_gamma);
-  curve_and_look_params.toe_power = user_params->curve_toe_power;
+  tone_mapping_params.target_black = powf(user_params->curve_target_display_black_percent / 100.0f, 1.0f / tone_mapping_params.curve_gamma);
+  tone_mapping_params.toe_power = user_params->curve_toe_power;
 
-  const float remaining_y_below_pivot = curve_and_look_params.pivot_y - curve_and_look_params.target_black;
+  const float remaining_y_below_pivot = tone_mapping_params.pivot_y - tone_mapping_params.target_black;
   const float toe_length_y = remaining_y_below_pivot * user_params->curve_linear_percent_below_pivot  / 100.0f;
-  const float dx_linear_below_pivot = toe_length_y / curve_and_look_params.slope;
+  const float dx_linear_below_pivot = toe_length_y / tone_mapping_params.slope;
   // ...and subtract it from pivot_x to get the x coordinate where the linear section joins the toe
   // ... but keep the transition point above x = 0
-  curve_and_look_params.toe_transition_x = fmaxf(_epsilon, curve_and_look_params.pivot_x - dx_linear_below_pivot);
+  tone_mapping_params.toe_transition_x = fmaxf(_epsilon, tone_mapping_params.pivot_x - dx_linear_below_pivot);
 
   // from the 'run' pivot_x->toe_transition_x, we calculate the 'rise'
-  const float toe_y_below_pivot_y = curve_and_look_params.slope * dx_linear_below_pivot;
-  curve_and_look_params.toe_transition_y = curve_and_look_params.pivot_y - toe_y_below_pivot_y;
+  const float toe_y_below_pivot_y = tone_mapping_params.slope * dx_linear_below_pivot;
+  tone_mapping_params.toe_transition_y = tone_mapping_params.pivot_y - toe_y_below_pivot_y;
 
   // we use the same calculation as for the shoulder, so we flip the toe left <-> right, up <-> down
   const float inverse_toe_limit_x = 1.0f; // 1 - toe_limix_x (toe_limix_x = 0, so inverse = 1)
-  const float inverse_toe_limit_y = 1.0f - curve_and_look_params.target_black; // Inverse limit y
+  const float inverse_toe_limit_y = 1.0f - tone_mapping_params.target_black; // Inverse limit y
 
-  const float inverse_toe_transition_x = 1.0f - curve_and_look_params.toe_transition_x;
-  const float inverse_toe_transition_y = 1.0f - curve_and_look_params.toe_transition_y;
+  const float inverse_toe_transition_x = 1.0f - tone_mapping_params.toe_transition_x;
+  const float inverse_toe_transition_y = 1.0f - tone_mapping_params.toe_transition_y;
 
   // and then flip the scale
-  curve_and_look_params.toe_scale = -_scale(inverse_toe_limit_x, inverse_toe_limit_y,
+  tone_mapping_params.toe_scale = -_scale(inverse_toe_limit_x, inverse_toe_limit_y,
                                     inverse_toe_transition_x, inverse_toe_transition_y,
-                                    curve_and_look_params.slope, curve_and_look_params.toe_power);
+                                    tone_mapping_params.slope, tone_mapping_params.toe_power);
 
   // limit_x is 0 -> dx to limit is just toe_transition_x
   // use epsilon to avoid division by 0 later
-  const float toe_dx_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_x);
-  const float toe_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.toe_transition_y - curve_and_look_params.target_black);
+  const float toe_dx_transition_to_limit = fmaxf(_epsilon, tone_mapping_params.toe_transition_x);
+  const float toe_dy_transition_to_limit = fmaxf(_epsilon, tone_mapping_params.toe_transition_y - tone_mapping_params.target_black);
   const float toe_slope_transition_to_limit = toe_dy_transition_to_limit / toe_dx_transition_to_limit;
-  curve_and_look_params.need_convex_toe = toe_slope_transition_to_limit > curve_and_look_params.slope;
+  tone_mapping_params.need_convex_toe = toe_slope_transition_to_limit > tone_mapping_params.slope;
 
   // toe fallback curve params
-  curve_and_look_params.toe_fallback_power =
-    _calculate_slope_matching_power(curve_and_look_params.slope, toe_dx_transition_to_limit, toe_dy_transition_to_limit);
-  curve_and_look_params.toe_fallback_coefficient =
-    _calculate_fallback_curve_coefficient(toe_dx_transition_to_limit, toe_dy_transition_to_limit, curve_and_look_params.toe_fallback_power);
+  tone_mapping_params.toe_fallback_power =
+    _calculate_slope_matching_power(tone_mapping_params.slope, toe_dx_transition_to_limit, toe_dy_transition_to_limit);
+  tone_mapping_params.toe_fallback_coefficient =
+    _calculate_fallback_curve_coefficient(toe_dx_transition_to_limit, toe_dy_transition_to_limit, tone_mapping_params.toe_fallback_power);
 
   // if x went from toe_transition_x to 0, at the given slope, starting from toe_transition_y, where would we intersect the y-axis?
-  curve_and_look_params.intercept = curve_and_look_params.toe_transition_y - curve_and_look_params.slope * curve_and_look_params.toe_transition_x;
+  tone_mapping_params.intercept = tone_mapping_params.toe_transition_y - tone_mapping_params.slope * tone_mapping_params.toe_transition_x;
 
   // shoulder
-  curve_and_look_params.target_white = powf(user_params->curve_target_display_white_percent / 100.0, 1.0f / curve_and_look_params.curve_gamma);
-  const float remaining_y_above_pivot = curve_and_look_params.target_white - curve_and_look_params.pivot_y;
+  tone_mapping_params.target_white = powf(user_params->curve_target_display_white_percent / 100.0, 1.0f / tone_mapping_params.curve_gamma);
+  const float remaining_y_above_pivot = tone_mapping_params.target_white - tone_mapping_params.pivot_y;
   const float shoulder_length_y = remaining_y_above_pivot * user_params->curve_linear_percent_above_pivot / 100.0f;
-  const float dx_linear_above_pivot = shoulder_length_y / curve_and_look_params.slope;
+  const float dx_linear_above_pivot = shoulder_length_y / tone_mapping_params.slope;
 
   // don't allow shoulder_transition_x to reach 1
-  curve_and_look_params.shoulder_transition_x = fminf(1 - _epsilon, curve_and_look_params.pivot_x + dx_linear_above_pivot);
-  curve_and_look_params.shoulder_transition_y = curve_and_look_params.pivot_y + shoulder_length_y;
-  curve_and_look_params.shoulder_power = user_params->curve_shoulder_power;
+  tone_mapping_params.shoulder_transition_x = fminf(1 - _epsilon, tone_mapping_params.pivot_x + dx_linear_above_pivot);
+  tone_mapping_params.shoulder_transition_y = tone_mapping_params.pivot_y + shoulder_length_y;
+  tone_mapping_params.shoulder_power = user_params->curve_shoulder_power;
 
   const float shoulder_limit_x = 1;
-  curve_and_look_params.shoulder_scale = _scale(shoulder_limit_x, curve_and_look_params.target_white,
-                                    curve_and_look_params.shoulder_transition_x, curve_and_look_params.shoulder_transition_y,
-                                    curve_and_look_params.slope, curve_and_look_params.shoulder_power);
+  tone_mapping_params.shoulder_scale = _scale(shoulder_limit_x, tone_mapping_params.target_white,
+                                    tone_mapping_params.shoulder_transition_x, tone_mapping_params.shoulder_transition_y,
+                                    tone_mapping_params.slope, tone_mapping_params.shoulder_power);
 
-  const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - curve_and_look_params.shoulder_transition_x); // dx to 0, avoid division by 0 later
-  const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, curve_and_look_params.target_white - curve_and_look_params.shoulder_transition_y);
+  const float shoulder_dx_transition_to_limit = fmaxf(_epsilon, 1 - tone_mapping_params.shoulder_transition_x); // dx to 0, avoid division by 0 later
+  const float shoulder_dy_transition_to_limit = fmaxf(_epsilon, tone_mapping_params.target_white - tone_mapping_params.shoulder_transition_y);
   const float shoulder_slope_transition_to_limit = shoulder_dy_transition_to_limit / shoulder_dx_transition_to_limit;
-  curve_and_look_params.need_concave_shoulder = shoulder_slope_transition_to_limit > curve_and_look_params.slope;
+  tone_mapping_params.need_concave_shoulder = shoulder_slope_transition_to_limit > tone_mapping_params.slope;
 
   // shoulder fallback curve params
-  curve_and_look_params.shoulder_fallback_power =
-    _calculate_slope_matching_power(curve_and_look_params.slope, shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit);
-  curve_and_look_params.shoulder_fallback_coefficient =
-    _calculate_fallback_curve_coefficient(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, curve_and_look_params.shoulder_fallback_power);
+  tone_mapping_params.shoulder_fallback_power =
+    _calculate_slope_matching_power(tone_mapping_params.slope, shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit);
+  tone_mapping_params.shoulder_fallback_coefficient =
+    _calculate_fallback_curve_coefficient(shoulder_dx_transition_to_limit, shoulder_dy_transition_to_limit, tone_mapping_params.shoulder_fallback_power);
 
-  return curve_and_look_params;
+  return tone_mapping_params;
 }
 
 static primaries_params_t _get_primaries_params(const dt_iop_agx_user_params_t *user_params)
@@ -874,7 +872,7 @@ static primaries_params_t _get_primaries_params(const dt_iop_agx_user_params_t *
   return primaries_params;
 }
 
-static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const curve_and_look_params_t *params, const dt_colormatrix_t rendering_to_xyz_transposed)
+static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out, const tone_mapping_params_t *params, const dt_colormatrix_t rendering_to_xyz_transposed)
 {
   // record current chromaticity angle
   dt_aligned_pixel_t hsv_pixel = {0.0f};
@@ -990,12 +988,12 @@ static void apply_auto_pivot_x(dt_iop_module_t *self, const dt_iop_order_iccprof
   params_with_mid_gray.curve_pivot_y_linear = 0.18;
   params_with_mid_gray.curve_pivot_x_shift = 0;
 
-  curve_and_look_params_t curve_and_look_params = _calculate_curve_params(&params_with_mid_gray);
+  const tone_mapping_params_t tone_mapping_params = _calculate_tone_mapping_params(&params_with_mid_gray);
 
   // see where the target_pivot would be mapped with defaults of mid-gray to mid-gray mapped
-  float target_y = _apply_curve(target_pivot_x, &curve_and_look_params);
+  float target_y = _apply_curve(target_pivot_x, &tone_mapping_params);
   // try to avoid changing the brightness of the pivot
-  float target_y_linearised = powf(target_y, curve_and_look_params.curve_gamma);
+  float target_y_linearised = powf(target_y, tone_mapping_params.curve_gamma);
   user_params->curve_pivot_y_linear = target_y_linearised;
 
   float shift;
@@ -1040,7 +1038,7 @@ static void _create_matrices(
     dt_colormatrix_t rendering_to_pipe_transposed)
 {
   const primaries_params_t params = _get_primaries_params(user_params);
-  
+
   // Make adjusted primaries for generating the inset matrix
   //
   // References:
@@ -1147,7 +1145,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     dt_apply_transposed_color_matrix(base_rgb, processing_params->base_to_rendering_transposed, rendering_rgb);
 
     // Apply the tone mapping curve and look adjustments
-    _agx_tone_mapping(rendering_rgb, &processing_params->curve_params, processing_params->rendering_profile.matrix_in_transposed);
+    _agx_tone_mapping(rendering_rgb, &processing_params->tone_mapping_params, processing_params->rendering_profile.matrix_in_transposed);
 
     // Convert from internal rendering space back to pipe working space
     dt_apply_transposed_color_matrix(rendering_rgb, processing_params->rendering_to_pipe_transposed, pix_out);
@@ -1163,7 +1161,7 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
   dt_iop_agx_user_params_t *user_params = self->params;
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
 
-  curve_and_look_params_t curve_params = _calculate_curve_params(user_params);
+  const tone_mapping_params_t tone_mapping_params = _calculate_tone_mapping_params(user_params);
 
   // --- Boilerplate cairo/pango setup ---
   gtk_widget_get_allocation(widget, &gui_data->allocation);
@@ -1244,7 +1242,7 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
   for (int i = 0; i < num_guides; ++i)
   {
       const float y_linear = linear_y_guides[i];
-      const float y_pre_gamma = powf(y_linear, 1.0f / curve_params.curve_gamma);
+      const float y_pre_gamma = powf(y_linear, 1.0f / tone_mapping_params.curve_gamma);
 
       const float y_graph = y_pre_gamma * graph_height;
 
@@ -1289,9 +1287,9 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
   cairo_set_dash(cr, dashes, 2, 0); // Use the same dash pattern
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(0.5));
 
-  float min_ev = curve_params.min_ev;
-  float max_ev = curve_params.max_ev;
-  float range_in_ev = curve_params.range_in_ev;
+  float min_ev = tone_mapping_params.min_ev;
+  float max_ev = tone_mapping_params.max_ev;
+  float range_in_ev = tone_mapping_params.range_in_ev;
 
   if (range_in_ev > _epsilon) // Avoid division by zero or tiny ranges
   {
@@ -1337,7 +1335,7 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
   for (int k = 0; k <= steps; k++)
   {
     float x_norm = (float)k / steps; // Input to the curve [0, 1]
-    float y_norm = _apply_curve(x_norm, &curve_params);
+    float y_norm = _apply_curve(x_norm, &tone_mapping_params);
 
     // Map normalized coords [0,1] to graph pixel coords
     const float x_graph = x_norm * graph_width;
@@ -1356,8 +1354,8 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
                   graph_width + 2. * DT_PIXEL_APPLY_DPI(4.), graph_height + 2. * DT_PIXEL_APPLY_DPI(4.));
   cairo_clip(cr);
 
-  const float x_pivot_graph = curve_params.pivot_x * graph_width;
-  const float y_pivot_graph = curve_params.pivot_y * graph_height;
+  const float x_pivot_graph = tone_mapping_params.pivot_x * graph_width;
+  const float y_pivot_graph = tone_mapping_params.pivot_y * graph_height;
   set_color(cr, darktable.bauhaus->graph_fg_active); // Use a distinct color, e.g., active foreground
   cairo_arc(cr, x_pivot_graph, y_pivot_graph, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI); // Adjust radius as needed
   cairo_fill(cr);
@@ -1372,10 +1370,9 @@ static gboolean _agx_draw_curve(GtkWidget *widget, cairo_t *crf, const dt_iop_mo
   g_object_unref(layout);
   pango_font_description_free(desc);
 
-  return FALSE; // Propagate event further? Usually FALSE for draw signals
+  return FALSE;
 }
 
-// Init
 void init(dt_iop_module_t *self)
 {
   dt_iop_default_init(self);
@@ -1386,7 +1383,6 @@ void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe
   piece->data = dt_calloc1_align_type(dt_iop_agx_data_t);
 }
 
-// Cleanup
 void cleanup(dt_iop_module_t *self)
 {
   dt_iop_default_cleanup(self);
@@ -1409,12 +1405,12 @@ static void _update_primaries_checkbox_and_sliders(dt_iop_module_t *self)
   }
 }
 
-void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
+void gui_changed(dt_iop_module_t *self, GtkWidget *widget, void *previous)
 {
   dt_iop_agx_gui_data_t *gui_data = self->gui_data;
   dt_iop_agx_user_params_t *user_params = self->params;
 
-  if (w == gui_data->security_factor)
+  if (widget == gui_data->security_factor)
   {
     darktable.gui->reset++;
     float prev = *(float *)previous;
@@ -1428,21 +1424,21 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
     darktable.gui->reset--;
   }
 
-  if(gui_data->curve_tab_enabled)
+  if (gui_data->curve_tab_enabled)
   {
     // --- START MANUAL SYNC ---
     if(!darktable.gui->reset) // Check the global reset guard
     {
       darktable.gui->reset++; // Prevent recursion
 
-#define SYNC_SLIDER(param_name, widget1, widget2)                                                                 \
-  if(w == widget1)                                                                                                \
+#define SYNC_SLIDER(param_name, slider1, slider2)                                                                 \
+  if(widget == slider1)                                                                                           \
   {                                                                                                               \
-    dt_bauhaus_slider_set(widget2, dt_bauhaus_slider_get(widget1));                                               \
+    dt_bauhaus_slider_set(slider2, dt_bauhaus_slider_get(slider1));                                               \
   }                                                                                                               \
-  else if(w == widget2)                                                                                           \
+  else if(widget == slider2)                                                                                      \
   {                                                                                                               \
-    dt_bauhaus_slider_set(widget1, dt_bauhaus_slider_get(widget2));                                               \
+    dt_bauhaus_slider_set(slider1, dt_bauhaus_slider_get(slider2));                                               \
   }
 
       SYNC_SLIDER("curve_pivot_x_shift", gui_data->basic_curve_controls_settings_page.curve_pivot_x_shift,
@@ -1476,10 +1472,10 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 
   if (gui_data && user_params->auto_gamma)
   {
-    curve_and_look_params_t curve_and_look_params;
-    _calculate_log_mapping_params(self->params, &curve_and_look_params);
-    _adjust_pivot(self->params, &curve_and_look_params);
-    dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
+    tone_mapping_params_t tone_mapping_params;
+    _calculate_log_mapping_params(self->params, &tone_mapping_params);
+    _adjust_pivot(self->params, &tone_mapping_params);
+    dt_bauhaus_slider_set(gui_data->curve_gamma, tone_mapping_params.curve_gamma);
   }
 }
 
@@ -1885,10 +1881,10 @@ void gui_update(dt_iop_module_t *self)
   {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gui_data->auto_gamma), user_params->auto_gamma);
     if (user_params->auto_gamma) {
-      curve_and_look_params_t curve_and_look_params;
-      _calculate_log_mapping_params(self->params, &curve_and_look_params);
-      _adjust_pivot(self->params, &curve_and_look_params);
-      dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
+      tone_mapping_params_t tone_mapping_params;
+      _calculate_log_mapping_params(self->params, &tone_mapping_params);
+      _adjust_pivot(self->params, &tone_mapping_params);
+      dt_bauhaus_slider_set(gui_data->curve_gamma, tone_mapping_params.curve_gamma);
     }
   }
 
@@ -2229,10 +2225,10 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker,
   if (user_params->auto_gamma)
   {
     ++darktable.gui->reset;
-    curve_and_look_params_t curve_and_look_params;
-    _calculate_log_mapping_params(self->params, &curve_and_look_params);
-    _adjust_pivot(self->params, &curve_and_look_params);
-    dt_bauhaus_slider_set(gui_data->curve_gamma, curve_and_look_params.curve_gamma);
+    tone_mapping_params_t tone_mapping_params;
+    _calculate_log_mapping_params(self->params, &tone_mapping_params);
+    _adjust_pivot(self->params, &tone_mapping_params);
+    dt_bauhaus_slider_set(gui_data->curve_gamma, tone_mapping_params.curve_gamma);
     --darktable.gui->reset;
   }
   gtk_widget_queue_draw(GTK_WIDGET(gui_data->graph_drawing_area));
@@ -2246,7 +2242,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *gui_params, dt_dev_pi
   dt_iop_agx_user_params_t *user_params = gui_params;
 
   // Calculate curve parameters once
-  processing_params->curve_params = _calculate_curve_params(user_params);
+  processing_params->tone_mapping_params = _calculate_tone_mapping_params(user_params);
 
   // Get profiles and create matrices
   const dt_iop_order_iccprofile_info_t *const pipe_work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
