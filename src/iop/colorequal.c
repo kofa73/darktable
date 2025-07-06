@@ -454,7 +454,7 @@ void _mean_gaussian(float *const buf,
 #define ANGLE_SHIFT +20.f
 static inline float _deg_to_rad(const float angle)
 {
-  return (angle + ANGLE_SHIFT) * M_PI_F / 180.f;
+  return deg2rad(angle + ANGLE_SHIFT);
 }
 
 /* We use precalculated data for the logistic weighting function for performance and stability
@@ -1723,7 +1723,7 @@ static inline void _periodic_RBF_interpolate(float nodes[NODES],
     // every degree.  We use un-offset angles here, since thue hue
     // offset is merely a GUI thing, only relevant for user-defined
     // nodes.
-    const float hue = (float)i * 360.0f / (float)LUT_ELEM * M_PI_F / 180.f - M_PI_F;
+    const float hue = deg2rad((float)i * 360.0f / (float)LUT_ELEM) - M_PI_F;
     LUT[i] = 0.f;
 
     for(int k = 0; k < NODES; k++)
