@@ -9,6 +9,7 @@
 #include <math.h>   // For math functions
 #include <stdlib.h>
 #include "common/math.h"
+#include "gui/draw.h"
 #include "develop/imageop_gui.h"
 #include "common/dttypes.h"
 
@@ -41,7 +42,9 @@ typedef struct dt_iop_gamutcompress_gui_data_t
 {
   float max_distances[3];
   GtkToggleButton *highlight_negative;
-  GtkLabel *message;
+  GtkWidget *distance_limit_c;
+  GtkWidget *distance_limit_m;
+  GtkWidget *distance_limit_y;
 
 } dt_iop_gamutcompress_gui_data_t;
 
@@ -146,7 +149,7 @@ static const dt_iop_order_iccprofile_info_t *_get_target_profile(dt_develop_t *d
             dt_ioppr_add_profile_info_to_list(dev, profile_type, profile_filename, INTENT_PERCEPTUAL);
         if(!selected_profile_info || !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
         {
-          dt_print(DT_DEBUG_PIPE, "[agx] Export profile '%s' unusable or missing matrix, falling back to Rec2020.",
+          dt_print(DT_DEBUG_PIPE, "[gamutcompress] Export profile '%s' unusable or missing matrix, falling back to Rec2020.",
                    dt_colorspaces_get_name(profile_type, profile_filename));
           selected_profile_info = NULL; // Force fallback
         }
@@ -154,7 +157,7 @@ static const dt_iop_order_iccprofile_info_t *_get_target_profile(dt_develop_t *d
       else
       {
         dt_print(DT_DEBUG_ALWAYS,
-                 "[agx] Failed to get configured export profile settings, falling back to Rec2020.");
+                 "[gamutcompress] Failed to get configured export profile settings, falling back to Rec2020.");
         // fallback handled below
       }
     }
@@ -176,7 +179,7 @@ static const dt_iop_order_iccprofile_info_t *_get_target_profile(dt_develop_t *d
       if(!selected_profile_info || !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
       {
         dt_print(DT_DEBUG_PIPE,
-                 "[agx] Standard base profile '%s' unusable or missing matrix, falling back to Rec2020.",
+                 "[gamutcompress] Standard base profile '%s' unusable or missing matrix, falling back to Rec2020.",
                  dt_colorspaces_get_name(profile_type, ""));
         selected_profile_info = NULL; // Force fallback
       }
@@ -191,7 +194,7 @@ static const dt_iop_order_iccprofile_info_t *_get_target_profile(dt_develop_t *d
         dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_LIN_REC2020, "", DT_INTENT_RELATIVE_COLORIMETRIC);
     // if even Rec2020 fails, something is very wrong, but let the caller handle NULL if necessary.
     if(!selected_profile_info)
-      dt_print(DT_DEBUG_ALWAYS, "[agx] CRITICAL: Failed to get even Rec2020 base profile info.");
+      dt_print(DT_DEBUG_ALWAYS, "[comutcompress] CRITICAL: Failed to get even Rec2020 base profile info.");
   }
 
   return selected_profile_info;
@@ -313,8 +316,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   distance_limit[1] = p->gamut_compression_distance_limit_m;
   distance_limit[2] = p->gamut_compression_distance_limit_y;
 
-  // Local array to find the maximums in a thread-safe way.
-  float max_dist[3] = {-1.0f, -1.0f, -1.0f};
+  // Local array to find the maximums in a thread-safe way. We're not interested in values less than 1.
+  dt_aligned_pixel_t max_dist = {1.0f};
 
   // DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
   for(size_t k = 0; k < 4 * n_pixels; k += 4)
@@ -400,6 +403,12 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     pix_out[3] = pix_in[3];
   }
 
+  // add a tiny safety margin
+  for_three_channels(c, aligned(max_dist: 16))
+  {
+    max_dist[c] = max_dist[c] > 1.f ? max_dist[c] + 0.01 : 1;
+  }
+
   if(g != NULL && self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL))
   {
     memcpy(g->max_distances, max_dist, sizeof(max_dist));
@@ -419,18 +428,69 @@ static gboolean draw(GtkWidget *widget, cairo_t *cr, dt_iop_module_t *self)
 
   if(g->max_distances[0] < 0) return FALSE;
 
-  char *str = g_strdup_printf(gettext("oversaturation: %f, %f, %f"), g->max_distances[0], g->max_distances[1], g->max_distances[2]);
-  g->max_distances[0] = -1.f;
-  g->max_distances[1] = -1.f;
-  g->max_distances[2] = -1.f;
-
-  ++darktable.gui->reset;
-  gtk_label_set_text(g->message, str);
-  --darktable.gui->reset;
-
-  g_free(str);
+  printf(gettext("oversaturation: %f, %f, %f\n"), g->max_distances[0], g->max_distances[1], g->max_distances[2]);
 
   return FALSE;
+}
+
+static void auto_adjust_distance_limit_c(GtkWidget *quad, dt_iop_module_t *self)
+{
+  dt_iop_gamutcompress_params_t *p = self->params;
+  dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
+
+  if(g->max_distances[0] < 1.0f)
+  {
+    dt_control_log(_("oversaturation not yet calculated"));
+    return;
+  }
+
+  p->gamut_compression_distance_limit_c = g->max_distances[0];
+
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->distance_limit_c, p->gamut_compression_distance_limit_c);
+  --darktable.gui->reset;
+
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
+static void auto_adjust_distance_limit_m(GtkWidget *quad, dt_iop_module_t *self)
+{
+  dt_iop_gamutcompress_params_t *p = self->params;
+  dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
+
+  if(g->max_distances[1] < 1.0f)
+  {
+    dt_control_log(_("oversaturation not yet calculated"));
+    return;
+  }
+
+  p->gamut_compression_distance_limit_m = g->max_distances[1];
+
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->distance_limit_m, p->gamut_compression_distance_limit_m);
+  --darktable.gui->reset;
+
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
+static void auto_adjust_distance_limit_y(GtkWidget *quad, dt_iop_module_t *self)
+{
+  dt_iop_gamutcompress_params_t *p = self->params;
+  dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
+
+  if(g->max_distances[2] < 1.0f)
+  {
+    dt_control_log(_("oversaturation not yet calculated"));
+    return;
+  }
+
+  p->gamut_compression_distance_limit_y = g->max_distances[2];
+
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->distance_limit_y, p->gamut_compression_distance_limit_y);
+  --darktable.gui->reset;
+
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 
@@ -439,10 +499,6 @@ void gui_update(dt_iop_module_t *self)
   dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
   dt_iop_gamutcompress_params_t *p = self->params;
   gtk_toggle_button_set_active(g->highlight_negative, p->highlight_negative);
-  g->max_distances[0] = -1.f;
-  g->max_distances[1] = -1.f;
-  g->max_distances[2] = -1.f;
-  gtk_label_set_text(g->message, "");
 }
 
 void init(dt_iop_module_t *self)
@@ -482,33 +538,37 @@ void gui_init(dt_iop_module_t *self)
   // Reuse the slider variable for all sliders
   GtkWidget *slider;
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_c");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum cyan oversaturation to correct"));
+  g->distance_limit_c = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_c");
+  dt_bauhaus_slider_set_soft_range(g->distance_limit_c, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(g->distance_limit_c, _("maximum cyan oversaturation to correct"));
+  dt_bauhaus_widget_set_quad(g->distance_limit_c, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_c,
+                             _("set to max detected cyan oversaturation"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_r");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
   gtk_widget_set_tooltip_text(slider, _("portion of reds to receive cyan overflow"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_m");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum magenta oversaturation to correct"));
+  g->distance_limit_m = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_m");
+  dt_bauhaus_slider_set_soft_range(g->distance_limit_m, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(g->distance_limit_m, _("maximum magenta oversaturation to correct"));
+  dt_bauhaus_widget_set_quad(g->distance_limit_m, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_m,
+                             _("set to max detected magenta oversaturation"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_g");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
   gtk_widget_set_tooltip_text(slider, _("portion of greens to receive magenta overflow"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_y");
-  dt_bauhaus_slider_set_soft_range(slider, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(slider, _("maximum yellow oversaturation to correct"));
+  g->distance_limit_y = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_y");
+  dt_bauhaus_slider_set_soft_range(g->distance_limit_y, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(g->distance_limit_y, _("maximum yellow oversaturation to correct"));
+  dt_bauhaus_widget_set_quad(g->distance_limit_y, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_y,
+                             _("set to max detected yellow oversaturation"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_b");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
   gtk_widget_set_tooltip_text(slider, _("portion of blues to receive compressed yellow overflow"));
 
   g->highlight_negative = GTK_TOGGLE_BUTTON(dt_bauhaus_toggle_from_params(self, "highlight_negative"));
-  g->message = GTK_LABEL(gtk_label_new("")); // This gets filled in by process
-  gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(g->message), TRUE, TRUE, 0);
 
   gui_update(self);
 }
