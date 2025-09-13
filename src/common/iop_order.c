@@ -782,7 +782,7 @@ GList *dt_ioppr_get_iop_order_rules()
     { .op_prev = "rawdenoise",  .op_next = "demosaic"    },
     { .op_prev = "demosaic",    .op_next = "colorin"     },
     { .op_prev = "colorin",     .op_next = "gamutcompress" },
-    { .op_prev = "gamutcompress",    .op_next = "colorout"       },
+    { .op_prev = "gamutcompress", .op_next = "colorout" },
     { .op_prev = "colorout",    .op_next = "gamma"       },
     { .op_prev = "flip",        .op_next = "crop"        }, // crop GUI broken if flip is done on top
     { .op_prev = "flip",        .op_next = "clipping"    }, // clipping GUI broken if flip is done on top
