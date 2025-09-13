@@ -319,7 +319,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   // Local array to find the maximums in a thread-safe way. We're not interested in values less than 1.
   dt_aligned_pixel_t max_dist = {1.0f};
 
-  // DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
+  DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
   for(size_t k = 0; k < 4 * n_pixels; k += 4)
   {
     const float *const restrict pix_in = in + k;
@@ -361,8 +361,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     const float achromatic = max3f(target_RGB);
     const float achromatic_abs = fabsf(achromatic);
 
-    //for_three_channels(chan, aligned(target_RGB, distance_limit, thresholds : 16))
-    for (int chan = 0; chan < 3; chan++)
+    for_three_channels(chan, aligned(target_RGB, distance_limit, thresholds : 16))
     {
       // e.g. 0.1 -> 10% at the top of the gamut
       const float threshold = thresholds[chan];
@@ -373,12 +372,10 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       // Inverse RGB Ratio: distance from achromatic axis
       const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - target_RGB[chan]) / achromatic_abs;
 
-      // Update max distance for the current channel for debug output on the UI (not part of the compression algo)
-      max_dist[chan] = fmaxf(max_dist[chan], distance_from_achromatic);
-
-      if (distance_from_achromatic > 1.5)
+      // Update max distance for the current channel for debug output on the UI (not part of the compression algo), but ignore dark areas
+      if (achromatic_abs > 0.1f)
       {
-        printf("target_RGB: (%f, %f, %f); distance_from_achromatic: %f\n\n", target_RGB[0], target_RGB[1], target_RGB[2], distance_from_achromatic);
+        max_dist[chan] = fmaxf(max_dist[chan], distance_from_achromatic);
       }
 
       // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
