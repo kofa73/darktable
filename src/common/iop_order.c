@@ -157,6 +157,7 @@ const dt_iop_order_entry_t legacy_order[] = {
   { {56.0f }, "grain", 0},
   { {56.5f }, "lut3d", 0},
   { {57.0f }, "colorcontrast", 0},
+  { {57.5f }, "gamutcompress", 0},
   { {58.0f }, "colorout", 0},
   { {59.0f }, "channelmixer", 0},
   { {60.0f }, "soften", 0},
@@ -281,6 +282,7 @@ const dt_iop_order_entry_t v30_order[] = {
   { {67.0f }, "splittoning", 0},     // creative module
   { {68.0f }, "vignette", 0},        // creative module
   { {69.0f }, "colorreconstruct", 0},// try to salvage blown areas before ICC intents in LittleCMS2 do things with them.
+  { {69.5f }, "gamutcompress", 0},
   { {70.0f }, "colorout", 0},
   { {71.0f }, "clahe", 0},
   { {72.0f }, "finalscale", 0},
@@ -400,6 +402,7 @@ const dt_iop_order_entry_t v50_order[] = {
   { {68.0f }, "vignette", 0},        // creative module
   { {69.0f }, "colorreconstruct", 0},// try to salvage blown areas before ICC intents in LittleCMS2 do things with them.
   { {69.4f }, "finalscale", 0},
+  { {69.5f }, "gamutcompress", 0},
   { {70.0f }, "colorout", 0},
   { {71.0f }, "clahe", 0},
   { {73.0f }, "overexposed", 0},
@@ -520,6 +523,7 @@ const dt_iop_order_entry_t v30_jpg_order[] = {
   { { 68.0f }, "vignette", 0 },         // creative module
   { { 69.0f }, "colorreconstruct", 0 }, // try to salvage blown areas before ICC intents in LittleCMS2 do things
                                         // with them.
+  { { 69.5f }, "gamutcompress", 0},
   { { 70.0f }, "colorout", 0 },
   { { 71.0f }, "clahe", 0 },
   { { 72.0f }, "finalscale", 0 },
@@ -642,6 +646,7 @@ const dt_iop_order_entry_t v50_jpg_order[] = {
   { { 69.0f }, "colorreconstruct", 0 }, // try to salvage blown areas before ICC intents in LittleCMS2 do things
                                         // with them.
   { { 69.5f }, "finalscale", 0 },
+  { { 69.6f }, "gamutcompress", 0},
   { { 70.0f }, "colorout", 0 },
   { { 71.0f }, "clahe", 0 },
   { { 73.0f }, "overexposed", 0 },
@@ -776,7 +781,8 @@ GList *dt_ioppr_get_iop_order_rules()
     { .op_prev = "hotpixels",   .op_next = "rawdenoise"  },
     { .op_prev = "rawdenoise",  .op_next = "demosaic"    },
     { .op_prev = "demosaic",    .op_next = "colorin"     },
-    { .op_prev = "colorin",     .op_next = "colorout"    },
+    { .op_prev = "colorin",     .op_next = "gamutcompress" },
+    { .op_prev = "gamutcompress",    .op_next = "colorout"       },
     { .op_prev = "colorout",    .op_next = "gamma"       },
     { .op_prev = "flip",        .op_next = "crop"        }, // crop GUI broken if flip is done on top
     { .op_prev = "flip",        .op_next = "clipping"    }, // clipping GUI broken if flip is done on top

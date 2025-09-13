@@ -1594,6 +1594,7 @@ void init_presets(dt_lib_module_t *self)
   AM("primaries");
   AM("gamma");
   AM("velvia");
+  AM("gamutcompress");
 
   SMG(C_("modulegroup", "correct"), "correct");
   AM("atrous");
