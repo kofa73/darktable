@@ -200,6 +200,28 @@ static const dt_iop_order_iccprofile_info_t *_get_target_profile(dt_develop_t *d
   return selected_profile_info;
 }
 
+typedef struct
+{
+  dt_iop_module_t *self;
+  float max_distances[3];
+} gamutcompress_update_gui_t;
+
+static gboolean _update_gui_from_worker(gpointer data)
+{
+  gamutcompress_update_gui_t *msg = data;
+  dt_iop_module_t *self = msg->self;
+  dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
+
+  if(g)
+  {
+    memcpy(g->max_distances, msg->max_distances, sizeof(g->max_distances));
+    gtk_widget_queue_draw(self->widget);
+  }
+
+  g_free(msg);
+  return G_SOURCE_REMOVE;
+}
+
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
@@ -287,7 +309,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       // The values collected here are used by the pickers to set the distance limit;
       // we ignore dark areas because compression has no visible effect there and
       // they often produce very large distances
-      if (achromatic_abs > 0.1f)
+      if (achromatic_abs > 0.01f)
       {
         max_dist[chan] = fmaxf(max_dist[chan], distance_from_achromatic);
       }
@@ -337,21 +359,11 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   if(g != NULL && self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL))
   {
-    memcpy(g->max_distances, max_dist, sizeof(max_dist));
-    gtk_widget_queue_draw(self->widget);
+    gamutcompress_update_gui_t *msg = g_malloc(sizeof(gamutcompress_update_gui_t));
+    msg->self = self;
+    memcpy(msg->max_distances, max_dist, sizeof(msg->max_distances));
+    g_idle_add(_update_gui_from_worker, msg);
   }
-}
-
-static gboolean draw(GtkWidget *widget, cairo_t *cr, dt_iop_module_t *self)
-{
-  dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
-  if(darktable.gui->reset) return FALSE;
-
-  if(g->max_distances[0] < 0) return FALSE;
-
-  printf(gettext("max distances: %f, %f, %f\n"), g->max_distances[0], g->max_distances[1], g->max_distances[2]);
-
-  return FALSE;
 }
 
 static void auto_adjust_distance_limit_c(GtkWidget *quad, dt_iop_module_t *self)
@@ -472,9 +484,7 @@ void gui_init(dt_iop_module_t *self)
 {
   dt_iop_gamutcompress_gui_data_t *g = IOP_GUI_ALLOC(gamutcompress);
 
-  // self->gui_data = NULL; // No custom gui data needed
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  g_signal_connect(G_OBJECT(self->widget), "draw", G_CALLBACK(draw), self);
 
   GtkWidget *target_primaries_combo = dt_bauhaus_combobox_from_params(self, "target_primaries");
   gtk_widget_set_tooltip_text(target_primaries_combo, _("Color space to perform gamut compression in.\n"
