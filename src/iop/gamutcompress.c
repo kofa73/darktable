@@ -200,76 +200,6 @@ static const dt_iop_order_iccprofile_info_t *_get_target_profile(dt_develop_t *d
   return selected_profile_info;
 }
 
-static inline void _highlight_negative(float *const out,
-                                       const size_t n_pixels,
-                                       const gboolean pipe_target_profile_same,
-                                       const dt_colormatrix_t pipe_to_target_transposed,
-                                       const dt_colormatrix_t target_to_pipe_transposed)
-{
-  DT_OMP_FOR_SIMD()
-  for(size_t k = 0; k < 4 * n_pixels; k += 4)
-  {
-    float *const restrict pix_out = out + k;
-    dt_aligned_pixel_t target_RGB;
-    if(pipe_target_profile_same)
-    {
-      copy_pixel(target_RGB, pix_out);
-    }
-    else
-    {
-      dt_apply_transposed_color_matrix(pix_out, pipe_to_target_transposed, target_RGB);
-    }
-
-    dt_aligned_pixel_t tmp;
-    copy_pixel(tmp, target_RGB);
-
-    target_RGB[0] = (target_RGB[0] < 0);
-    target_RGB[1] = (target_RGB[1] < 0);
-    target_RGB[2] = (target_RGB[2] < 0);
-/*
-    if (tmp[0] < 0)
-    {
-      target_RGB[0] = 1;
-      target_RGB[1] = 0;
-      target_RGB[2] = 0;
-    }
-    if (tmp[1] < 0)
-    {
-      target_RGB[1] = 1;
-      if (tmp[0] > 0)
-      {
-        target_RGB[0] = 0;
-      }
-      if (tmp[2] > 0)
-      {
-        target_RGB[2] = 0;
-      }
-    }
-    if (tmp[2] < 0)
-    {
-      target_RGB[2] = 1;
-      if (tmp[0] > 0)
-      {
-        target_RGB[0] = 0;
-      }
-      if (tmp[1] > 0)
-      {
-        target_RGB[1] = 0;
-      }
-    }
-    */
-
-    if(pipe_target_profile_same)
-    {
-      copy_pixel(pix_out, target_RGB);
-    }
-    else
-    {
-      dt_apply_transposed_color_matrix(target_RGB, target_to_pipe_transposed, pix_out);
-    }
-  }
-}
-
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
@@ -316,7 +246,9 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   distance_limit[1] = p->gamut_compression_distance_limit_m;
   distance_limit[2] = p->gamut_compression_distance_limit_y;
 
-  // Local array to find the maximums in a thread-safe way. We're not interested in values less than 1.
+  gboolean highlight_negative = (g != NULL && self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL) && p->highlight_negative);
+
+  // We're not interested in values less than 1.
   dt_aligned_pixel_t max_dist = {1.0f};
 
   DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
@@ -388,6 +320,20 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       target_RGB[chan] = achromatic - compressed_distance * achromatic_abs;
     }
 
+    if (highlight_negative)
+    {
+      target_RGB[0] = (target_RGB[0] < 0);
+      target_RGB[1] = (target_RGB[1] < 0);
+      target_RGB[2] = (target_RGB[2] < 0);
+    }
+    else
+    {
+      // clip whatever negative remains
+      target_RGB[0] = fmaxf(target_RGB[0], 0);
+      target_RGB[1] = fmaxf(target_RGB[1], 0);
+      target_RGB[2] = fmaxf(target_RGB[2], 0);
+    }
+
     if(pipe_target_profile_same)
     {
       copy_pixel(pix_out, target_RGB);
@@ -410,11 +356,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   {
     memcpy(g->max_distances, max_dist, sizeof(max_dist));
     gtk_widget_queue_draw(self->widget);
-  }
-
-  if(g != NULL && self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL) && p->highlight_negative)
-  {
-    _highlight_negative(out, n_pixels, pipe_target_profile_same, pipe_to_target_transposed, target_to_pipe_transposed);
   }
 }
 
@@ -568,6 +509,8 @@ void gui_init(dt_iop_module_t *self)
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_r");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  dt_bauhaus_slider_set_format(slider, "%");
+  dt_bauhaus_slider_set_factor(slider, 100.f);
   gtk_widget_set_tooltip_text(slider, _("portion of reds to receive cyan overflow"));
 
   g->distance_limit_m = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_m");
@@ -579,6 +522,8 @@ void gui_init(dt_iop_module_t *self)
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_g");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  dt_bauhaus_slider_set_format(slider, "%");
+  dt_bauhaus_slider_set_factor(slider, 100.f);
   gtk_widget_set_tooltip_text(slider, _("portion of greens to receive magenta overflow"));
 
   g->distance_limit_y = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_y");
@@ -590,6 +535,8 @@ void gui_init(dt_iop_module_t *self)
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_b");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
+  dt_bauhaus_slider_set_format(slider, "%");
+  dt_bauhaus_slider_set_factor(slider, 100.f);
   gtk_widget_set_tooltip_text(slider, _("portion of blues to receive compressed yellow overflow"));
 
   GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
