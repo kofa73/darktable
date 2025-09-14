@@ -28,13 +28,13 @@ typedef enum dt_iop_gamut_compression_target_primaries_t
 typedef struct dt_iop_gamutcompress_params_t
 {
   dt_iop_gamutcompress_target_primaries_t target_primaries; // $DEFAULT: DT_GAMUT_COMPRESSION_EXPORT_PROFILE $DESCRIPTION: "target color space"
-  float gamut_compression_threshold_r;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "red compression target"
-  float gamut_compression_threshold_g;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "green compression target"
-  float gamut_compression_threshold_b;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "blue compression target"
+  float gamut_compression_buffer_r;         // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "red compression buffer"
+  float gamut_compression_buffer_g;         // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "green compression buffer"
+  float gamut_compression_buffer_b;         // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "blue compression buffer"
   float gamut_compression_distance_limit_c; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "cyan distance limit"
   float gamut_compression_distance_limit_m; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "magenta distance limit"
   float gamut_compression_distance_limit_y; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "yellow distance limit"
-  gboolean highlight_negative;  // $DEFAULT: FALSE $DESCRIPTION: "highlight negative components"
+  gboolean highlight_negative;              // $DEFAULT: FALSE $DESCRIPTION: "highlight negative components"
 
 } dt_iop_gamutcompress_params_t;
 
@@ -51,9 +51,9 @@ typedef struct dt_iop_gamutcompress_gui_data_t
 typedef struct dt_iop_gamutcompress_data_t
 {
   dt_iop_gamutcompress_target_primaries_t target_primaries;
-  float gamut_compression_threshold_r;
-  float gamut_compression_threshold_g;
-  float gamut_compression_threshold_b;
+  float gamut_compression_buffer_r;
+  float gamut_compression_buffer_g;
+  float gamut_compression_buffer_b;
   float gamut_compression_distance_limit_c;
   float gamut_compression_distance_limit_m;
   float gamut_compression_distance_limit_y;
@@ -99,9 +99,9 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelp
   dt_iop_gamutcompress_data_t *d = piece->data;
   
   d->target_primaries = p->target_primaries;
-  d->gamut_compression_threshold_r = p->gamut_compression_threshold_r;
-  d->gamut_compression_threshold_g = p->gamut_compression_threshold_g;
-  d->gamut_compression_threshold_b = p->gamut_compression_threshold_b;
+  d->gamut_compression_buffer_r = p->gamut_compression_buffer_r;
+  d->gamut_compression_buffer_g = p->gamut_compression_buffer_g;
+  d->gamut_compression_buffer_b = p->gamut_compression_buffer_b;
   d->gamut_compression_distance_limit_c = p->gamut_compression_distance_limit_c;
   d->gamut_compression_distance_limit_m = p->gamut_compression_distance_limit_m;
   d->gamut_compression_distance_limit_y = p->gamut_compression_distance_limit_y;
@@ -236,10 +236,10 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     mat3SSEinv(target_to_pipe_transposed, pipe_to_target_transposed);
   }
 
-  dt_aligned_pixel_t thresholds;
-  thresholds[0] = p->gamut_compression_threshold_r;
-  thresholds[1] = p->gamut_compression_threshold_g;
-  thresholds[2] = p->gamut_compression_threshold_b;
+  dt_aligned_pixel_t buffers;
+  buffers[0] = p->gamut_compression_buffer_r;
+  buffers[1] = p->gamut_compression_buffer_g;
+  buffers[2] = p->gamut_compression_buffer_b;
 
   dt_aligned_pixel_t distance_limit;
   distance_limit[0] = p->gamut_compression_distance_limit_c;
@@ -268,55 +268,38 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       dt_apply_transposed_color_matrix(pix_in, pipe_to_target_transposed, target_RGB);
     }
 
-/*
-   // Achromatic axis
-    const float achromatic = fmaxf(pixel_in_out[0], fmaxf(pixel_in_out[1], pixel_in_out[2]));
+    // algo from Jed Smith: https://github.com/jedypod/gamut-compress
 
-    for_three_channels(k, aligned(pixel_in_out, distance_limit, threshold: 16))
-    {
-    // compress into the top 20% of gamut
-    const float th = 1.0f - threshold[k];
-    // Inverse RGB Ratios: distance from achromatic axis
-    const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - pixel_in_out[k]) / fabs(achromatic);
-    // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
-    const float scale = (1.0f - th) / sqrtf(fmaxf(1.001f, distance_limit[k]) - 1.0f);
-    // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
-    const float compressed_distance = distance_from_achromatic < th ? distance_from_achromatic :
-    scale * sqrtf(distance_from_achromatic - th + scale * scale /4.0f) - scale * sqrtf(scale * scale /4.0f) + th;
-    // Inverse RGB Ratios to RGB
-    pixel_in_out[k] = achromatic - compressed_distance * fabsf(achromatic);
-    }
-    */
-
-    // Jed Smith
-    // Achromatic axis
     const float achromatic = max3f(target_RGB);
     const float achromatic_abs = fabsf(achromatic);
 
-    for_three_channels(chan, aligned(target_RGB, distance_limit, thresholds : 16))
+    for_three_channels(chan, aligned(target_RGB, distance_limit, buffers : 16))
     {
       // e.g. 0.1 -> 10% at the top of the gamut
-      const float threshold = thresholds[chan];
+      const float buffer = buffers[chan];
 
-      // Amount of outer gamut to affect
-      const float th = 1.0f - threshold;
+      // values below this will not be compressed
+      const float threshold = 1.0f - buffer;
 
-      // Inverse RGB Ratio: distance from achromatic axis
+      // Inverse RGB Ratio: distance from achromatic axis; a saturation-like measure
       const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - target_RGB[chan]) / achromatic_abs;
 
-      // Update max distance for the current channel for debug output on the UI (not part of the compression algo), but ignore dark areas
+      // The values collected here are used by the pickers to set the distance limit;
+      // we ignore dark areas because compression has no visible effect there and
+      // they often produce very large distances
       if (achromatic_abs > 0.1f)
       {
         max_dist[chan] = fmaxf(max_dist[chan], distance_from_achromatic);
       }
 
-      // Calculate scale so compression function passes through distance limit: (x=dl, y=1)
-      const float scale = (1.0f - th) / sqrtf(fmaxf(1.001f, distance_limit[chan]) - 1.0f);
+      // Calculate scale so compression function passes through distance limit: (x=distance_limit, y=1)
+      // in the original formula, '1 - threshold' is used instead of 'buffer', but the two are equivalent 
+      const float scale = buffer / sqrtf(fmaxf(1.001f, distance_limit[chan]) - 1.0f);
       const float compressed_distance =
-          distance_from_achromatic < th
+          distance_from_achromatic < threshold
               ? distance_from_achromatic
               // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
-              : scale * sqrtf(distance_from_achromatic - th + scale * scale / 4.0f) - scale * sqrtf(scale * scale / 4.0f) + th;
+              : scale * sqrtf(distance_from_achromatic - threshold + scale * scale / 4.0f) - scale * sqrtf(scale * scale / 4.0f) + threshold;
       target_RGB[chan] = achromatic - compressed_distance * achromatic_abs;
     }
 
@@ -507,7 +490,7 @@ void gui_init(dt_iop_module_t *self)
   dt_bauhaus_widget_set_quad(g->distance_limit_c, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_c,
                              _("set to max detected cyan distance"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_r");
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_buffer_r");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_factor(slider, 100.f);
@@ -520,7 +503,7 @@ void gui_init(dt_iop_module_t *self)
   dt_bauhaus_widget_set_quad(g->distance_limit_m, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_m,
                              _("set to max detected magenta distance"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_g");
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_buffer_g");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_factor(slider, 100.f);
@@ -533,7 +516,7 @@ void gui_init(dt_iop_module_t *self)
   dt_bauhaus_widget_set_quad(g->distance_limit_y, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_y,
                              _("set to max detected yellow distance"));
 
-  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_b");
+  slider = dt_bauhaus_slider_from_params(self, "gamut_compression_buffer_b");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_factor(slider, 100.f);
