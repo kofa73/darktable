@@ -31,9 +31,9 @@ typedef struct dt_iop_gamutcompress_params_t
   float gamut_compression_threshold_r;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "red compression target"
   float gamut_compression_threshold_g;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "green compression target"
   float gamut_compression_threshold_b;    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "blue compression target"
-  float gamut_compression_distance_limit_c; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "max cyan oversaturation"
-  float gamut_compression_distance_limit_m; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "max magenta oversaturation"
-  float gamut_compression_distance_limit_y; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "max yellow oversaturation"
+  float gamut_compression_distance_limit_c; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "cyan distance limit"
+  float gamut_compression_distance_limit_m; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "magenta distance limit"
+  float gamut_compression_distance_limit_y; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "yellow distance limit"
   gboolean highlight_negative;  // $DEFAULT: FALSE $DESCRIPTION: "highlight negative components"
 
 } dt_iop_gamutcompress_params_t;
@@ -425,7 +425,7 @@ static gboolean draw(GtkWidget *widget, cairo_t *cr, dt_iop_module_t *self)
 
   if(g->max_distances[0] < 0) return FALSE;
 
-  printf(gettext("oversaturation: %f, %f, %f\n"), g->max_distances[0], g->max_distances[1], g->max_distances[2]);
+  printf(gettext("max distances: %f, %f, %f\n"), g->max_distances[0], g->max_distances[1], g->max_distances[2]);
 
   return FALSE;
 }
@@ -437,7 +437,7 @@ static void auto_adjust_distance_limit_c(GtkWidget *quad, dt_iop_module_t *self)
 
   if(g->max_distances[0] < 1.0f)
   {
-    dt_control_log(_("oversaturation not yet calculated"));
+    dt_control_log(_("max distances not yet calculated"));
     return;
   }
 
@@ -457,7 +457,7 @@ static void auto_adjust_distance_limit_m(GtkWidget *quad, dt_iop_module_t *self)
 
   if(g->max_distances[1] < 1.0f)
   {
-    dt_control_log(_("oversaturation not yet calculated"));
+    dt_control_log(_("max distances not yet calculated"));
     return;
   }
 
@@ -477,13 +477,37 @@ static void auto_adjust_distance_limit_y(GtkWidget *quad, dt_iop_module_t *self)
 
   if(g->max_distances[2] < 1.0f)
   {
-    dt_control_log(_("oversaturation not yet calculated"));
+    dt_control_log(_("max distances not yet calculated"));
     return;
   }
 
   p->gamut_compression_distance_limit_y = g->max_distances[2];
 
   ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->distance_limit_y, p->gamut_compression_distance_limit_y);
+  --darktable.gui->reset;
+
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+
+static void auto_adjust_distance_limit_all(GtkButton *button, dt_iop_module_t *self)
+{
+  dt_iop_gamutcompress_params_t *p = self->params;
+  dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
+
+  if(g->max_distances[0] < 1.0f || g->max_distances[1] < 1.0f || g->max_distances[2] < 1.0f)
+  {
+    dt_control_log(_("max distances not yet calculated"));
+    return;
+  }
+
+  p->gamut_compression_distance_limit_c = g->max_distances[0];
+  p->gamut_compression_distance_limit_m = g->max_distances[1];
+  p->gamut_compression_distance_limit_y = g->max_distances[2];
+
+  ++darktable.gui->reset;
+  dt_bauhaus_slider_set(g->distance_limit_c, p->gamut_compression_distance_limit_c);
+  dt_bauhaus_slider_set(g->distance_limit_m, p->gamut_compression_distance_limit_m);
   dt_bauhaus_slider_set(g->distance_limit_y, p->gamut_compression_distance_limit_y);
   --darktable.gui->reset;
 
@@ -537,9 +561,10 @@ void gui_init(dt_iop_module_t *self)
 
   g->distance_limit_c = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_c");
   dt_bauhaus_slider_set_soft_range(g->distance_limit_c, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(g->distance_limit_c, _("maximum cyan oversaturation to correct"));
+  gtk_widget_set_tooltip_text(g->distance_limit_c, _("maximum oversaturation to correct,\n"
+                                                     "that's pushing red to negative"));
   dt_bauhaus_widget_set_quad(g->distance_limit_c, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_c,
-                             _("set to max detected cyan oversaturation"));
+                             _("set to max detected cyan distance"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_r");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
@@ -547,9 +572,10 @@ void gui_init(dt_iop_module_t *self)
 
   g->distance_limit_m = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_m");
   dt_bauhaus_slider_set_soft_range(g->distance_limit_m, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(g->distance_limit_m, _("maximum magenta oversaturation to correct"));
+  gtk_widget_set_tooltip_text(g->distance_limit_m, _("maximum oversaturation to correct,\n"
+                                                     "that's pushing green to negative"));
   dt_bauhaus_widget_set_quad(g->distance_limit_m, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_m,
-                             _("set to max detected magenta oversaturation"));
+                             _("set to max detected magenta distance"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_g");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
@@ -557,15 +583,28 @@ void gui_init(dt_iop_module_t *self)
 
   g->distance_limit_y = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_y");
   dt_bauhaus_slider_set_soft_range(g->distance_limit_y, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(g->distance_limit_y, _("maximum yellow oversaturation to correct"));
+  gtk_widget_set_tooltip_text(g->distance_limit_y, _("maximum oversaturation to correct,\n"
+                                                     "that's pushing blue to negative"));
   dt_bauhaus_widget_set_quad(g->distance_limit_y, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_y,
-                             _("set to max detected yellow oversaturation"));
+                             _("set to max detected yellow distance"));
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_threshold_b");
   dt_bauhaus_slider_set_soft_range(slider, 0.1f, 0.5f);
   gtk_widget_set_tooltip_text(slider, _("portion of blues to receive compressed yellow overflow"));
 
+  GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *vbox = self->widget;
+
+  self->widget = hbox;
+
   g->highlight_negative = GTK_TOGGLE_BUTTON(dt_bauhaus_toggle_from_params(self, "highlight_negative"));
+
+  dt_iop_button_new(self, N_("set all distance limits to max detected distance"),
+                    G_CALLBACK(auto_adjust_distance_limit_all), FALSE, 0, 0,
+                    dtgtk_cairo_paint_wand, 0, self->widget);
+
+  self->widget = vbox;
+  gtk_box_pack_start(GTK_BOX(self->widget), hbox, FALSE, FALSE, 0);
 
   gui_update(self);
 }
