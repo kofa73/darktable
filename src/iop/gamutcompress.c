@@ -249,7 +249,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   gboolean highlight_negative = (g != NULL && self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL) && p->highlight_negative);
 
   // We're not interested in values less than 1.
-  dt_aligned_pixel_t max_dist = {1.0f};
+  float max_dist[3] = {1.0f};
 
   DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
   for(size_t k = 0; k < 4 * n_pixels; k += 4)
