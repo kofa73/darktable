@@ -13,6 +13,125 @@
 #include "develop/imageop_gui.h"
 #include "common/dttypes.h"
 
+/* for later, xy distance calculation between a colour and the white point
+ ```c
+#include <stdio.h>
+#include <math.h>
+#include <stdbool.h>
+
+typedef struct {
+    double x, y;
+} Point;
+
+// Function to calculate the cross product of two vectors originating from a common point.
+// This helps determine the orientation of three points.
+double cross_product(Point a, Point b, Point c) {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+// Function to check if a point p is inside the triangle formed by r, g, and b.
+// It uses the property that the point is on the same side of all three triangle edges.
+bool is_inside(Point r, Point g, Point b, Point p) {
+    bool b1, b2, b3;
+
+    b1 = cross_product(p, r, g) < 0.0;
+    b2 = cross_product(p, g, b) < 0.0;
+    b3 = cross_product(p, b, r) < 0.0;
+
+    return ((b1 == b2) && (b2 == b3));
+}
+
+// Function to calculate the squared distance between two points.
+// Using squared distance avoids a square root operation for comparisons.
+double distance_sq(Point p1, Point p2) {
+    double dx = p1.x - p2.x;
+    double dy = p1.y - p2.y;
+    return dx * dx + dy * dy;
+}
+
+// Function to find the intersection point of two line segments.
+// Returns true if an intersection exists, and the intersection point is stored in 'c'.
+bool line_segment_intersection(Point p1, Point p2, Point p3, Point p4, Point* c) {
+    double det = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+    if (det == 0) {
+        return false; // Lines are parallel
+    }
+
+    double t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / det;
+    double u = -((p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x)) / det;
+
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+        c->x = p1.x + t * (p2.x - p1.x);
+        c->y = p1.y + t * (p2.y - p1.y);
+        return true;
+    }
+
+    return false;
+}
+
+
+int main() {
+    Point r, g, b, w, p;
+
+    // Example Input
+    r.x = 0.0; r.y = 0.0;
+    g.x = 5.0; g.y = 5.0;
+    b.x = 10.0; b.y = 0.0;
+    w.x = 5.0; w.y = 2.0;
+    p.x = 7.0; p.y = 4.0;
+
+    if (is_inside(r, g, b, p)) {
+        printf("p is inside the triangle.\n");
+    } else {
+        printf("p is outside the triangle.\n");
+
+        double dist_p_w = sqrt(distance_sq(p, w));
+        printf("Distance from p to w: %f\n", dist_p_w);
+
+        Point c_rg, c_gb, c_br;
+        bool intersect_rg = line_segment_intersection(p, w, r, g, &c_rg);
+        bool intersect_gb = line_segment_intersection(p, w, g, b, &c_gb);
+        bool intersect_br = line_segment_intersection(p, w, b, r, &c_br);
+
+        Point closest_c;
+        double min_dist_sq = -1.0;
+
+        if (intersect_rg) {
+            double d_sq = distance_sq(p, c_rg);
+            if (min_dist_sq < 0 || d_sq < min_dist_sq) {
+                min_dist_sq = d_sq;
+                closest_c = c_rg;
+            }
+        }
+        if (intersect_gb) {
+            double d_sq = distance_sq(p, c_gb);
+            if (min_dist_sq < 0 || d_sq < min_dist_sq) {
+                min_dist_sq = d_sq;
+                closest_c = c_gb;
+            }
+        }
+        if (intersect_br) {
+            double d_sq = distance_sq(p, c_br);
+            if (min_dist_sq < 0 || d_sq < min_dist_sq) {
+                min_dist_sq = d_sq;
+                closest_c = c_br;
+            }
+        }
+
+        if (min_dist_sq >= 0) {
+            printf("Intersection point c: (%f, %f)\n", closest_c.x, closest_c.y);
+            double dist_c_w = sqrt(distance_sq(closest_c, w));
+            printf("Distance from c to w: %f\n", dist_c_w);
+        } else {
+            printf("Line from p to w does not intersect the triangle sides.\n");
+        }
+    }
+
+    return 0;
+}
+*/
+
+
 typedef enum dt_iop_gamut_compression_target_primaries_t
 {
   // NOTE: Keep Export Profile first to make it the default (index 0)
@@ -263,17 +382,34 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   buffers[1] = p->gamut_compression_buffer_g;
   buffers[2] = p->gamut_compression_buffer_b;
 
+  dt_aligned_pixel_t thresholds;
+  thresholds[0] = 1.0f - buffers[0];
+  thresholds[1] = 1.0f - buffers[1];
+  thresholds[2] = 1.0f - buffers[2];
+
+
   dt_aligned_pixel_t distance_limit;
   distance_limit[0] = p->gamut_compression_distance_limit_c;
   distance_limit[1] = p->gamut_compression_distance_limit_m;
   distance_limit[2] = p->gamut_compression_distance_limit_y;
+
+  dt_aligned_pixel_t scales;
+  dt_aligned_pixel_t params1;
+  dt_aligned_pixel_t params2;
+  for (int chan = 0; chan < 3; ++chan)
+  {
+    scales[chan] = buffers[chan] / sqrtf(fmaxf(1.001f, distance_limit[chan]) - 1.0f);
+    const float scale_squared_per_4 = scales[chan] * scales[chan] / 4.0f;
+    params1[chan] = - thresholds[chan] + scale_squared_per_4;
+    params2[chan] = fabsf(scales[chan]) / 2.f;
+  }
 
   gboolean highlight_negative = (g != NULL && self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL) && p->highlight_negative);
 
   // We're not interested in values less than 1.
   float max_dist[3] = {1.0f};
 
-  DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
+  // DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
   for(size_t k = 0; k < 4 * n_pixels; k += 4)
   {
     const float *const restrict pix_in = in + k;
@@ -295,13 +431,11 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     const float achromatic = max3f(target_RGB);
     const float achromatic_abs = fabsf(achromatic);
 
-    for_three_channels(chan, aligned(target_RGB, distance_limit, buffers : 16))
+    //for_three_channels(chan, aligned(target_RGB, thresholds, scales, params1, params2 : 16))
+    for (int chan = 0; chan < 3; ++chan)
     {
-      // e.g. 0.1 -> 10% at the top of the gamut
-      const float buffer = buffers[chan];
-
       // values below this will not be compressed
-      const float threshold = 1.0f - buffer;
+      const float threshold = thresholds[chan];
 
       // Inverse RGB Ratio: distance from achromatic axis; a saturation-like measure
       const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - target_RGB[chan]) / achromatic_abs;
@@ -314,15 +448,24 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
         max_dist[chan] = fmaxf(max_dist[chan], distance_from_achromatic);
       }
 
-      // Calculate scale so compression function passes through distance limit: (x=distance_limit, y=1)
-      // in the original formula, '1 - threshold' is used instead of 'buffer', but the two are equivalent 
-      const float scale = buffer / sqrtf(fmaxf(1.001f, distance_limit[chan]) - 1.0f);
-      const float compressed_distance =
-          distance_from_achromatic < threshold
-              ? distance_from_achromatic
-              // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
-              : scale * sqrtf(distance_from_achromatic - threshold + scale * scale / 4.0f) - scale * sqrtf(scale * scale / 4.0f) + threshold;
-      target_RGB[chan] = achromatic - compressed_distance * achromatic_abs;
+      if(distance_from_achromatic >= threshold)
+      {
+        // Calculate scale so compression function passes through distance limit: (x=distance_limit, y=1)
+        // in the original formula, '1 - threshold' is used instead of 'buffer', but the two are equivalent
+        const float scale = scales[chan];
+        const float param1 = params1[chan];
+        const float param2 = params2[chan];
+        // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
+        const float compressed_distance = scale * (sqrtf(distance_from_achromatic + param1) - param2) + threshold;
+        dt_aligned_pixel_t before;
+        copy_pixel(before, target_RGB);
+        target_RGB[chan] = achromatic - compressed_distance * achromatic_abs;
+        printf("in (pipe): (%f, %f, %f), in (target): (%f, %f, %f), out (target): (%f, %f, %f)\n",
+               pix_in[0], pix_in[1], pix_in[2],
+               before[0], before[1], before[2],
+               target_RGB[0], target_RGB[1], target_RGB[2]
+               );
+      }
     }
 
     if (highlight_negative)
