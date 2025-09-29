@@ -16,27 +16,57 @@
 #include <math.h>
 #include <stdbool.h>
 
-// cross product of start_point -> end_point_a and start_point -> end_point_b, used to find the orientation of three points
-float cross_product(const float* const start_point, const float* const end_point_a, const float* const end_point_b) {
-  return (end_point_a[0] - start_point[0]) * (end_point_b[1] - start_point[1]) - (end_point_a[1] - start_point[1]) * (end_point_b[0] - start_point[0]);
+static const float _GC_INFINITY = 1e6f;
+static const float _GC_EPSILON = 1e-5f;
+
+// dot product of start_point -> end_point_a and start_point -> end_point_b, positive if pointing in same direction
+static float _dot_product(const float* const start_point, const float* const end_point_a, const float* const end_point_b) {
+  return (end_point_a[0] - start_point[0]) * (end_point_b[0] - start_point[0]) + (end_point_a[1] - start_point[1]) * (end_point_b[1] - start_point[1]);
 }
 
-float distance_sq(const float* const p1, const float* const p2) {
+static float _distance_sq(const float* const p1, const float* const p2) {
   const float dx = p1[0] - p2[0];
   const float dy = p1[1] - p2[1];
   return dx * dx + dy * dy;
 }
 
-bool line_segment_intersection(const float* const p1, const float* const p2, const float* const p3, const float* const p4, float* const intersection) {
-  const float det = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0]);
-  if (det < 1e-5f) {
+static bool _gamut_triangle_side_and_wp_to_xy_line_intersection(
+  const float* const primary1, const float* const primary2, // the **segment** between the primaries we're checking
+  const float* const whitepoint, const float* const xy, // the line from the white point to our point's xy coordinates
+  float* const intersection) {
+  // the order is important: the intersection **must** lie on the primary-to-primary segment (a side of the gamut triangle)
+  // it will always line on the white point to our xy **line** (if not parallel with the side, meaning no intersection),
+  // but if xy is inside the gamut triangle, it will not lie on the segment
+
+  // p1, p2 are the side of the gamut triangle, running from primary to primary
+  const float x1 = primary1[0];
+  const float y1 = primary1[1];
+  const float x2 = primary2[0];
+  const float y2 = primary2[1];
+
+  const float x3 = whitepoint[0];
+  const float y3 = whitepoint[1];
+  const float x4 = xy[0];
+  const float y4 = xy[1];
+
+  const float det = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (fabs(det) < _GC_EPSILON) {
+    // printf("(primary-to-primary (%f, %f) -> (%f, %f) is parallel with wp -> xy (%f, %f) -> (%f, %f), det=%f\n", x1, y1, x2, y2, x3, y3, x4, y4, det);
     return false; // Lines are parallel
   }
 
-  const float t = ((p3[0] - p1[0]) * (p4[1] - p3[1]) - (p3[1] - p1[1]) * (p4[0] - p3[0])) / det;
+  const float t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / det;
+  if (t < 0 || t > 1)
+  {
+    // intersection is not on the gamut triangle side segment
+    // const float intersection_x = primary1[0] + t * (primary2[0] - primary1[0]);
+    // const float intersection_y = primary1[1] + t * (primary2[1] - primary1[1]);
+    // printf("(primary-to-primary (%f, %f) -> (%f, %f) intersection  wp -> xy (%f, %f) -> (%f, %f) is not on the edge: (%f, %f)\n", x1, y1, x2, y2, x3, y3, x4, y4, intersection_x, intersection_y);
+    return false;
+  }
 
-  intersection[0] = p1[0] + t * (p2[0] - p1[0]);
-  intersection[1] = p1[1] + t * (p2[1] - p1[1]);
+  intersection[0] = primary1[0] + t * (primary2[0] - primary1[0]);
+  intersection[1] = primary1[1] + t * (primary2[1] - primary1[1]);
   return true;
 }
 
@@ -70,7 +100,7 @@ typedef struct dt_iop_gamutcompress_params_t
   float gamut_compression_distance_limit_m; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "magenta distance limit"
   float gamut_compression_distance_limit_y; // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "yellow distance limit"
   float gamut_compression_start_xy;         // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.9 $DESCRIPTION: "xyY compression start"
-  float gamut_compression_end_xy;           // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 2.0 $DESCRIPTION: "xyY compression end"
+  float gamut_compression_end_xy;           // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 2.0 $DESCRIPTION: "xyY compression end"
   float preserve_hue;                       // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "preserve JzAzBz hue"
   gboolean highlight_negative;              // $DEFAULT: FALSE $DESCRIPTION: "highlight negative components"
 
@@ -144,12 +174,16 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelp
   dt_iop_gamutcompress_data_t *d = piece->data;
   
   d->target_primaries = p->target_primaries;
+  d->method = p->method;
   d->gamut_compression_buffer_r = p->gamut_compression_buffer_r;
   d->gamut_compression_buffer_g = p->gamut_compression_buffer_g;
   d->gamut_compression_buffer_b = p->gamut_compression_buffer_b;
   d->gamut_compression_distance_limit_c = p->gamut_compression_distance_limit_c;
   d->gamut_compression_distance_limit_m = p->gamut_compression_distance_limit_m;
   d->gamut_compression_distance_limit_y = p->gamut_compression_distance_limit_y;
+  d->gamut_compression_start_xy = p->gamut_compression_start_xy;
+  d->gamut_compression_end_xy = p->gamut_compression_end_xy;
+  d->preserve_hue = p->preserve_hue;
   d->highlight_negative = p->highlight_negative;
 }
 
@@ -262,6 +296,7 @@ static gboolean _update_gui_from_worker(gpointer data)
   {
     memcpy(g->max_distances, msg->max_distances, sizeof(g->max_distances));
     g->max_xy_dist_ratio = msg->max_xy_dist_ratio;
+    printf("_update_gui_from_worker, max_xy_dist_ratio: %f\n", g->max_xy_dist_ratio);
     gtk_widget_queue_draw(self->widget);
   }
 
@@ -438,6 +473,61 @@ void process_jed(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const voi
 }
 */
 
+void check_intersection(
+  const float* const primary_a,
+  const float* const primary_b,
+  const float* const whitepoint,
+  const float* const xy,
+  float* const relevant_intersection,
+  float* const distance_sq_to_gamut_boundary)
+{
+  float intersection[2] = {0.f};
+  const bool intersects = _gamut_triangle_side_and_wp_to_xy_line_intersection(
+      primary_a, primary_b,
+      whitepoint, xy,
+      intersection
+      );
+
+    // printf("intersection of (%f, %f) -> (%f, %f) with (%f, %f) -> (%f, %f): (%f, %f) (intersects: %d)\n",
+    //   primary_a[0], primary_a[1], primary_b[0], primary_b[1],
+    //   whitepoint[0], whitepoint[1], xy[0], xy[1],
+    //   intersection[0], intersection[1],
+    //   intersects
+    // );
+
+  if (intersects)
+  {
+    const float dot_product = _dot_product(whitepoint, intersection, xy);
+    // we're only interested in the intersection with a side that is in the same direction from the white point as our xy
+    if (dot_product > 0.f)
+    {
+      const float sq_distance = _distance_sq(whitepoint, intersection);
+      if (sq_distance < *distance_sq_to_gamut_boundary)
+      {
+        if (*distance_sq_to_gamut_boundary != _GC_INFINITY)
+        {
+          // this cannot happen
+          printf("already found an intersection: %f\n", _dot_product(whitepoint, intersection, xy));
+          printf("current relevant_intersection: (%f, %f), new: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1], intersection[0], intersection[1]);
+          printf("current distance_sq_to_gamut_boundary: %f, new: %f\n", *distance_sq_to_gamut_boundary, sq_distance);
+        }
+        // printf("current distance_sq_to_gamut_boundary: %f, new: %f\n", *distance_sq_to_gamut_boundary, sq_distance);
+        // printf("current relevant_intersection: (%f, %f), new: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1], intersection[0], intersection[1]);
+        *distance_sq_to_gamut_boundary = sq_distance;
+        relevant_intersection[0] = intersection[0];
+        relevant_intersection[1] = intersection[1];
+      }
+    }
+    // else
+    // {
+    //   printf("(%f, %f) -> (%f, %f) is opposite with (%f, %f) -> (%f, %f), dot_product: %f)\n",
+    //     primary_a[0], primary_a[1], primary_b[0], primary_b[1],
+    //     whitepoint[0], whitepoint[1], xy[0], xy[1], dot_product
+    //   );
+    // }
+  }
+}
+
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
@@ -482,6 +572,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   // We're not interested in values less than 1.
   float max_dist[3] = {1.0f};
   float max_xy_dist_ratio = 1.f;
+  float relevant_intersection[2] = {0.f};
   const float buffer = 1 - p->gamut_compression_start_xy;
   const float threshold = p->gamut_compression_start_xy;
   const float distance_limit = p->gamut_compression_end_xy;
@@ -489,6 +580,14 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const float scale_squared_per_4 = scale * scale / 4.0f;
   const float param1 = - threshold + scale_squared_per_4;
   const float param2 = fabsf(scale) / 2.f;
+
+  // DT_OMP_FOR_SIMD()
+  // for(size_t k = 0; k < 4 * n_pixels; k += 4)
+  // {
+  //   const float *const restrict pix_in = in + k;
+  //   float *const restrict pix_out = out + k;
+  //   copy_pixel(pix_out, pix_in);
+  // }
 
   // DT_OMP_FOR_SIMD(reduction(max:max_dist[:3]))
   for(size_t k = 0; k < 4 * n_pixels; k += 4)
@@ -498,108 +597,125 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
     dt_aligned_pixel_t target_RGB;
 
+    dt_aligned_pixel_t debug_pixel;
+    debug_pixel[0] = pix_in[0];
+    debug_pixel[1] = pix_in[1];
+    debug_pixel[2] = pix_in[2];
+
     if(pipe_target_profile_same)
     {
-      copy_pixel(target_RGB, pix_in);
+      copy_pixel(target_RGB, debug_pixel);
     }
     else
     {
-      dt_apply_transposed_color_matrix(pix_in, pipe_to_target_transposed, target_RGB);
+      dt_apply_transposed_color_matrix(debug_pixel, pipe_to_target_transposed, target_RGB);
     }
 
+    // printf("original RGB in target: (%f, %f, %f)\n", target_RGB[0], target_RGB[1], target_RGB[2]);
+
     dt_aligned_pixel_t XYZ_d50;
-    dt_apply_transposed_color_matrix(pix_in, pipe_work_profile->matrix_in_transposed, XYZ_d50);
+    dt_apply_transposed_color_matrix(debug_pixel, pipe_work_profile->matrix_in_transposed, XYZ_d50);
     dt_aligned_pixel_t xyY;
     dt_D50_XYZ_to_xyY(XYZ_d50, xyY);
 
     float xy[] = {xyY[0], xyY[1]};
+    // printf("original xy: (%f, %f)\n", xy[0], xy[1]);
 
-    float intersection[2] = {0.f};
-
-    float distance_sq_to_gamut_boundary = 1e6;
-    // float closest_intersection[] = {0.f, 0.f};
+    float distance_sq_to_gamut_boundary = _GC_INFINITY;
 
     // let's see where achromatic -> out pixel intersects the gamut triangle
-    // float distances[3] = {1e6};
-    bool intersects = line_segment_intersection(
+    check_intersection(
       target_profile->primaries[0], target_profile->primaries[1],
       target_profile->whitepoint, xy,
-      intersection
-    );
-    if (intersects)
-    {
-      const float sq_distance = distance_sq(target_profile->whitepoint, intersection);
-      // use the cross product to see if the intersection and our point are on the same side of the line from the white point
-      if (sq_distance < distance_sq_to_gamut_boundary && cross_product(target_profile->whitepoint, intersection, xy) > 0)
-      {
-        distance_sq_to_gamut_boundary = sq_distance;
-        // closest_intersection[0] = intersection[0];
-        // closest_intersection[1] = intersection[1];
-      }
-    }
-    intersects = line_segment_intersection(
+      relevant_intersection, &distance_sq_to_gamut_boundary);
+    check_intersection(
       target_profile->primaries[0], target_profile->primaries[2],
       target_profile->whitepoint, xy,
-      intersection
-    );
-    if (intersects)
-    {
-      const float sq_distance = distance_sq(target_profile->whitepoint, intersection);
-      if (sq_distance < distance_sq_to_gamut_boundary && cross_product(target_profile->whitepoint, intersection, xy) > 0)
-      {
-        distance_sq_to_gamut_boundary = sq_distance;
-        // closest_intersection[0] = intersection[0];
-        // closest_intersection[1] = intersection[1];
-      }
-    }
-    intersects = line_segment_intersection(
+      relevant_intersection, &distance_sq_to_gamut_boundary);
+    check_intersection(
       target_profile->primaries[1], target_profile->primaries[2],
       target_profile->whitepoint, xy,
-      intersection
-    );
-    if (intersects)
-    {
-      const float sq_distance = distance_sq(target_profile->whitepoint, intersection);
-      if (sq_distance < distance_sq_to_gamut_boundary && cross_product(target_profile->whitepoint, intersection, xy) > 0)
-      {
-        distance_sq_to_gamut_boundary = sq_distance;
-        // closest_intersection[0] = intersection[0];
-        // closest_intersection[1] = intersection[1];
-      }
-    }
+      relevant_intersection, &distance_sq_to_gamut_boundary);
 
-    const float distance_ratio = distance_sq(target_profile->whitepoint, xy) / distance_sq_to_gamut_boundary;
+    // printf("relevant intersection: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1]);
+    // printf("intersection distance to gamut boundary: %f\n", sqrtf(distance_sq_to_gamut_boundary));
+
+    const float original_distance_sq = _distance_sq(target_profile->whitepoint, xy);
+    // printf("original distance distance to gamut boundary: %f\n", sqrtf(original_distance_sq));
+    const float distance_ratio = sqrtf(original_distance_sq / distance_sq_to_gamut_boundary);
+    // printf("distance_ratio: %f, current max_xy_dist_ratio: %f\n", distance_ratio, max_xy_dist_ratio);
     if (max_xy_dist_ratio < distance_ratio)
     {
       max_xy_dist_ratio = distance_ratio;
+      // if (debug_now)//debug_now = true;
+      // {
+      //   printf("updated max_xy_dist_ratio: %f\n", max_xy_dist_ratio);
+      //   printf("original RGB in target: (%f, %f, %f)\n", target_RGB[0], target_RGB[1], target_RGB[2]);
+      //   printf("relevant intersection: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1]);
+      //   printf("intersection distance to gamut boundary: %f\n", sqrtf(distance_sq_to_gamut_boundary));
+      //   printf("original distance distance to gamut boundary: %f\n", sqrtf(original_distance_sq));
+      // }
     }
 
+    // calculate and save the hue
     dt_aligned_pixel_t XYZ_d65;
-    dt_XYZ_D50_2_XYZ_D65(XYZ_d50, XYZ_d65);
     dt_aligned_pixel_t JzAzBz;
-    dt_XYZ_2_JzAzBz(XYZ_d65, JzAzBz);
     dt_aligned_pixel_t JzCzhz;
-    dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
+    if (p->preserve_hue > _GC_EPSILON)
+    {
+      dt_XYZ_D50_2_XYZ_D65(XYZ_d50, XYZ_d65);
+      dt_XYZ_2_JzAzBz(XYZ_d65, JzAzBz);
+      dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
+    }
 
-    const float original_Cz = JzCzhz[2];
-
+    const float original_hz = JzCzhz[2];
     const float diff_x = xyY[0] - whitepoint_x;
     const float diff_y = xyY[1] - whitepoint_y;
 
-    const float compressed_distance = scale * (sqrtf(distance_ratio + param1) - param2) + threshold;
+    // if (debug_now)
+    // {
+    //   printf("Original JzAzBz: (%f, %f, %f)\n", JzAzBz[0], JzAzBz[1], JzAzBz[2]);
+    //   printf("Original JzCzhz: (%f, %f, %f)\n", JzCzhz[0], JzCzhz[1], JzCzhz[2]);
+    //   printf("Original diff_x, diff_y: (%f, %f)\n", diff_x, diff_y);
+    // }
 
-    xyY[0] = whitepoint_x + diff_x * compressed_distance;
-    xyY[1] = whitepoint_y + diff_y * compressed_distance;
+    if (distance_ratio >= threshold)
+    {
+      const float compressed_distance_ratio_to_gamut_boundary = scale * (sqrtf(distance_ratio + param1) - param2) + threshold;
+      const float distance_wp_to_gamut_boundary = sqrtf(distance_sq_to_gamut_boundary);
+      const float compressed_distance = distance_wp_to_gamut_boundary * compressed_distance_ratio_to_gamut_boundary;
+      const float original_distance = sqrtf(original_distance_sq);
+      const float compression_factor = compressed_distance / original_distance;
 
-    dt_xyY_to_XYZ(xyY, XYZ_d50);
-    dt_XYZ_D50_2_XYZ_D65(XYZ_d50, XYZ_d65);
-    dt_XYZ_2_JzAzBz(XYZ_d65, JzAzBz);
-    dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
+      const float compressed_x = whitepoint_x + diff_x * compression_factor;
+      const float compressed_y = whitepoint_y + diff_y * compression_factor;
+      // if (debug_now)
+      // {
+      //   printf("compressing RGB(%f, %f, %f) XYZ (%f, %f, %f) xy (%f, %f) -> (%f, %f) "
+      //          "using compression_factor %f, original distance: %f, compressed distance: %f, wp to gamut boundary: %f\n",
+      //          debug_pixel[0], debug_pixel[1], debug_pixel[2],
+      //          XYZ_d50[0], XYZ_d50[1], XYZ_d50[2],
+      //          xy[0], xy[1], compressed_x, compressed_y,
+      //          compression_factor, original_distance, compressed_distance, distance_wp_to_gamut_boundary
+      //          );
+      //   printf("relevant intersection: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1]);
+      // }
+      xyY[0] = compressed_x;
+      xyY[1] = compressed_y;
+    }
 
-    JzCzhz[2] = (1 - p->preserve_hue) * JzCzhz[2] + p->preserve_hue * original_Cz;
-    dt_JzCzhz_2_JzAzBz(JzCzhz, JzAzBz);
-    dt_JzAzBz_2_XYZ(JzAzBz, XYZ_d65);
-    dt_XYZ_D65_2_XYZ_D50(XYZ_d65, XYZ_d50);
+    if (p->preserve_hue > _GC_EPSILON)
+    {
+      dt_xyY_to_XYZ(xyY, XYZ_d50);
+      dt_XYZ_D50_2_XYZ_D65(XYZ_d50, XYZ_d65);
+      dt_XYZ_2_JzAzBz(XYZ_d65, JzAzBz);
+      dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
+
+      JzCzhz[2] = (1 - p->preserve_hue) * JzCzhz[2] + p->preserve_hue * original_hz;
+      dt_JzCzhz_2_JzAzBz(JzCzhz, JzAzBz);
+      dt_JzAzBz_2_XYZ(JzAzBz, XYZ_d65);
+      dt_XYZ_D65_2_XYZ_D50(XYZ_d65, XYZ_d50);
+    }
 
     // JzCzhz[1] *= p->gamut_compression_buffer_r;
     // dt_JzCzhz_2_JzAzBz(JzCzhz, JzAzBz);
@@ -607,6 +723,16 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     // dt_XYZ_D65_2_XYZ_D50(XYZ_d65, XYZ_d50);
 
     dt_apply_transposed_color_matrix(XYZ_d50, target_profile->matrix_out_transposed, target_RGB);
+    // if (debug_now /*target_RGB[0]<0 ||target_RGB[1]<0||target_RGB[2]<0*/)
+    // {
+    //   printf("compressed RGB(%f, %f, %f) to negative RGB(%f, %f, %f) XYZ (%f, %f, %f) xy (%f, %f)\n",
+    //          debug_pixel[0], debug_pixel[1], debug_pixel[2],
+    //          target_RGB[0], target_RGB[1], target_RGB[2],
+    //          XYZ_d50[0], XYZ_d50[1], XYZ_d50[2],
+    //          xy[0], xy[1]
+    //          );
+    //   printf("relevant intersection: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1]);
+    // }
 
     // if(pipe_target_profile_same)
     // {
@@ -617,6 +743,16 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     //   dt_apply_transposed_color_matrix(pix_in, pipe_to_target_transposed, target_RGB);
     // }
 
+    // printf("compressed RGB in target: (%f, %f, %f)\n", target_RGB[0], target_RGB[1], target_RGB[2]);
+
+    // if (debug_now)
+    // {
+    //   printf("compressed RGB: (%f, %f, %f)\n", target_RGB[0], target_RGB[1], target_RGB[2]);
+    // }
+    // if (target_RGB[0] < 0 || target_RGB[1] < 0 || target_RGB[2] < 0)
+    // {
+    //   printf("compressed RGB is negative: (%f, %f, %f)\n", target_RGB[0], target_RGB[1], target_RGB[2]);
+    // }
     if (highlight_negative)
     {
       target_RGB[0] = (target_RGB[0] < 0);
@@ -641,14 +777,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     }
 
     pix_out[3] = pix_in[3];
-    if(g != NULL && self->dev->gui_attached && (piece->pipe->type & DT_DEV_PIXELPIPE_FULL))
-    {
-      gamutcompress_update_gui_t *msg = g_malloc(sizeof(gamutcompress_update_gui_t));
-      msg->self = self;
-      memcpy(msg->max_distances, max_dist, sizeof(msg->max_distances));
-      msg->max_xy_dist_ratio = max_xy_dist_ratio;
-      g_idle_add(_update_gui_from_worker, msg);
-    }
   }
 
   // add a tiny safety margin
@@ -662,6 +790,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     gamutcompress_update_gui_t *msg = g_malloc(sizeof(gamutcompress_update_gui_t));
     msg->self = self;
     memcpy(msg->max_distances, max_dist, sizeof(msg->max_distances));
+    msg->max_xy_dist_ratio = max_xy_dist_ratio;
+    printf("sending msg->max_xy_dist_ratio=%f\n", max_xy_dist_ratio);
     g_idle_add(_update_gui_from_worker, msg);
   }
 }
@@ -672,6 +802,7 @@ static void auto_adjust_distance_limit_xy(GtkWidget *quad, dt_iop_module_t *self
   dt_iop_gamutcompress_params_t *p = self->params;
   dt_iop_gamutcompress_gui_data_t *g = self->gui_data;
 
+  printf("auto_adjust_distance_limit_xy, max_xy_dist_ratio: %f\n", g->max_xy_dist_ratio);
   if(g->max_xy_dist_ratio < 1.0f)
   {
     dt_control_log(_("max distances not yet calculated"));
@@ -681,7 +812,7 @@ static void auto_adjust_distance_limit_xy(GtkWidget *quad, dt_iop_module_t *self
   p->gamut_compression_end_xy = g->max_xy_dist_ratio;
 
   ++darktable.gui->reset;
-  dt_bauhaus_slider_set(g->distance_limit_c, p->gamut_compression_end_xy);
+  dt_bauhaus_slider_set(g->gamut_compression_end_xy, p->gamut_compression_end_xy);
   --darktable.gui->reset;
 
   dt_dev_add_history_item(darktable.develop, self, TRUE);
@@ -814,17 +945,21 @@ void gui_init(dt_iop_module_t *self)
   // Reuse the slider variable for all sliders
   GtkWidget *slider;
 
-  g->gamut_compression_end_xy = dt_bauhaus_slider_from_params(self, "gamut_compression_end_xy");
-  dt_bauhaus_slider_set_soft_range(g->gamut_compression_end_xy, 1.0f, 2.0f);
-  gtk_widget_set_tooltip_text(g->gamut_compression_end_xy, _("maximum xy oversaturation to correct"));
-  dt_bauhaus_widget_set_quad(g->gamut_compression_end_xy, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_xy,
-                             _("set to max detected xy distance"));
+  slider = dt_bauhaus_slider_from_params(self, "preserve_hue");
+  dt_bauhaus_slider_set_format(slider, "%");
+  dt_bauhaus_slider_set_factor(slider, 100.f);
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_start_xy");
   dt_bauhaus_slider_set_soft_range(slider, 0.5f, 0.99f);
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_factor(slider, 100.f);
   gtk_widget_set_tooltip_text(slider, _("start compressing above saturation"));
+
+  g->gamut_compression_end_xy = dt_bauhaus_slider_from_params(self, "gamut_compression_end_xy");
+  dt_bauhaus_slider_set_soft_range(g->gamut_compression_end_xy, 1.0f, 2.0f);
+  gtk_widget_set_tooltip_text(g->gamut_compression_end_xy, _("maximum xy oversaturation to correct"));
+  dt_bauhaus_widget_set_quad(g->gamut_compression_end_xy, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_distance_limit_xy,
+                             _("set to max detected xy distance"));
 
   g->distance_limit_c = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_c");
   dt_bauhaus_slider_set_soft_range(g->distance_limit_c, 1.0f, 2.0f);
