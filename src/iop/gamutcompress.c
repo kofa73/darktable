@@ -350,7 +350,6 @@ void process_jed(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const voi
   thresholds[1] = 1.0f - buffers[1];
   thresholds[2] = 1.0f - buffers[2];
 
-
   dt_aligned_pixel_t distance_limit;
   distance_limit[0] = p->gamut_compression_distance_limit_c;
   distance_limit[1] = p->gamut_compression_distance_limit_m;
@@ -528,6 +527,25 @@ void check_intersection(
   }
 }
 
+static void _apply_hue_to_XYZ_D50(dt_aligned_pixel_t XYZ_d50, const float original_hz, const float preserve_hue)
+{
+  dt_aligned_pixel_t XYZ_d65;
+  dt_aligned_pixel_t JzAzBz;
+  dt_aligned_pixel_t JzCzhz;
+
+  dt_XYZ_D50_2_XYZ_D65(XYZ_d50, XYZ_d65);
+  dt_XYZ_2_JzAzBz(XYZ_d65, JzAzBz);
+  dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
+
+  const float processed_hue = JzCzhz[2];
+  JzCzhz[2] = processed_hue + preserve_hue * (original_hz - processed_hue);
+
+  dt_JzCzhz_2_JzAzBz(JzCzhz, JzAzBz);
+  dt_JzAzBz_2_XYZ(JzAzBz, XYZ_d65);
+  dt_aligned_pixel_t XYZ_d50_JzChhz;
+  dt_XYZ_D65_2_XYZ_D50(XYZ_d65, XYZ_d50_JzChhz);
+}
+
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
@@ -571,15 +589,42 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
   // We're not interested in values less than 1.
   float max_dist[3] = {1.0f};
-  float max_xy_dist_ratio = 1.f;
+  float max_wp_xy_dist_ratio = 1.f;
   float relevant_intersection[2] = {0.f};
-  const float buffer = 1 - p->gamut_compression_start_xy;
-  const float threshold = p->gamut_compression_start_xy;
-  const float distance_limit = p->gamut_compression_end_xy;
-  const float scale = buffer / sqrtf(fmaxf(1.001f, distance_limit) - 1.0f);
-  const float scale_squared_per_4 = scale * scale / 4.0f;
-  const float param1 = - threshold + scale_squared_per_4;
-  const float param2 = fabsf(scale) / 2.f;
+  const float buffer_xy = 1 - p->gamut_compression_start_xy;
+  const float threshold_xy = p->gamut_compression_start_xy;
+  const float distance_limit_xy = p->gamut_compression_end_xy;
+  const float scale_xy = buffer_xy / sqrtf(fmaxf(1.001f, distance_limit_xy) - 1.0f);
+  const float scale_xy_squared_per_4 = scale_xy * scale_xy / 4.0f;
+  const float param1_xy = - threshold_xy + scale_xy_squared_per_4;
+  const float param2_xy = fabsf(scale_xy) / 2.f;
+
+  // params for Jed's RGB method
+  dt_aligned_pixel_t buffers;
+  buffers[0] = p->gamut_compression_buffer_r;
+  buffers[1] = p->gamut_compression_buffer_g;
+  buffers[2] = p->gamut_compression_buffer_b;
+
+  dt_aligned_pixel_t thresholds;
+  thresholds[0] = 1.0f - buffers[0];
+  thresholds[1] = 1.0f - buffers[1];
+  thresholds[2] = 1.0f - buffers[2];
+
+  dt_aligned_pixel_t distance_limit;
+  distance_limit[0] = p->gamut_compression_distance_limit_c;
+  distance_limit[1] = p->gamut_compression_distance_limit_m;
+  distance_limit[2] = p->gamut_compression_distance_limit_y;
+
+  dt_aligned_pixel_t scales;
+  dt_aligned_pixel_t params1;
+  dt_aligned_pixel_t params2;
+  for (int chan = 0; chan < 3; ++chan)
+  {
+    scales[chan] = buffers[chan] / sqrtf(fmaxf(1.001f, distance_limit[chan]) - 1.0f);
+    const float scale_squared_per_4 = scales[chan] * scales[chan] / 4.0f;
+    params1[chan] = - thresholds[chan] + scale_squared_per_4;
+    params2[chan] = fabsf(scales[chan]) / 2.f;
+  }
 
   // DT_OMP_FOR_SIMD()
   // for(size_t k = 0; k < 4 * n_pixels; k += 4)
@@ -595,26 +640,44 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     const float *const restrict pix_in = in + k;
     float *const restrict pix_out = out + k;
 
-    dt_aligned_pixel_t target_RGB;
+    // @@@ TODO kofa just use pix_in after debugging;
+    // for now, here we can set fixed values to debug a particular troublesome RGB triplet
+    const dt_aligned_pixel_t current_pixel = {pix_in[0], pix_in[1], pix_in[2], 0.f};
 
-    dt_aligned_pixel_t debug_pixel;
-    debug_pixel[0] = pix_in[0];
-    debug_pixel[1] = pix_in[1];
-    debug_pixel[2] = pix_in[2];
+    dt_aligned_pixel_t RGB_in_target_space;
 
     if(pipe_target_profile_same)
     {
-      copy_pixel(target_RGB, debug_pixel);
+      copy_pixel(RGB_in_target_space, current_pixel);
     }
     else
     {
-      dt_apply_transposed_color_matrix(debug_pixel, pipe_to_target_transposed, target_RGB);
+      dt_apply_transposed_color_matrix(current_pixel, pipe_to_target_transposed, RGB_in_target_space);
     }
 
     // printf("original RGB in target: (%f, %f, %f)\n", target_RGB[0], target_RGB[1], target_RGB[2]);
 
+
+    /*
+     * First, we'll create the 2 basic versions:
+     * - compressed by xy scaling (does not fail, but produces unusable results with negative Y)
+     * - compressed using Jed's method, in RGB
+     *
+     * Then, we can create additional outputs:
+     * - xy scaled (hue preservation is not perfect), but take Y from Jed's RGB
+     * - xy scaled, but hue corrected via JzCzhz (or OKLab or LCh or something... - who knows how initial hue works with those if outside the spectral gamut)
+     * - xy scaled, taking Y from Jed, hue corrected
+     * And try experimenting with reducing Y we get from Jed's method based on the compression factor, to avoid excessive brightening:
+     * - xy scaled (hue preservation is not perfect), but take **scaled** Y from Jed's RGB
+     * - xy scaled, taking **scaled** Y from Jed, hue corrected
+     */
+
+    const float achromatic = max3f(current_pixel);
+
+    // first, the xy scaling
+
     dt_aligned_pixel_t XYZ_d50;
-    dt_apply_transposed_color_matrix(debug_pixel, pipe_work_profile->matrix_in_transposed, XYZ_d50);
+    dt_apply_transposed_color_matrix(current_pixel, pipe_work_profile->matrix_in_transposed, XYZ_d50);
     dt_aligned_pixel_t xyY;
     dt_D50_XYZ_to_xyY(XYZ_d50, xyY);
 
@@ -640,13 +703,15 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     // printf("relevant intersection: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1]);
     // printf("intersection distance to gamut boundary: %f\n", sqrtf(distance_sq_to_gamut_boundary));
 
-    const float original_distance_sq = _distance_sq(target_profile->whitepoint, xy);
+    const float original_wp_xy_distance_sq = _distance_sq(target_profile->whitepoint, xy);
     // printf("original distance distance to gamut boundary: %f\n", sqrtf(original_distance_sq));
-    const float distance_ratio = sqrtf(original_distance_sq / distance_sq_to_gamut_boundary);
+    const float distance_ratio_xy = sqrtf(original_wp_xy_distance_sq / distance_sq_to_gamut_boundary);
     // printf("distance_ratio: %f, current max_xy_dist_ratio: %f\n", distance_ratio, max_xy_dist_ratio);
-    if (max_xy_dist_ratio < distance_ratio)
+
+    // ignore the darkest pixels
+    if (max_wp_xy_dist_ratio < distance_ratio_xy && achromatic > 0.01f)
     {
-      max_xy_dist_ratio = distance_ratio;
+      max_wp_xy_dist_ratio = distance_ratio_xy;
       // if (debug_now)//debug_now = true;
       // {
       //   printf("updated max_xy_dist_ratio: %f\n", max_xy_dist_ratio);
@@ -661,14 +726,16 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     dt_aligned_pixel_t XYZ_d65;
     dt_aligned_pixel_t JzAzBz;
     dt_aligned_pixel_t JzCzhz;
-    if (p->preserve_hue > _GC_EPSILON)
-    {
+    // if (p->preserve_hue > _GC_EPSILON)
+    // {
       dt_XYZ_D50_2_XYZ_D65(XYZ_d50, XYZ_d65);
       dt_XYZ_2_JzAzBz(XYZ_d65, JzAzBz);
       dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
-    }
+    // }
 
     const float original_hz = JzCzhz[2];
+
+    // compress xy
     const float diff_x = xyY[0] - whitepoint_x;
     const float diff_y = xyY[1] - whitepoint_y;
 
@@ -679,12 +746,12 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     //   printf("Original diff_x, diff_y: (%f, %f)\n", diff_x, diff_y);
     // }
 
-    if (distance_ratio >= threshold)
+    if (distance_ratio_xy >= threshold_xy)
     {
-      const float compressed_distance_ratio_to_gamut_boundary = scale * (sqrtf(distance_ratio + param1) - param2) + threshold;
+      const float compressed_distance_ratio_to_gamut_boundary = scale_xy * (sqrtf(distance_ratio_xy + param1_xy) - param2_xy) + threshold_xy;
       const float distance_wp_to_gamut_boundary = sqrtf(distance_sq_to_gamut_boundary);
       const float compressed_distance = distance_wp_to_gamut_boundary * compressed_distance_ratio_to_gamut_boundary;
-      const float original_distance = sqrtf(original_distance_sq);
+      const float original_distance = sqrtf(original_wp_xy_distance_sq);
       const float compression_factor = compressed_distance / original_distance;
 
       const float compressed_x = whitepoint_x + diff_x * compression_factor;
@@ -704,25 +771,65 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
       xyY[1] = compressed_y;
     }
 
-    if (p->preserve_hue > _GC_EPSILON)
-    {
-      dt_xyY_to_XYZ(xyY, XYZ_d50);
-      dt_XYZ_D50_2_XYZ_D65(XYZ_d50, XYZ_d65);
-      dt_XYZ_2_JzAzBz(XYZ_d65, JzAzBz);
-      dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
+    // the xy-compressed XYZ D50 value, without any hue preservation
+    dt_xyY_to_XYZ(xyY, XYZ_d50);
+    dt_aligned_pixel_t target_RGB_from_xy_scaling = {0.f};
+    dt_apply_transposed_color_matrix(XYZ_d50, target_profile->matrix_out_transposed, target_RGB_from_xy_scaling);
 
-      JzCzhz[2] = (1 - p->preserve_hue) * JzCzhz[2] + p->preserve_hue * original_hz;
-      dt_JzCzhz_2_JzAzBz(JzCzhz, JzAzBz);
-      dt_JzAzBz_2_XYZ(JzAzBz, XYZ_d65);
-      dt_XYZ_D65_2_XYZ_D50(XYZ_d65, XYZ_d50);
+    _apply_hue_to_XYZ_D50(XYZ_d50, original_hz, p->preserve_hue);
+    dt_aligned_pixel_t target_RGB_from_xy_scaling_with_preserve_hue = {0.f};
+
+    dt_apply_transposed_color_matrix(XYZ_d50, target_profile->matrix_out_transposed, target_RGB_from_xy_scaling_with_preserve_hue);
+
+    // now, Jed's RGB
+    const float achromatic_abs = fabsf(achromatic);
+    dt_aligned_pixel_t target_RGB_from_Jed = {0.f};
+
+    //for_three_channels(chan, aligned(target_RGB, thresholds, scales, params1, params2 : 16))
+    for (int chan = 0; chan < 3; ++chan)
+    {
+      // values below this will not be compressed
+      const float threshold = thresholds[chan];
+
+      // Inverse RGB Ratio: distance from achromatic axis; a saturation-like measure
+      const float distance_from_achromatic = achromatic == 0.0f ? 0.0f : (achromatic - current_pixel[chan]) / achromatic_abs;
+
+      // The values collected here are used by the pickers to set the distance limit;
+      // we ignore dark areas because compression has no visible effect there and
+      // they often produce very large distances
+      if (achromatic > 0.01f)
+      {
+        max_dist[chan] = fmaxf(max_dist[chan], distance_from_achromatic);
+      }
+
+      if(distance_from_achromatic >= threshold)
+      {
+        // Calculate scale so compression function passes through distance limit: (x=distance_limit, y=1)
+        // in the original formula, '1 - threshold' is used instead of 'buffer', but the two are equivalent
+        const float scale = scales[chan];
+        const float param1 = params1[chan];
+        const float param2 = params2[chan];
+        // Parabolic compression function: https://www.desmos.com/calculator/nvhp63hmtj
+        const float compressed_distance = scale * (sqrtf(distance_from_achromatic + param1) - param2) + threshold;
+        target_RGB_from_Jed[chan] = achromatic - compressed_distance * achromatic_abs;
+        // printf("in (pipe): (%f, %f, %f), in (target): (%f, %f, %f), out (target): (%f, %f, %f)\n",
+        //        pix_in[0], pix_in[1], pix_in[2],
+        //        before[0], before[1], before[2],
+        //        target_RGB[0], target_RGB[1], target_RGB[2]
+        //        );
+      }
     }
+
+KOFA TODO continue here
+
+    // now produce the version
+    dt_apply_transposed_color_matrix(XYZ_d50, target_profile->matrix_out_transposed, target_RGB_from_XYZ_JzChhz);
 
     // JzCzhz[1] *= p->gamut_compression_buffer_r;
     // dt_JzCzhz_2_JzAzBz(JzCzhz, JzAzBz);
     // dt_JzAzBz_2_XYZ(JzAzBz, XYZ_d65);
     // dt_XYZ_D65_2_XYZ_D50(XYZ_d65, XYZ_d50);
-
-    dt_apply_transposed_color_matrix(XYZ_d50, target_profile->matrix_out_transposed, target_RGB);
+    dt_apply_transposed_color_matrix(XYZ_d50, target_profile->matrix_out_transposed, target_RGB_from_XYZ_JzChhz);
     // if (debug_now /*target_RGB[0]<0 ||target_RGB[1]<0||target_RGB[2]<0*/)
     // {
     //   printf("compressed RGB(%f, %f, %f) to negative RGB(%f, %f, %f) XYZ (%f, %f, %f) xy (%f, %f)\n",
@@ -790,8 +897,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     gamutcompress_update_gui_t *msg = g_malloc(sizeof(gamutcompress_update_gui_t));
     msg->self = self;
     memcpy(msg->max_distances, max_dist, sizeof(msg->max_distances));
-    msg->max_xy_dist_ratio = max_xy_dist_ratio;
-    printf("sending msg->max_xy_dist_ratio=%f\n", max_xy_dist_ratio);
+    msg->max_xy_dist_ratio = max_wp_xy_dist_ratio;
+    printf("sending msg->max_xy_dist_ratio=%f\n", max_wp_xy_dist_ratio);
     g_idle_add(_update_gui_from_worker, msg);
   }
 }
