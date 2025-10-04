@@ -102,7 +102,7 @@ typedef struct dt_iop_gamutcompress_params_t
   float gamut_compression_distance_limit_y;         // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "yellow distance limit"
   float gamut_compression_start_xy_distance_ratio;  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.9 $DESCRIPTION: "xyY compression start"
   float gamut_compression_end_xy_distance_ratio;    // $MIN: 1.0 $MAX: 100.0 $DEFAULT: 1.0 $DESCRIPTION: "xyY compression end"
-  float preserve_hue;                               // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "preserve JzAzBz hue"
+  float preserve_hue;                               // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "preserve JzAzBz hue"
   gboolean highlight_negative;                      // $DEFAULT: FALSE $DESCRIPTION: "highlight negative components"
 
 } dt_iop_gamutcompress_params_t;
@@ -918,9 +918,12 @@ void gui_init(dt_iop_module_t *self)
   // Reuse the slider variable for all sliders
   GtkWidget *slider;
 
-  slider = dt_bauhaus_slider_from_params(self, "preserve_hue");
-  dt_bauhaus_slider_set_format(slider, "%");
-  dt_bauhaus_slider_set_factor(slider, 100.f);
+  GtkWidget *main_vbox = self->widget;
+
+  GtkWidget *xy_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(main_vbox), xy_vbox, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(xy_vbox), dt_ui_section_label_new(C_("section", "method: xy")), FALSE, FALSE, 0);
+  self->widget = xy_vbox;
 
   slider = dt_bauhaus_slider_from_params(self, "gamut_compression_start_xy_distance_ratio");
   dt_bauhaus_slider_set_soft_range(slider, 0.5f, 0.99f);
@@ -933,6 +936,17 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->gamut_compression_end_xy_distance_ratio, _("maximum xy oversaturation to correct"));
   dt_bauhaus_widget_set_quad(g->gamut_compression_end_xy_distance_ratio, self, dtgtk_cairo_paint_wand, FALSE, auto_adjust_xy_distance_ratio,
                              _("set to max detected xy distance"));
+
+  slider = dt_bauhaus_slider_from_params(self, "preserve_hue");
+  dt_bauhaus_slider_set_format(slider, "%");
+  dt_bauhaus_slider_set_factor(slider, 100.f);
+
+  self->widget = main_vbox;
+
+  GtkWidget *rgb_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  gtk_box_pack_start(GTK_BOX(main_vbox), rgb_vbox, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(rgb_vbox), dt_ui_section_label_new(C_("section", "method: RGB")), FALSE, FALSE, 0);
+  self->widget = rgb_vbox;
 
   g->distance_limit_c = dt_bauhaus_slider_from_params(self, "gamut_compression_distance_limit_c");
   dt_bauhaus_slider_set_soft_range(g->distance_limit_c, 1.0f, 2.0f);
@@ -973,6 +987,7 @@ void gui_init(dt_iop_module_t *self)
   dt_bauhaus_slider_set_factor(slider, 100.f);
   gtk_widget_set_tooltip_text(slider, _("portion of blues to receive compressed yellow overflow"));
 
+  self->widget = main_vbox;
   GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   GtkWidget *vbox = self->widget;
 
