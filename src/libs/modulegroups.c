@@ -1547,6 +1547,8 @@ void init_presets(dt_lib_module_t *self)
     dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (sigmoid)");
   const gboolean wf_agx =
     dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (AgX)");
+  const gboolean wf_odrt =
+    dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (OpenDRT)");
   const gboolean wf_none =
     dt_conf_is_equal("plugins/darkroom/workflow", "none");
 
@@ -1582,6 +1584,7 @@ void init_presets(dt_lib_module_t *self)
   AM("rgbcurve");
   AM("rgblevels");
   AM("sigmoid");
+  AM("opendrt");
   AM("tonecurve");
 
   SMG(C_("modulegroup", "color"), "color");
@@ -1745,6 +1748,8 @@ void init_presets(dt_lib_module_t *self)
     AM("sigmoid");
   if(wf_agx || wf_none)
     AM("agx");
+  if(wf_odrt || wf_none)
+    AM("opendrt");
   AM("toneequal");
   AM("crop");
   AM("ashift");
@@ -1844,6 +1849,8 @@ static gchar *_presets_get_minimal(dt_lib_module_t *self)
                                                "scene-referred (sigmoid)");
   const gboolean wf_agx = dt_conf_is_equal("plugins/darkroom/workflow",
                                                "scene-referred (AgX)");
+  const gboolean wf_odrt = dt_conf_is_equal("plugins/darkroom/workflow",
+                                               "scene-referred (OpenDRT)");
 
   // all modules
   gchar *tx = NULL;
@@ -1861,6 +1868,8 @@ static gchar *_presets_get_minimal(dt_lib_module_t *self)
       AM("sigmoid");
     else if(wf_agx)
       AM("agx");
+    else if(wf_odrt)
+      AM("opendrt");
   }
   else
     AM("basecurve");
