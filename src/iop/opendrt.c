@@ -18,26 +18,26 @@
 
 #include "bauhaus/bauhaus.h"
 #include "common/colorspaces_inline_conversions.h"
+#include "common/chromatic_adaptation.h"
 #include "common/math.h"
 #include "common/matrices.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "gui/gtk.h"
+#include "gui/presets.h"
 #include "iop/iop_api.h"
 
 #include <math.h>
 
-DT_MODULE_INTROSPECTION(1, dt_iop_opendrt_params_t)
-
 /* ---------------------------------------------------------------------------
- * Parameters
+ * Types and Definitions
  * ------------------------------------------------------------------------ */
 
 typedef enum dt_iop_opendrt_whitepoint_t
 {
   DT_OPENDRT_WP_D93 = 0,
   DT_OPENDRT_WP_D75 = 1,
-  DT_OPENDRT_WP_D65 = 2,
+  DT_OPENDRT_WP_D65 = 2, // Default
   DT_OPENDRT_WP_D60 = 3,
   DT_OPENDRT_WP_D55 = 4,
   DT_OPENDRT_WP_D50 = 5,
@@ -45,150 +45,446 @@ typedef enum dt_iop_opendrt_whitepoint_t
 
 typedef struct dt_iop_opendrt_params_t
 {
-  // Tonescale Parameters
+  // Tonescale Settings
   float tn_Lp;  // $MIN: 100.0 $MAX: 4000.0 $DEFAULT: 100.0 $DESCRIPTION: "display peak luminance (nits)"
   float tn_Lg;  // $MIN: 3.0   $MAX: 50.0   $DEFAULT: 10.0  $DESCRIPTION: "display grey luminance (nits)"
   float tn_gb;  // $MIN: 0.0   $MAX: 1.0    $DEFAULT: 0.13  $DESCRIPTION: "hdr grey boost"
   float pt_hdr; // $MIN: 0.0   $MAX: 1.0    $DEFAULT: 0.5   $DESCRIPTION: "hdr purity"
 
-  // Look Parameters
+  // Look Parameters - Exposed in GUI
   float contrast;   // $MIN: 1.0 $MAX: 2.0 $DEFAULT: 1.66 $DESCRIPTION: "contrast"
   float saturation; // $MIN: 0.0 $MAX: 0.6 $DEFAULT: 0.35 $DESCRIPTION: "saturation"
-
-  // Creative White Point
   dt_iop_opendrt_whitepoint_t cwp; // $DEFAULT: DT_OPENDRT_WP_D65 $DESCRIPTION: "creative white point"
   float cwp_lm;                    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.25 $DESCRIPTION: "creative white range"
+
+  // Look Parameters - Advanced / Preset driven (Hidden in GUI)
+  float tn_sh;
+  float tn_toe;
+  float tn_off;
+  int tn_hcon_enable;
+  float tn_hcon;
+  float tn_hcon_pv;
+  float tn_hcon_st;
+  int tn_lcon_enable;
+  float tn_lcon;
+  float tn_lcon_w;
+
+  float rs_rw;
+  float rs_bw;
+
+  int pt_enable;
+  float pt_lml;
+  float pt_lml_r;
+  float pt_lml_g;
+  float pt_lml_b;
+  float pt_lmh;
+  float pt_lmh_r;
+  float pt_lmh_b;
+
+  int ptl_enable;
+  float ptl_c;
+  float ptl_m;
+  float ptl_y;
+
+  int ptm_enable;
+  float ptm_low;
+  float ptm_low_rng;
+  float ptm_low_st;
+  float ptm_high;
+  float ptm_high_rng;
+  float ptm_high_st;
+
+  int brl_enable;
+  float brl;
+  float brl_r;
+  float brl_g;
+  float brl_b;
+  float brl_rng;
+  float brl_st;
+
+  int brlp_enable;
+  float brlp;
+  float brlp_r;
+  float brlp_g;
+  float brlp_b;
+
+  int hc_enable;
+  float hc_r;
+  float hc_r_rng;
+
+  int hs_rgb_enable;
+  float hs_r;
+  float hs_r_rng;
+  float hs_g;
+  float hs_g_rng;
+  float hs_b;
+  float hs_b_rng;
+
+  int hs_cmy_enable;
+  float hs_c;
+  float hs_c_rng;
+  float hs_m;
+  float hs_m_rng;
+  float hs_y;
+  float hs_y_rng;
+
 } dt_iop_opendrt_params_t;
 
-/* ---------------------------------------------------------------------------
- * Internal Data and Math
- * ------------------------------------------------------------------------ */
+DT_MODULE_INTROSPECTION(1, dt_iop_opendrt_params_t)
 
 typedef struct dt_iop_opendrt_data_t
 {
-  // Tonescale constraints
+  // Process data derived from params
   float ts_s1;
   float ts_p;
   float ts_s;
   float s_Lp100;
-  float tsn_norm_factor; // combined normalization factors
   float ts_m2;
   float ts_dsc;
-  float tsn_min_val;
+  float tsn_min_val; // Implicit
 
-  // Look params (Standard preset values + overrides)
+  // Copied from params
+  float tn_off;
+  float tn_toe;
   float rs_sa;
   float rs_rw;
   float rs_bw;
-  float tn_off;
 
-  // Hue/Purity params
-  float hc_r, hc_r_rng;
-  float hs_r, hs_r_rng, hs_g, hs_g_rng, hs_b, hs_b_rng;
-  float hs_c, hs_c_rng, hs_m, hs_m_rng, hs_y, hs_y_rng;
+  float cwp_lm;
+  int cwp_mode;
+
+  // Enables
+  int tn_hcon_enable;
+  int tn_lcon_enable;
+  int brl_enable;
+  int brlp_enable;
+  int hc_enable;
+  int hs_rgb_enable;
+  int hs_cmy_enable;
+  int ptm_enable;
+  int ptl_enable;
+  int pt_enable; // Added missing member
+
+  // Knob values
+  float tn_lcon, tn_lcon_w;
+  float tn_hcon, tn_hcon_pv, tn_hcon_st;
+
   float pt_lml, pt_lml_r, pt_lml_g, pt_lml_b;
   float pt_lmh, pt_lmh_r, pt_lmh_b;
+
   float ptl_c, ptl_m, ptl_y;
   float ptm_low, ptm_low_rng, ptm_low_st;
   float ptm_high, ptm_high_rng, ptm_high_st;
+
   float brl, brl_r, brl_g, brl_b, brl_rng, brl_st;
-  int brlp_enable;
   float brlp, brlp_r, brlp_g, brlp_b;
 
-  // Matrices
-  dt_colormatrix_t pipe_to_p3d65; // Input conversion
-  dt_colormatrix_t p3d65_to_pipe; // Output conversion (via XYZ)
-  dt_colormatrix_t cwp_matrix;    // Creative white point adaptation matrix
+  float hc_r, hc_r_rng;
+  float hs_r, hs_r_rng, hs_g, hs_g_rng, hs_b, hs_b_rng;
+  float hs_c, hs_c_rng, hs_m, hs_m_rng, hs_y, hs_y_rng;
 
-  float cwp_lm;
-  int cwp_mode; // 0=D93 ... 5=D50
+  // Matrices
+  dt_colormatrix_t pipe_to_p3d65;
+  dt_colormatrix_t p3d65_to_pipe;
+  dt_colormatrix_t cwp_matrix;
+
 } dt_iop_opendrt_data_t;
 
-// Math constants
+/* ---------------------------------------------------------------------------
+ * Module Implementation
+ * ------------------------------------------------------------------------ */
+
+const char *name() { return _("opendrt"); }
+const char *aliases() { return _("open display transform"); }
+const char **description(dt_iop_module_t *self)
+{
+  return dt_iop_set_description(self,
+                                _("apply the OpenDRT display transform\n"
+                                  "creates a natural, perceptual rendering from scene-referred data"),
+                                _("tone and color mapping"),
+                                _("linear, RGB, scene-referred"),
+                                _("linear, RGB, display-referred"),
+                                _("linear, RGB, display-referred"));
+}
+
+int flags() { return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_SUPPORTS_BLENDING; }
+
+int default_group() { return IOP_GROUP_TONE; }
+
+dt_iop_colorspace_type_t default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  return IOP_CS_RGB;
+}
+
+/* ---------------------------------------------------------------------------
+ * Math Helpers
+ * ------------------------------------------------------------------------ */
 #define SQRT3 1.73205080756887729353f
 #define M_PI_F 3.14159265358979323846f
 
-// Helper functions ported from DCTL
-static inline float spowf(float a, float b)
-{
-  return (a <= 0.0f) ? a : powf(a, b);
-}
-
-static inline float compress_hyperbolic_power(float x, float s, float p)
-{
-  return spowf(x / (x + s), p);
-}
-
-static inline float compress_toe_quadratic(float x, float toe, int inv)
-{
+static inline float spowf(float a, float b) { return (a <= 0.0f) ? a : powf(a, b); }
+static inline float compress_hyperbolic_power(float x, float s, float p) { return spowf(x / (x + s), p); }
+static inline float compress_toe_quadratic(float x, float toe, int inv) {
   if (toe == 0.0f) return x;
-  if (inv == 0) {
-    return spowf(x, 2.0f) / (x + toe);
-  } else {
-    return (x + sqrtf(x * (4.0f * toe + x))) / 2.0f;
+  if (inv == 0) return spowf(x, 2.0f) / (x + toe);
+  else return (x + sqrtf(x * (4.0f * toe + x))) / 2.0f;
+}
+static inline float compress_toe_cubic(float x, float m, float w, int inv) {
+  if (m == 1.0f) return x;
+  float x2 = x * x;
+  if (inv == 0) return x * (x2 + m * w) / (x2 + w);
+  else {
+    float p0 = x2 - 3.0f * m * w;
+    float p1 = 2.0f * x2 + 27.0f * w - 9.0f * m * w;
+    float p2 = powf(sqrtf(x2 * p1 * p1 - 4.0f * p0 * p0 * p0) / 2.0f + x * p1 / 2.0f, 1.0f / 3.0f);
+    return p0 / (3.0f * p2) + p2 / 3.0f + x / 3.0f;
   }
 }
-
-static inline float softplus(float x, float s)
-{
+static inline float contrast_high(float x, float p, float pv, float pv_lx, int inv) {
+  const float x0 = 0.18f * powf(2.0f, pv);
+  if (x < x0 || p == 1.0f) return x;
+  const float o = x0 - x0 / p;
+  const float s0 = powf(x0, 1.0f - p) / p;
+  const float x1 = x0 * powf(2.0f, pv_lx);
+  const float k1 = p * s0 * powf(x1, p) / x1;
+  const float y1 = s0 * powf(x1, p) + o;
+  if (inv == 1) return x > y1 ? (x - y1) / k1 + x1 : powf((x - o) / s0, 1.0f / p);
+  else return x > x1 ? k1 * (x - x1) + y1 : s0 * powf(x, p) + o;
+}
+static inline float softplus(float x, float s) {
   if (x > 10.0f * s || s < 1e-4f) return x;
   return s * logf(fmaxf(0.0f, 1.0f + expf(x / s)));
 }
-
-static inline float gauss_window(float x, float w)
-{
-  return expf(-x * x / w);
-}
-
-static inline void opponent(const float r, const float g, const float b, float *ox, float *oy)
-{
+static inline float gauss_window(float x, float w) { return expf(-x * x / w); }
+static inline void opponent(const float r, const float g, const float b, float *ox, float *oy) {
   *ox = r - b;
   *oy = g - (r + b) / 2.0f;
 }
-
-static inline float hue_offset(float h, float o)
-{
+static inline float hue_offset(float h, float o) {
   return fmodf(h - o + M_PI_F, 2.0f * M_PI_F) - M_PI_F;
 }
 
-// Matrices from DCTL
-// D65 to DXX CAT02
-static const dt_colormatrix_t matrix_cat_d65_to_d93 = {
-  { 0.95703423f, -0.02471715f, 0.06240286f, 0.f}, {-0.01792970f, 0.99001986f, 0.02481195f, 0.f}, { 0.00127589f, 0.00427919f, 1.29345715f, 0.f}
-};
-static const dt_colormatrix_t matrix_cat_d65_to_d75 = {
-  { 0.98100108f, -0.01166193f, 0.02656141f, 0.f}, {-0.00843488f, 0.99650609f, 0.01056965f, 0.f}, { 0.00055281f, 0.00179841f, 1.12374723f, 0.f}
-};
-static const dt_colormatrix_t matrix_cat_d65_to_d60 = {
-  { 1.01182246f, 0.00778879f, -0.01577830f, 0.f}, { 0.00561683f, 1.00150645f, -0.00628518f, 0.f}, {-0.00033574f, -0.00105095f, 0.92736667f, 0.f}
-};
-static const dt_colormatrix_t matrix_cat_d65_to_d55 = {
-  { 1.02585089f, 0.01794398f, -0.03321378f, 0.f}, { 0.01291339f, 1.00214779f, -0.01324210f, 0.f}, {-0.00071994f, -0.00218107f, 0.84868014f, 0.f}
-};
-static const dt_colormatrix_t matrix_cat_d65_to_d50 = {
-  { 1.04257405f, 0.03089118f, -0.05281262f, 0.f}, { 0.02219354f, 1.00185668f, -0.02107376f, 0.f}, {-0.00116488f, -0.00342053f, 0.76178908f, 0.f}
-};
-
-// XYZ D65 <-> P3 D65
-static const dt_colormatrix_t matrix_p3d65_to_xyz = {
-  { 0.48657095f, 0.26566769f, 0.19821729f, 0.f}, { 0.22897456f, 0.69173852f, 0.07928691f, 0.f}, { 0.00000000f, 0.04511338f, 1.04394437f, 0.f}
-};
-static const dt_colormatrix_t matrix_xyz_to_p3d65 = {
-  { 2.49349691f, -0.93138362f, -0.40271078f, 0.f}, {-0.82948897f, 1.76266406f, 0.02362469f, 0.f}, { 0.03584583f, -0.07617239f, 0.95688452f, 0.f}
-};
-
-// Pipeline D50 to XYZ D65 (CAT16)
-// Used to bridge DT pipeline to OpenDRT internal space
-static const dt_colormatrix_t matrix_xyz_d50_to_d65_cat16 = {
-  { 0.98946625f, -0.04003046f, 0.04405303f, 0.f}, {-0.00540519f, 1.00666069f, -0.00175552f, 0.f}, {-0.00040392f, 0.01507680f, 1.30210211f, 0.f}
-};
-static const dt_colormatrix_t matrix_xyz_d65_to_d50_cat16 = {
-  { 1.01085433f, 0.04070861f, -0.03414458f, 0.f}, { 0.00542814f, 0.99358193f, 0.00115592f, 0.f}, { 0.00025072f, -0.01149188f, 0.76796495f, 0.f}
-};
-
 /* ---------------------------------------------------------------------------
- * Process
+ * Presets & Params
  * ------------------------------------------------------------------------ */
+
+static void _set_standard_params(dt_iop_opendrt_params_t *p)
+{
+  p->contrast = 1.66f; p->tn_sh = 0.5f; p->tn_toe = 0.003f; p->tn_off = 0.005f;
+  p->tn_hcon_enable = 0; p->tn_hcon = 0.0f; p->tn_hcon_pv = 1.0f; p->tn_hcon_st = 4.0f;
+  p->tn_lcon_enable = 0; p->tn_lcon = 0.0f; p->tn_lcon_w = 0.5f;
+
+  p->cwp = DT_OPENDRT_WP_D65; p->cwp_lm = 0.25f;
+
+  p->saturation = 0.35f; p->rs_rw = 0.25f; p->rs_bw = 0.55f;
+
+  p->pt_enable = 1;
+  p->pt_lml = 0.25f; p->pt_lml_r = 0.5f; p->pt_lml_g = 0.0f; p->pt_lml_b = 0.1f;
+  p->pt_lmh = 0.25f; p->pt_lmh_r = 0.5f; p->pt_lmh_b = 0.0f;
+
+  p->ptl_enable = 1;
+  p->ptl_c = 0.06f; p->ptl_m = 0.08f; p->ptl_y = 0.06f;
+
+  p->ptm_enable = 1;
+  p->ptm_low = 0.5f; p->ptm_low_rng = 0.25f; p->ptm_low_st = 0.5f;
+  p->ptm_high = -0.8f; p->ptm_high_rng = 0.3f; p->ptm_high_st = 0.4f;
+
+  p->brl_enable = 1;
+  p->brl = 0.0f; p->brl_r = -2.5f; p->brl_g = -1.5f; p->brl_b = -1.5f;
+  p->brl_rng = 0.5f; p->brl_st = 0.35f;
+
+  p->brlp_enable = 1;
+  p->brlp = -0.5f; p->brlp_r = -1.25f; p->brlp_g = -1.25f; p->brlp_b = -0.25f;
+
+  p->hc_enable = 1;
+  p->hc_r = 1.0f; p->hc_r_rng = 0.3f;
+
+  p->hs_rgb_enable = 1;
+  p->hs_r = 0.6f; p->hs_r_rng = 0.7f; p->hs_g = 0.35f; p->hs_g_rng = 1.0f; p->hs_b = 0.66f; p->hs_b_rng = 1.0f;
+
+  p->hs_cmy_enable = 1;
+  p->hs_c = 0.25f; p->hs_c_rng = 1.0f; p->hs_m = 0.0f; p->hs_m_rng = 1.0f; p->hs_y = 0.0f; p->hs_y_rng = 1.0f;
+
+  p->tn_Lp = 100.0f; p->tn_Lg = 10.0f; p->tn_gb = 0.13f; p->pt_hdr = 0.5f;
+}
+
+void init_presets(dt_iop_module_so_t *self)
+{
+  dt_iop_opendrt_params_t p = { 0 };
+
+  _set_standard_params(&p);
+  dt_gui_presets_add_generic(_("Standard"), self->op, self->version(), &p, sizeof(p), TRUE, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  // Arriba
+  _set_standard_params(&p);
+  p.contrast = 1.05f; p.tn_toe = 0.1f; p.tn_off = 0.01f;
+  p.tn_lcon_enable = 1; p.tn_lcon = 1.5f; p.tn_lcon_w = 0.2f;
+  p.pt_lml_r = 0.45f; p.pt_lmh_r = 0.25f;
+  p.ptm_low = 1.0f; p.ptm_low_rng = 0.4f; p.ptm_high_rng = 0.66f; p.ptm_high_st = 0.6f;
+  p.brlp = 0.0f; p.brlp_r = -1.7f; p.brlp_g = -2.0f; p.brlp_b = -0.5f;
+  p.hs_r_rng = 0.8f; p.hs_c = 0.15f;
+  dt_gui_presets_add_generic(_("Arriba"), self->op, self->version(), &p, sizeof(p), TRUE, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  // Sylvan
+  _set_standard_params(&p);
+  p.contrast = 1.6f; p.tn_toe = 0.01f; p.tn_off = 0.01f;
+  p.tn_lcon_enable = 1; p.tn_lcon = 0.25f; p.tn_lcon_w = 0.75f;
+  p.saturation = 0.25f;
+  p.pt_lml = 0.15f; p.pt_lml_g = 0.15f;
+  p.pt_lmh_r = 0.15f; p.pt_lmh_b = 0.15f;
+  p.ptl_c = 0.05f; p.ptl_y = 0.05f;
+  p.ptm_low_rng = 0.5f; p.ptm_high_rng = 0.5f; p.ptm_high_st = 0.5f;
+  p.brl = -1.0f; p.brl_r = -2.0f; p.brl_g = -2.0f; p.brl_b = 0.0f; p.brl_rng = 0.25f; p.brl_st = 0.25f;
+  p.brlp = -1.0f; p.brlp_r = -0.5f; p.brlp_g = -0.25f; p.brlp_b = -0.25f;
+  p.hc_r_rng = 0.4f;
+  p.hs_r_rng = 1.15f; p.hs_g = 0.8f; p.hs_g_rng = 1.25f; p.hs_b = 0.6f;
+  p.hs_m = 0.25f; p.hs_m_rng = 0.5f; p.hs_y = 0.35f; p.hs_y_rng = 0.5f;
+  dt_gui_presets_add_generic(_("Sylvan"), self->op, self->version(), &p, sizeof(p), TRUE, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  // Colorful
+  _set_standard_params(&p);
+  p.contrast = 1.5f; p.tn_off = 0.003f;
+  p.tn_lcon_enable = 1; p.tn_lcon = 0.4f;
+  p.pt_lml = 0.5f; p.pt_lml_r = 1.0f; p.pt_lml_b = 0.5f;
+  p.pt_lmh_b = 0.15f;
+  p.ptl_c = 0.05f; p.ptl_m = 0.06f; p.ptl_y = 0.05f;
+  p.ptm_low = 0.8f; p.ptm_low_rng = 0.5f; p.ptm_low_st = 0.4f;
+  p.brl_r = -1.25f; p.brl_g = -1.25f; p.brl_b = -0.25f; p.brl_rng = 0.3f; p.brl_st = 0.5f;
+  p.brlp_b = 0.0f;
+  p.hc_r_rng = 0.4f;
+  p.hs_r = 0.5f; p.hs_r_rng = 0.8f; p.hs_b = 0.5f; p.hs_y = 0.25f;
+  dt_gui_presets_add_generic(_("Colorful"), self->op, self->version(), &p, sizeof(p), TRUE, DEVELOP_BLEND_CS_RGB_SCENE);
+
+  // Aery
+  _set_standard_params(&p);
+  p.contrast = 1.15f; p.tn_toe = 0.04f; p.tn_off = 0.006f;
+  p.tn_hcon_pv = 0.0f; p.tn_hcon_st = 0.5f;
+  p.tn_lcon_enable = 1; p.tn_lcon = 0.5f; p.tn_lcon_w = 2.0f;
+  p.cwp = DT_OPENDRT_WP_D75;
+  p.saturation = 0.25f; p.rs_rw = 0.2f; p.rs_bw = 0.5f;
+  p.pt_lml = 0.0f; p.pt_lml_r = 0.35f; p.pt_lml_g = 0.15f;
+  p.pt_lmh = 0.0f;
+  p.ptl_c = 0.05f; p.ptl_y = 0.05f;
+  p.ptm_low = 0.8f; p.ptm_low_rng = 0.35f; p.ptm_high = -0.9f; p.ptm_high_rng = 0.5f; p.ptm_high_st = 0.3f;
+  p.brl = -3.0f; p.brl_r = 0.0f; p.brl_g = 0.0f; p.brl_b = 1.0f; p.brl_rng = 0.8f; p.brl_st = 0.15f;
+  p.brlp = -1.0f; p.brlp_r = -1.0f; p.brlp_g = -1.0f; p.brlp_b = 0.0f;
+  p.hc_r = 0.5f; p.hc_r_rng = 0.25f;
+  p.hs_r_rng = 1.0f; p.hs_g_rng = 2.0f; p.hs_b = 0.5f; p.hs_b_rng = 1.5f;
+  p.hs_c = 0.35f; p.hs_m = 0.25f; p.hs_y = 0.35f; p.hs_y_rng = 0.5f;
+  dt_gui_presets_add_generic(_("Aery"), self->op, self->version(), &p, sizeof(p), TRUE, DEVELOP_BLEND_CS_RGB_SCENE);
+}
+
+void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  dt_iop_opendrt_params_t *p = (dt_iop_opendrt_params_t *)p1;
+  dt_iop_opendrt_data_t *d = (dt_iop_opendrt_data_t *)piece->data;
+
+  // Copy parameters to data
+  d->tn_off = p->tn_off;
+  d->tn_toe = p->tn_toe;
+  d->rs_sa = p->saturation;
+  d->rs_rw = p->rs_rw;
+  d->rs_bw = p->rs_bw;
+  d->cwp_lm = p->cwp_lm;
+  d->cwp_mode = p->cwp;
+
+  d->tn_hcon_enable = p->tn_hcon_enable;
+  d->tn_hcon = p->tn_hcon; d->tn_hcon_pv = p->tn_hcon_pv; d->tn_hcon_st = p->tn_hcon_st;
+  d->tn_lcon_enable = p->tn_lcon_enable;
+  d->tn_lcon = p->tn_lcon; d->tn_lcon_w = p->tn_lcon_w;
+
+  d->pt_enable = p->pt_enable;
+  d->pt_lml = p->pt_lml; d->pt_lml_r = p->pt_lml_r; d->pt_lml_g = p->pt_lml_g; d->pt_lml_b = p->pt_lml_b;
+  d->pt_lmh = p->pt_lmh; d->pt_lmh_r = p->pt_lmh_r; d->pt_lmh_b = p->pt_lmh_b;
+
+  d->ptl_enable = p->ptl_enable;
+  d->ptl_c = p->ptl_c; d->ptl_m = p->ptl_m; d->ptl_y = p->ptl_y;
+
+  d->ptm_enable = p->ptm_enable;
+  d->ptm_low = p->ptm_low; d->ptm_low_rng = p->ptm_low_rng; d->ptm_low_st = p->ptm_low_st;
+  d->ptm_high = p->ptm_high; d->ptm_high_rng = p->ptm_high_rng; d->ptm_high_st = p->ptm_high_st;
+
+  d->brl_enable = p->brl_enable;
+  d->brl = p->brl; d->brl_r = p->brl_r; d->brl_g = p->brl_g; d->brl_b = p->brl_b;
+  d->brl_rng = p->brl_rng; d->brl_st = p->brl_st;
+
+  d->brlp_enable = p->brlp_enable;
+  d->brlp = p->brlp; d->brlp_r = p->brlp_r; d->brlp_g = p->brlp_g; d->brlp_b = p->brlp_b;
+
+  d->hc_enable = p->hc_enable;
+  d->hc_r = p->hc_r; d->hc_r_rng = p->hc_r_rng;
+
+  d->hs_rgb_enable = p->hs_rgb_enable;
+  d->hs_r = p->hs_r; d->hs_r_rng = p->hs_r_rng; d->hs_g = p->hs_g; d->hs_g_rng = p->hs_g_rng;
+  d->hs_b = p->hs_b; d->hs_b_rng = p->hs_b_rng;
+
+  d->hs_cmy_enable = p->hs_cmy_enable;
+  d->hs_c = p->hs_c; d->hs_c_rng = p->hs_c_rng; d->hs_m = p->hs_m; d->hs_m_rng = p->hs_m_rng;
+  d->hs_y = p->hs_y; d->hs_y_rng = p->hs_y_rng;
+
+  // Tonescale Calculations
+  const float tn_sh = p->tn_sh;
+  const float tn_con = p->contrast;
+  const float tn_su = 1.0f; // Dim surround
+
+  const float ts_x1 = powf(2.0f, 6.0f * tn_sh + 4.0f);
+  const float ts_y1 = p->tn_Lp / 100.0f;
+  const float ts_x0 = 0.18f + d->tn_off;
+  const float ts_y0 = p->tn_Lg / 100.0f * (1.0f + p->tn_gb * log2f(ts_y1));
+  const float ts_s0 = compress_toe_quadratic(ts_y0, d->tn_toe, 1);
+  const float ts_p = tn_con / (1.0f + tn_su * 0.05f);
+  const float ts_s10 = ts_x0 * (powf(ts_s0, -1.0f / tn_con) - 1.0f);
+  const float ts_m1 = ts_y1 / powf(ts_x1 / (ts_x1 + ts_s10), tn_con);
+  d->ts_m2 = compress_toe_quadratic(ts_m1, d->tn_toe, 1);
+  d->ts_s = ts_x0 * (powf(ts_s0 / d->ts_m2, -1.0f / tn_con) - 1.0f);
+  d->ts_dsc = 100.0f / p->tn_Lp;
+  d->ts_p = ts_p;
+
+  float pt_cmp_Lf = p->pt_hdr * fminf(1.0f, (p->tn_Lp - 100.0f) / 900.0f);
+  d->s_Lp100 = ts_x0 * (powf((p->tn_Lg / 100.0f), -1.0f / tn_con) - 1.0f);
+  d->ts_s1 = d->ts_s * pt_cmp_Lf + d->s_Lp100 * (1.0f - pt_cmp_Lf);
+
+  // Matrices
+  const dt_iop_order_iccprofile_info_t *profile = dt_ioppr_get_pipe_work_profile_info(pipe);
+  dt_colormatrix_t pipe_to_xyz_d50;
+  for(int i=0; i<3; i++)
+    for(int j=0; j<3; j++)
+      pipe_to_xyz_d50[i][j] = profile->matrix_in[i][j];
+
+  // Use standard CAT16 matrix from common
+  const dt_colormatrix_t *mat_cat16 = &XYZ_D50_to_D65_CAT16;
+
+  dt_colormatrix_t xyz_d65_to_p3d65;
+  memcpy(xyz_d65_to_p3d65, matrix_xyz_to_p3d65, sizeof(dt_colormatrix_t));
+
+  dt_colormatrix_t tmp;
+  dt_colormatrix_mul(tmp, *mat_cat16, pipe_to_xyz_d50);
+  dt_colormatrix_mul(d->pipe_to_p3d65, xyz_d65_to_p3d65, tmp);
+
+  // Inverse
+  dt_colormatrix_t p3d65_to_xyz_d65;
+  memcpy(p3d65_to_xyz_d65, matrix_p3d65_to_xyz, sizeof(dt_colormatrix_t));
+
+  const dt_colormatrix_t *xyz_d65_to_d50 = &XYZ_D65_to_D50_CAT16;
+  dt_colormatrix_t xyz_d50_to_pipe;
+  mat3SSEinv(xyz_d50_to_pipe, pipe_to_xyz_d50);
+
+  dt_colormatrix_mul(tmp, *xyz_d65_to_d50, p3d65_to_xyz_d65);
+  dt_colormatrix_mul(d->p3d65_to_pipe, xyz_d50_to_pipe, tmp);
+
+  // Creative Whitepoint
+  if (p->cwp == DT_OPENDRT_WP_D65) {
+     for(int i=0; i<4; i++) for(int j=0; j<4; j++) d->cwp_matrix[i][j] = (i==j) ? 1.f : 0.f;
+  } else {
+     // Use matrices from DCTL definitions
+     if (p->cwp == DT_OPENDRT_WP_D60) memcpy(d->cwp_matrix, matrix_cat_d65_to_d60, sizeof(dt_colormatrix_t));
+     else if (p->cwp == DT_OPENDRT_WP_D50) memcpy(d->cwp_matrix, matrix_cat_d65_to_d50, sizeof(dt_colormatrix_t));
+     else if (p->cwp == DT_OPENDRT_WP_D55) memcpy(d->cwp_matrix, matrix_cat_d65_to_d55, sizeof(dt_colormatrix_t));
+     else if (p->cwp == DT_OPENDRT_WP_D75) memcpy(d->cwp_matrix, matrix_cat_d65_to_d75, sizeof(dt_colormatrix_t));
+     else if (p->cwp == DT_OPENDRT_WP_D93) memcpy(d->cwp_matrix, matrix_cat_d65_to_d93, sizeof(dt_colormatrix_t));
+     else for(int i=0; i<4; i++) for(int j=0; j<4; j++) d->cwp_matrix[i][j] = (i==j) ? 1.f : 0.f;
+  }
+}
 
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
              const void *const ivoid, void *const ovoid,
@@ -211,7 +507,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   const float rs_sa = data->rs_sa;
   const float rs_rw = data->rs_rw;
   const float rs_bw = data->rs_bw;
-  const float tn_toe = 0.003f; // Hardcoded from Standard preset for now
+  const float tn_toe = data->tn_toe;
 
   const float cwp_lm = data->cwp_lm;
   const int cwp = data->cwp_mode;
@@ -231,16 +527,23 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   const float ptm_high = data->ptm_high, ptm_high_rng = data->ptm_high_rng, ptm_high_st = data->ptm_high_st;
   const float ptl_c = data->ptl_c, ptl_m = data->ptl_m, ptl_y = data->ptl_y;
 
+  const int brl_enable = data->brl_enable;
+  const int brlp_enable = data->brlp_enable;
+  const int hc_enable = data->hc_enable;
+  const int hs_rgb_enable = data->hs_rgb_enable;
+  const int hs_cmy_enable = data->hs_cmy_enable;
+  const int ptm_enable = data->ptm_enable;
+  const int ptl_enable = data->ptl_enable;
+  const int pt_enable = data->pt_enable;
+  const int tn_lcon_enable = data->tn_lcon_enable;
+  const int tn_hcon_enable = data->tn_hcon_enable;
+
   // Matrices
   dt_colormatrix_t in_to_p3, p3_to_out, cwp_mat, p3_to_xyz;
-  // Transpose for vector math: out = M * in -> out[i] = dot(row[i], in)
-  // dt_colormatrix_t is float[4][4]
-
-  // Prepare transposed matrices for dt_apply_transposed_color_matrix
   dt_colormatrix_transpose(in_to_p3, data->pipe_to_p3d65);
   dt_colormatrix_transpose(p3_to_out, data->p3d65_to_pipe);
   dt_colormatrix_transpose(cwp_mat, data->cwp_matrix);
-  dt_colormatrix_transpose(p3_to_xyz, matrix_p3d65_to_xyz); // Needed for CWP math
+  dt_colormatrix_transpose(p3_to_xyz, matrix_p3d65_to_xyz);
 
   #pragma omp parallel for schedule(static)
   for(int k = 0; k < width * height; k++)
@@ -251,7 +554,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     float b = in[i+2];
 
     // Input Gamut -> P3-D65
-    // Manual matrix mult because we need to process pixel by pixel
     float r_p3 = in_to_p3[0][0]*r + in_to_p3[0][1]*g + in_to_p3[0][2]*b;
     float g_p3 = in_to_p3[1][0]*r + in_to_p3[1][1]*g + in_to_p3[1][2]*b;
     float b_p3 = in_to_p3[2][0]*r + in_to_p3[2][1]*g + in_to_p3[2][2]*b;
@@ -259,9 +561,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     r = r_p3; g = g_p3; b = b_p3;
 
     // Render Space Desaturation
-    // float3 rs_w = make_float3(rs_rw, 1.0f - rs_rw - rs_bw, rs_bw);
-    float rs_wg = 1.0f - rs_rw - rs_bw;
-    float sat_L = r * rs_rw + g * rs_wg + b * rs_bw;
+    float sat_L = r * rs_rw + g * (1.0f - rs_rw - rs_bw) + b * rs_bw;
     r = sat_L * rs_sa + r * (1.0f - rs_sa);
     g = sat_L * rs_sa + g * (1.0f - rs_sa);
     b = sat_L * rs_sa + b * (1.0f - rs_sa);
@@ -273,8 +573,6 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 
     // Tonescale Norm
     float tsn = sqrtf(fmaxf(0.0f, r*r + g*g + b*b)) / SQRT3;
-
-    // Avoid division by zero
     if (tsn < 1e-9f) tsn = 1e-9f;
 
     // RGB Ratios
@@ -307,20 +605,36 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     float ha_cmy_z = gauss_window(hue_offset(hue, -1.15f), 0.5f);
 
     // Brilliance
-    {
+    if(brl_enable) {
       float brl_tsf = powf(tsn / (tsn + 1.0f), 1.0f - brl_rng);
       float brl_exf = (brl + brl_r * ha_rgb_x + brl_g * ha_rgb_y + brl_b * ha_rgb_z) * powf(ach_d, 1.0f / brl_st);
       float brl_ex = powf(2.0f, brl_exf * (brl_exf < 0.0f ? brl_tsf : 1.0f - brl_tsf));
       tsn *= brl_ex;
     }
 
-    // Hyperbolic Compression (Tonescale Application)
+    // Contrast Low
+    if (tn_lcon_enable) {
+        float lcon_m = powf(2.0f, -data->tn_lcon);
+        float lcon_w = data->tn_lcon_w/4.0f;
+        lcon_w *= lcon_w;
+        const float lcon_cnst_sc = compress_toe_cubic(ts_x0, lcon_m, lcon_w, 1)/ts_x0;
+        tsn *= lcon_cnst_sc;
+        tsn = compress_toe_cubic(tsn, lcon_m, lcon_w, 0);
+    }
+
+    // Contrast High
+    if (tn_hcon_enable) {
+        float hcon_p = powf(2.0f, data->tn_hcon);
+        tsn = contrast_high(tsn, hcon_p, data->tn_hcon_pv, data->tn_hcon_st, 0);
+    }
+
+    // Hyperbolic Compression
     float tsn_pt = compress_hyperbolic_power(tsn, ts_s1, ts_p);
     float tsn_const = compress_hyperbolic_power(tsn, s_Lp100, ts_p);
     tsn = compress_hyperbolic_power(tsn, ts_s, ts_p);
 
     // Hue Contrast R
-    {
+    if(hc_enable) {
       float hc_ts = 1.0f - tsn_const;
       float hc_c = hc_ts * (1.0f - ach_d) + ach_d * (1.0f - hc_ts);
       hc_c *= ach_d * ha_rgb_x;
@@ -331,7 +645,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     }
 
     // Hue Shift RGB
-    {
+    if(hs_rgb_enable) {
       float hs_rgb_x = ha_rgb_hs_x * ach_d * spowf(tsn_pt, 1.0f / hs_r_rng);
       float hs_rgb_y = ha_rgb_hs_y * ach_d * spowf(tsn_pt, 1.0f / hs_g_rng);
       float hs_rgb_z = ha_rgb_hs_z * ach_d * spowf(tsn_pt, 1.0f / hs_b_rng);
@@ -340,15 +654,13 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       float hsf_y = hs_rgb_y * -hs_g;
       float hsf_z = hs_rgb_z * -hs_b;
 
-      float rot_x = hsf_z - hsf_y;
-      float rot_y = hsf_x - hsf_z;
-      float rot_z = hsf_y - hsf_x;
-
-      r += rot_x; g += rot_y; b += rot_z;
+      r += hsf_z - hsf_y;
+      g += hsf_x - hsf_z;
+      b += hsf_y - hsf_x;
     }
 
     // Hue Shift CMY
-    {
+    if(hs_cmy_enable) {
       float tsn_pt_compl = 1.0f - tsn_pt;
       float hs_cmy_x = ha_cmy_x * ach_d * spowf(tsn_pt_compl, 1.0f / hs_c_rng);
       float hs_cmy_y = ha_cmy_y * ach_d * spowf(tsn_pt_compl, 1.0f / hs_m_rng);
@@ -358,26 +670,25 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       float hsf_y = hs_cmy_y * hs_m;
       float hsf_z = hs_cmy_z * hs_y;
 
-      float rot_x = hsf_z - hsf_y;
-      float rot_y = hsf_x - hsf_z;
-      float rot_z = hsf_y - hsf_x;
-
-      r += rot_x; g += rot_y; b += rot_z;
+      r += hsf_z - hsf_y;
+      g += hsf_x - hsf_z;
+      b += hsf_y - hsf_x;
     }
 
     // Purity Compression
-    // Limit Low
     float pt_lml_p = 1.0f + 4.0f * (1.0f - tsn_pt) * (pt_lml + pt_lml_r * ha_rgb_hs_x + pt_lml_g * ha_rgb_hs_y + pt_lml_b * ha_rgb_hs_z);
     float ptf = 1.0f - spowf(tsn_pt, pt_lml_p);
 
-    // Limit High
-    float pt_lmh_p = (1.0f - ach_d * (pt_lmh_r * ha_rgb_hs_x + pt_lmh_b * ha_rgb_hs_z)) * (1.0f - pt_lmh * ach_d);
-    ptf = spowf(ptf, pt_lmh_p);
+    if (pt_enable) {
+        float pt_lmh_p = (1.0f - ach_d * (pt_lmh_r * ha_rgb_hs_x + pt_lmh_b * ha_rgb_hs_z)) * (1.0f - pt_lmh * ach_d);
+        ptf = spowf(ptf, pt_lmh_p);
+    }
 
-    // Mid-Range Purity
-    float ptm_low_f = 1.0f + ptm_low * expf(-2.0f * ach_d * ach_d / ptm_low_st) * spowf(1.0f - tsn_const, 1.0f / ptm_low_rng);
-    float ptm_high_f = 1.0f + ptm_high * expf(-2.0f * ach_d * ach_d / ptm_high_st) * spowf(tsn_pt, 1.0f / (4.0f * ptm_high_rng));
-    ptf *= ptm_low_f * ptm_high_f;
+    if(ptm_enable) {
+        float ptm_low_f = 1.0f + ptm_low * expf(-2.0f * ach_d * ach_d / ptm_low_st) * spowf(1.0f - tsn_const, 1.0f / ptm_low_rng);
+        float ptm_high_f = 1.0f + ptm_high * expf(-2.0f * ach_d * ach_d / ptm_high_st) * spowf(tsn_pt, 1.0f / (4.0f * ptm_high_rng));
+        ptf *= ptm_low_f * ptm_high_f;
+    }
 
     // Lerp to peak achromatic
     r = r * ptf + 1.0f - ptf;
@@ -385,24 +696,17 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     b = b * ptf + 1.0f - ptf;
 
     // Inverse Rendering Space
-    sat_L = r * rs_rw + g * rs_wg + b * rs_bw;
+    sat_L = r * rs_rw + g * (1.0f - rs_rw - rs_bw) + b * rs_bw;
     r = (sat_L * rs_sa - r) / (rs_sa - 1.0f);
     g = (sat_L * rs_sa - g) / (rs_sa - 1.0f);
     b = (sat_L * rs_sa - b) / (rs_sa - 1.0f);
 
-    // Display Gamut Whitepoint Logic (inline)
-    // 1. Convert to XYZ D65
+    // Display Gamut Whitepoint Logic
     float x_xyz = p3_to_xyz[0][0]*r + p3_to_xyz[0][1]*g + p3_to_xyz[0][2]*b;
     float y_xyz = p3_to_xyz[1][0]*r + p3_to_xyz[1][1]*g + p3_to_xyz[1][2]*b;
     float z_xyz = p3_to_xyz[2][0]*r + p3_to_xyz[2][1]*g + p3_to_xyz[2][2]*b;
 
     float r_cwp = x_xyz, g_cwp = y_xyz, b_cwp = z_xyz;
-
-    // 2. Creative White Point Adjustment
-    // If CWP is not D65, we adapt.
-    // NOTE: The DCTL simplifies this by assuming target gamut is P3D65 for most cases
-    // We will perform the mix here.
-    // cwp_matrix transforms XYZ_D65 -> XYZ_D65_Adapted (roughly)
 
     float r_target = cwp_mat[0][0]*x_xyz + cwp_mat[0][1]*y_xyz + cwp_mat[0][2]*z_xyz;
     float g_target = cwp_mat[1][0]*x_xyz + cwp_mat[1][1]*y_xyz + cwp_mat[1][2]*z_xyz;
@@ -410,26 +714,16 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 
     float cwp_f = powf(tsn_const, 2.0f * cwp_lm);
 
-    // Mix
     x_xyz = r_target * cwp_f + r_cwp * (1.0f - cwp_f);
     y_xyz = g_target * cwp_f + g_cwp * (1.0f - cwp_f);
     z_xyz = b_target * cwp_f + b_cwp * (1.0f - cwp_f);
-
-    // 3. Convert back to P3D65 for post-processing (OpenDRT working space)
-    // Inverse of p3_to_xyz (which is matrix_xyz_to_p3d65)
-    // Note: In DCTL, it converts to *Final Display Gamut*.
-    // Here we assume we want to return to Pipe RGB eventually.
-    // But Post Brilliance and Softclip happen in "RGB". OpenDRT assumes P3D65.
-    // So we convert XYZ -> P3D65.
 
     r = matrix_xyz_to_p3d65[0][0]*x_xyz + matrix_xyz_to_p3d65[0][1]*y_xyz + matrix_xyz_to_p3d65[0][2]*z_xyz;
     g = matrix_xyz_to_p3d65[1][0]*x_xyz + matrix_xyz_to_p3d65[1][1]*y_xyz + matrix_xyz_to_p3d65[1][2]*z_xyz;
     b = matrix_xyz_to_p3d65[2][0]*x_xyz + matrix_xyz_to_p3d65[2][1]*y_xyz + matrix_xyz_to_p3d65[2][2]*z_xyz;
 
-    // CWP Normalization
     float cwp_norm = 1.0f;
-    if (cwp != DT_OPENDRT_WP_D65) { // Simplified check, full table in DCTL
-        // For P3D65 target
+    if (cwp != DT_OPENDRT_WP_D65) {
         if (cwp == DT_OPENDRT_WP_D93) cwp_norm = 0.762687057298f;
         else if (cwp == DT_OPENDRT_WP_D75) cwp_norm = 0.884054083328f;
         else if (cwp == DT_OPENDRT_WP_D60) cwp_norm = 0.964320186739f;
@@ -442,22 +736,23 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     g *= norm_factor;
     b *= norm_factor;
 
-    const int brlp_enable = data->brlp_enable;
     // Post Brilliance
-    if (brlp_enable) { // Assuming enabled for standard preset
+    if (brlp_enable) {
       float ox_p, oy_p;
       opponent(r, g, b, &ox_p, &oy_p);
       float brlp_ach_d = hypotf(ox_p, oy_p) / 4.0f;
       brlp_ach_d = 1.1f * (brlp_ach_d * brlp_ach_d / (brlp_ach_d + 0.1f));
       float brlp_m = brlp + brlp_r * ach_d * ha_rgb_x + brlp_g * ach_d * ha_rgb_y + brlp_b * ach_d * ha_rgb_z;
-      float brlp_ex = powf(2.0f, brlp_m * brlp_ach_d * tsn);
+      float brlp_ex = spowf(2.0f, brlp_m * brlp_ach_d * tsn);
       r *= brlp_ex; g *= brlp_ex; b *= brlp_ex;
     }
 
     // Purity Compress Low
-    r = softplus(r, ptl_c);
-    g = softplus(g, ptl_m);
-    b = softplus(b, ptl_y);
+    if (ptl_enable) {
+        r = softplus(r, ptl_c);
+        g = softplus(g, ptl_m);
+        b = softplus(b, ptl_y);
+    }
 
     // Final tonescale adjustments
     tsn *= ts_m2;
@@ -467,12 +762,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     // Return from RGB ratios
     r *= tsn; g *= tsn; b *= tsn;
 
-    // Convert to Output (Pipeline RGB D50)
-    // Current state: P3 D65 Linear
-    // Target: Pipe D50 Linear
-    // We reuse the p3_to_out matrix calculated in commit_params
-    // Note: The DCTL output stage includes EOTF. We skip EOTF to stay linear for darktable.
-
+    // Convert to Output
     float r_out = p3_to_out[0][0]*r + p3_to_out[0][1]*g + p3_to_out[0][2]*b;
     float g_out = p3_to_out[1][0]*r + p3_to_out[1][1]*g + p3_to_out[1][2]*b;
     float b_out = p3_to_out[2][0]*r + p3_to_out[2][1]*g + p3_to_out[2][2]*b;
@@ -480,144 +770,8 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     out[i] = r_out;
     out[i+1] = g_out;
     out[i+2] = b_out;
-    out[i+3] = in[i+3]; // Alpha
+    out[i+3] = in[i+3];
   }
-}
-
-/* ---------------------------------------------------------------------------
- * Module Interface
- * ------------------------------------------------------------------------ */
-
-void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-  dt_iop_opendrt_params_t *p = (dt_iop_opendrt_params_t *)p1;
-  dt_iop_opendrt_data_t *d = (dt_iop_opendrt_data_t *)piece->data;
-
-  // Standard Look Preset values
-  d->rs_sa = p->saturation; // User controlled
-  d->rs_rw = 0.25f;
-  d->rs_bw = 0.55f;
-  d->tn_off = 0.005f;
-
-  d->hc_r = 1.0f; d->hc_r_rng = 0.3f;
-  d->hs_r = 0.6f; d->hs_r_rng = 0.7f;
-  d->hs_g = 0.35f; d->hs_g_rng = 1.0f;
-  d->hs_b = 0.66f; d->hs_b_rng = 1.0f;
-  d->hs_c = 0.25f; d->hs_c_rng = 1.0f;
-  d->hs_m = 0.0f; d->hs_m_rng = 1.0f;
-  d->hs_y = 0.0f; d->hs_y_rng = 1.0f;
-
-  d->pt_lml = 0.25f; d->pt_lml_r = 0.5f; d->pt_lml_g = 0.0f; d->pt_lml_b = 0.1f;
-  d->pt_lmh = 0.25f; d->pt_lmh_r = 0.5f; d->pt_lmh_b = 0.0f;
-
-  d->ptl_c = 0.06f; d->ptl_m = 0.08f; d->ptl_y = 0.06f;
-  d->ptm_low = 0.5f; d->ptm_low_rng = 0.25f; d->ptm_low_st = 0.5f;
-  d->ptm_high = -0.8f; d->ptm_high_rng = 0.3f; d->ptm_high_st = 0.4f;
-
-  d->brl = 0.0f; d->brl_r = -2.5f; d->brl_g = -1.5f; d->brl_b = -1.5f;
-  d->brl_rng = 0.5f; d->brl_st = 0.35f;
-  d->brlp = -0.5f; d->brlp_r = -1.25f; d->brlp_g = -1.25f; d->brlp_b = -0.25f;
-
-  d->brlp_enable = 1;
-
-  // Tonescale pre-calculations
-  const float tn_sh = 0.5f; // Standard
-  const float tn_toe = 0.003f; // Standard
-  const float tn_con = p->contrast;
-  const float tn_su = 1.0f; // Dim surround (default)
-
-  const float ts_x1 = powf(2.0f, 6.0f * tn_sh + 4.0f);
-  const float ts_y1 = p->tn_Lp / 100.0f;
-  const float ts_x0 = 0.18f + d->tn_off;
-  const float ts_y0 = p->tn_Lg / 100.0f * (1.0f + p->tn_gb * log2f(ts_y1));
-  const float ts_s0 = compress_toe_quadratic(ts_y0, tn_toe, 1);
-  const float ts_p = tn_con / (1.0f + tn_su * 0.05f);
-  const float ts_s10 = ts_x0 * (powf(ts_s0, -1.0f / tn_con) - 1.0f);
-  const float ts_m1 = ts_y1 / powf(ts_x1 / (ts_x1 + ts_s10), tn_con);
-  d->ts_m2 = compress_toe_quadratic(ts_m1, tn_toe, 1);
-  d->ts_s = ts_x0 * (powf(ts_s0 / d->ts_m2, -1.0f / tn_con) - 1.0f);
-  d->ts_dsc = 100.0f / p->tn_Lp; // Assuming linear output, not PQ/HLG
-  d->ts_p = ts_p;
-
-  float pt_cmp_Lf = p->pt_hdr * fminf(1.0f, (p->tn_Lp - 100.0f) / 900.0f);
-  d->s_Lp100 = ts_x0 * (powf((p->tn_Lg / 100.0f), -1.0f / tn_con) - 1.0f);
-  d->ts_s1 = d->ts_s * pt_cmp_Lf + d->s_Lp100 * (1.0f - pt_cmp_Lf);
-
-  d->cwp_lm = p->cwp_lm;
-  d->cwp_mode = p->cwp;
-
-  // Color Matrices
-  // Pipeline (RGB D50) -> P3 D65
-  // 1. Pipe -> XYZ D50
-  // 2. XYZ D50 -> XYZ D65 (CAT16)
-  // 3. XYZ D65 -> P3 D65
-  const dt_iop_order_iccprofile_info_t *profile = dt_ioppr_get_pipe_work_profile_info(pipe);
-  dt_colormatrix_t pipe_to_xyz_d50;
-  for(int i=0; i<3; i++)
-    for(int j=0; j<3; j++)
-      pipe_to_xyz_d50[i][j] = profile->matrix_in[i][j]; // Already D50 adapted in DT
-
-  // dt_colormatrix_t xyz_d50_to_d65;
-  // CAT16 D50->D65 matrix from common/chromatic_adaptation.h logic (precalc)
-  // DCTL uses specific matrices. Let's use the ones from DCTL to match.
-  // DCTL: matrix_xyz_d50_to_d65_cat16
-  const dt_colormatrix_t mat_cat16 = {
-    { 0.98946625f, -0.04003046f, 0.04405303f, 0.f}, {-0.00540519f, 1.00666069f, -0.00175552f, 0.f}, {-0.00040392f, 0.01507680f, 1.30210211f, 0.f}
-  };
-
-  dt_colormatrix_t xyz_d65_to_p3d65 = {
-    { 2.49349691f, -0.93138362f, -0.40271078f, 0.f}, {-0.82948897f, 1.76266406f, 0.02362469f, 0.f}, { 0.03584583f, -0.07617239f, 0.95688452f, 0.f}
-  };
-
-  dt_colormatrix_t tmp;
-  dt_colormatrix_mul(tmp, mat_cat16, pipe_to_xyz_d50);
-  dt_colormatrix_mul(d->pipe_to_p3d65, xyz_d65_to_p3d65, tmp);
-
-  // P3 D65 -> Pipeline (RGB D50)
-  // Inverse of above
-  dt_colormatrix_t p3d65_to_xyz_d65;
-  mat3SSEinv(p3d65_to_xyz_d65, xyz_d65_to_p3d65);
-  dt_colormatrix_t xyz_d65_to_d50;
-  mat3SSEinv(xyz_d65_to_d50, mat_cat16);
-  dt_colormatrix_t xyz_d50_to_pipe;
-  mat3SSEinv(xyz_d50_to_pipe, pipe_to_xyz_d50);
-
-  dt_colormatrix_mul(tmp, xyz_d65_to_d50, p3d65_to_xyz_d65);
-  dt_colormatrix_mul(d->p3d65_to_pipe, xyz_d50_to_pipe, tmp);
-
-  // Creative White Point Matrix (XYZ D65 -> XYZ D65 Adapted)
-  // Used in display_gamut_whitepoint. DCTL selects from list.
-  if (p->cwp == DT_OPENDRT_WP_D65) {
-     for(int i=0; i<4; i++) for(int j=0; j<4; j++) d->cwp_matrix[i][j] = (i==j) ? 1.f : 0.f;
-  } else {
-      // Load appropriate matrix based on DCTL definitions
-      // Example for D60 (common choice)
-      if (p->cwp == DT_OPENDRT_WP_D60) {
-         const dt_colormatrix_t d65_to_d60 = {
-            { 1.01182246f, 0.00778879f, -0.01577830f, 0.f}, { 0.00561683f, 1.00150645f, -0.00628518f, 0.f}, {-0.00033574f, -0.00105095f, 0.92736667f, 0.f}
-         };
-         memcpy(d->cwp_matrix, d65_to_d60, sizeof(dt_colormatrix_t));
-      } else if (p->cwp == DT_OPENDRT_WP_D50) {
-         const dt_colormatrix_t d65_to_d50 = {
-          { 1.04257405f, 0.03089118f, -0.05281262f, 0.f}, { 0.02219354f, 1.00185668f, -0.02107376f, 0.f}, {-0.00116488f, -0.00342053f, 0.76178908f, 0.f}
-         };
-         memcpy(d->cwp_matrix, d65_to_d50, sizeof(dt_colormatrix_t));
-      }
-      // Fallback/TODO: Add other matrices if needed
-      else {
-         for(int i=0; i<4; i++) for(int j=0; j<4; j++) d->cwp_matrix[i][j] = (i==j) ? 1.f : 0.f;
-      }
-  }
-}
-
-void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-  piece->data = calloc(1, sizeof(dt_iop_opendrt_data_t));
-}
-
-void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-  free(piece->data);
 }
 
 void gui_init(dt_iop_module_t *self)
@@ -657,6 +811,12 @@ void gui_init(dt_iop_module_t *self)
   self->widget = vbox;
 }
 
-const char *name() { return _("opendrt"); }
-const char *aliases() { return _("open display transform"); }
-int flags() { return IOP_FLAGS_ALLOW_TILING | IOP_FLAGS_SUPPORTS_BLENDING; }
+void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  piece->data = calloc(1, sizeof(dt_iop_opendrt_data_t));
+}
+
+void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+{
+  free(piece->data);
+}
