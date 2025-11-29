@@ -360,6 +360,26 @@ void check_intersection(
   }
 }
 
+// 'lerp', but take care of the boundary: hue wraps around 1->0
+static inline float _lerp_hue(const float original_hue,
+                              const float processed_hue,
+                              const float mix)
+{
+  // shortest signed difference in [-0.5, 0.5] there is some ambiguity
+  // (shortest distance on a circle is undefined if the points are
+  // exactly on the opposite side), but the original and processed hue
+  // are quite similar, we don't expect 180-degree shifts, and
+  // couldn't do anything about it, anyway
+  const float shortest_distance_on_hue_circle = remainderf(processed_hue - original_hue, 1.0f);
+
+  // interpolate: mix = 0 -> processed_hue; mix = 1 -> original_hue
+  // multiply-add: (1 - mix) * shortest_distance_on_hue_circle + original_hue
+  const float mixed_hue = DT_FMA(1.0f - mix, shortest_distance_on_hue_circle, original_hue);
+
+  // wrap to [0, 1)
+  return mixed_hue - floorf(mixed_hue);
+}
+
 static void _apply_hue_preservation(dt_aligned_pixel_t xyY, const float original_hz, const float preserve_hue)
 {
   dt_aligned_pixel_t XYZ_d50;
@@ -373,7 +393,7 @@ static void _apply_hue_preservation(dt_aligned_pixel_t xyY, const float original
   dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
 
   const float processed_hue = JzCzhz[2];
-  JzCzhz[2] = processed_hue + preserve_hue * (original_hz - processed_hue);
+  JzCzhz[2] = _lerp_hue(original_hz, processed_hue, preserve_hue);
 
   dt_JzCzhz_2_JzAzBz(JzCzhz, JzAzBz);
   dt_JzAzBz_2_XYZ(JzAzBz, XYZ_d65);
