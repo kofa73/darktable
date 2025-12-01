@@ -336,13 +336,10 @@ void check_intersection(
       const float sq_distance = _distance_sq(whitepoint, intersection);
       if (sq_distance < *distance_sq_to_gamut_boundary)
       {
-        if (*distance_sq_to_gamut_boundary != _GC_INFINITY)
-        {
-          // this cannot happen
-          printf("already found an intersection: %f\n", _dot_product(whitepoint, intersection, xy));
-          printf("current relevant_intersection: (%f, %f), new: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1], intersection[0], intersection[1]);
-          printf("current distance_sq_to_gamut_boundary: %f, new: %f\n", *distance_sq_to_gamut_boundary, sq_distance);
-        }
+        // due to limited numeric precision, we can get 2 intersections if the hue of the input color is very close to one of the primaries.
+        // for example, if the white point -> input color line almost passes through the green primary, the code may report
+        // an intersection with the green-blue as well as with the green-red side.
+        // we'll then simply take the one with the smaller distance, and just overwrite the previously found intersection
         // printf("current distance_sq_to_gamut_boundary: %f, new: %f\n", *distance_sq_to_gamut_boundary, sq_distance);
         // printf("current relevant_intersection: (%f, %f), new: (%f, %f)\n", relevant_intersection[0], relevant_intersection[1], intersection[0], intersection[1]);
         *distance_sq_to_gamut_boundary = sq_distance;
