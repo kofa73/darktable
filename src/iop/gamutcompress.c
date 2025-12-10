@@ -18,7 +18,8 @@
 
 #define _GC_INFINITY 1e6f
 #define _GC_EPSILON 1e-5f
-#define _GC_DARK_PIXEL_RGB_THRESHOLD 0.01f
+// 3 EV below mid-gray
+#define _GC_DARK_PIXEL_RGB_THRESHOLD 0.0225
 
 // dot product of start_point -> end_point_a and start_point -> end_point_b, positive if pointing in same direction
 static float _dot_product(const float* const start_point, const float* const end_point_a, const float* const end_point_b) {
