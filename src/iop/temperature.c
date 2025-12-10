@@ -43,7 +43,7 @@
 #include "common/colorspaces.h"
 #include "external/cie_colorimetric_tables.c"
 
-DT_MODULE_INTROSPECTION(4, dt_iop_temperature_params_t)
+DT_MODULE_INTROSPECTION(5, dt_iop_temperature_params_t)
 
 #define INITIALBLACKBODYTEMPERATURE 4000
 
@@ -72,6 +72,7 @@ typedef struct dt_iop_temperature_params_t
   float blue;    // $MIN: 0.0 $MAX: 8.0
   float various; // $MIN: 0.0 $MAX: 8.0
   int preset;
+  gboolean late_correction; // $DEFAULT: FALSE $DESCRIPTION: "prepare data for color calibration"
 } dt_iop_temperature_params_t;
 
 typedef struct dt_iop_temperature_gui_data_t
@@ -142,6 +143,16 @@ int legacy_params(dt_iop_module_t *self,
     int preset;
   } dt_iop_temperature_params_v4_t;
 
+  typedef struct dt_iop_temperature_params_v5_t
+  {
+    float red;
+    float green;
+    float blue;
+    float various;
+    int preset;
+    gboolean late_correction;
+  } dt_iop_temperature_params_v5_t;
+
   if(old_version == 2)
   {
     typedef struct dt_iop_temperature_params_v2_t
@@ -177,6 +188,22 @@ int legacy_params(dt_iop_module_t *self,
     *new_params = n;
     *new_params_size = sizeof(dt_iop_temperature_params_v4_t);
     *new_version = 4;
+    return 0;
+  }
+  if(old_version == 4)
+  {
+    const dt_iop_temperature_params_v4_t *o = (dt_iop_temperature_params_v4_t *)old_params;
+    dt_iop_temperature_params_v5_t *n = malloc(sizeof(dt_iop_temperature_params_v5_t));
+
+    n->red = o->red;
+    n->green = o->green;
+    n->blue = o->blue;
+    n->various = NAN;
+    n->preset = DT_IOP_TEMP_UNKNOWN;
+    n->late_correction = FALSE;
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_temperature_params_v5_t);
+    *new_version = 5;
     return 0;
   }
   return 1;
@@ -1517,6 +1544,7 @@ void reload_defaults(dt_iop_module_t *self)
   dt_iop_temperature_params_t *p = self->params;
 
   d->preset = dt_is_scene_referred() ? DT_IOP_TEMP_D65_LATE : DT_IOP_TEMP_AS_SHOT;
+  d->late_correction = dt_is_scene_referred();
 
   float *dcoeffs = (float *)d;
   for_four_channels(k)
