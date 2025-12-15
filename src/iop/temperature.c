@@ -1192,9 +1192,44 @@ static void _update_preset(dt_iop_module_t *self, int mode)
 {
   dt_iop_temperature_params_t *p = self->params;
   dt_dev_chroma_t *chr = &self->dev->chroma;
+  dt_iop_temperature_gui_data_t *g = self->gui_data;
+
+  const gboolean is_current_reference = (p->preset == DT_IOP_TEMP_D65_LATE) ||
+                                        (p->preset == DT_IOP_TEMP_D65);
+  const gboolean is_new_mode_manual = (mode != DT_IOP_TEMP_D65_LATE) &&
+                                    (mode != DT_IOP_TEMP_D65);
+
+  if (is_current_reference && is_new_mode_manual)
+  {
+    // set iff color calibration active in adaptation mode
+    p->late_correction = (chr->adaptation != NULL);
+  }
 
   p->preset = mode;
-  chr->late_correction = mode == DT_IOP_TEMP_D65_LATE;
+
+  if (mode == DT_IOP_TEMP_D65_LATE)
+  {
+    chr->late_correction = TRUE;
+  }
+  else if (mode == DT_IOP_TEMP_D65)
+  {
+    chr->late_correction = FALSE;
+  }
+  else
+  {
+    // For manual modes, use the parameter
+    chr->late_correction = p->late_correction;
+  }
+
+  if (g && g->check_late_correction)
+  {
+    // Hide checkbox in reference modes (logic is enforced hardcoded)
+    // Show in manual modes (user has control)
+    gtk_widget_set_visible(g->check_late_correction, is_new_mode_manual);
+
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->check_late_correction),
+                                 p->late_correction);
+  }
 }
 
 void gui_update(dt_iop_module_t *self)
