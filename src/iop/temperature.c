@@ -88,6 +88,7 @@ typedef struct dt_iop_temperature_gui_data_t
   GtkWidget *btn_d65_late;
   GtkWidget *temp_label;
   GtkWidget *balance_label;
+  GtkWidget *check_late_correction;
   int preset_cnt;
   int preset_num[54];
   double mod_coeff[4];
@@ -2193,12 +2194,27 @@ void gui_init(dt_iop_module_t *self)
     (g->scale_tint,
      _("color tint of the image, from magenta (value < 1) to green (value > 1)"));
 
+  g->check_late_correction = dt_bauhaus_toggle_from_params(self, "late_correction");
+
+  g_object_ref(g->check_late_correction); // Prevent destruction
+  GtkWidget *temp_parent = gtk_widget_get_parent(g->check_late_correction);
+  if(temp_parent)
+    gtk_container_remove(GTK_CONTAINER(temp_parent), g->check_late_correction);
+
+  gtk_widget_set_tooltip_text(g->check_late_correction,
+      _("ensures the white balance coefficients are treated as a reference for the color calibration module.\n"
+        "keep this checked if you use the modern scene-referred workflow but want to manually adjust white balance."));
+
   GtkWidget *box_enabled = dt_gui_vbox(g->buttonbar,
+                                       g->check_late_correction,
                                        g->presets,
                                        g->finetune,
                                        temp_label_box,
                                        g->scale_k,
                                        g->scale_tint);
+
+  g_object_unref(g->check_late_correction);
+
   dt_gui_new_collapsible_section
     (&g->cs,
      "plugins/darkroom/temperature/expand_coefficients",
