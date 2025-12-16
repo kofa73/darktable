@@ -750,7 +750,13 @@ void commit_params(dt_iop_module_t *self,
      If piece is disabled we always clear the trouble message and
      make sure chroma does know there is no temperature module.
   */
-  chr->late_correction = p->preset == DT_IOP_TEMP_D65_LATE;
+  if(p->preset == DT_IOP_TEMP_D65_LATE)
+    chr->late_correction = TRUE;
+  else if(p->preset == DT_IOP_TEMP_D65)
+    chr->late_correction = FALSE;
+  else
+    chr->late_correction = p->late_correction;
+
   chr->temperature = piece->enabled ? self : NULL;
   if(pipe->type & DT_DEV_PIXELPIPE_PREVIEW && !piece->enabled)
     dt_iop_set_module_trouble_message(self, NULL, NULL, NULL);
