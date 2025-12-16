@@ -1806,8 +1806,10 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 
   _mul2temp(self, p, &g->mod_temp, &g->mod_tint);
 
-  dt_bauhaus_combobox_set(g->presets, DT_IOP_TEMP_USER);
-  _update_preset(self, DT_IOP_TEMP_USER);
+  if(w != g->check_late_correction) {
+    dt_bauhaus_combobox_set(g->presets, DT_IOP_TEMP_USER);
+    _update_preset(self, DT_IOP_TEMP_USER);
+  }
 }
 
 static gboolean _btn_toggled(GtkWidget *togglebutton,
