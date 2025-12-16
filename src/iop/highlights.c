@@ -667,7 +667,7 @@ int process_cl(dt_iop_module_t *self,
     dt_aligned_pixel_t clips = { clip, clip, clip, clip};
     if(chr->late_correction)
     for_each_channel(c)
-      clips[c] *= chr->as_shot[c] / chr->D65coeffs[c];
+      clips[c] *= chr->wb_coeffs[c] / chr->D65coeffs[c];
     dev_clips = dt_opencl_copy_host_to_device_constant(devid, 4 * sizeof(float), clips);
     if(dev_clips == NULL) goto finish;
 
@@ -748,7 +748,7 @@ static void process_clip(dt_iop_module_t *self,
     dt_aligned_pixel_t clips = { clip, clip, clip, clip};
     if(chr->late_correction)
     {
-      for_each_channel(c) clips[c] *= chr->as_shot[c] / chr->D65coeffs[c];
+      for_each_channel(c) clips[c] *= chr->wb_coeffs[c] / chr->D65coeffs[c];
     }
     for(int row = 0; row < roi_out->height; row++)
     {
