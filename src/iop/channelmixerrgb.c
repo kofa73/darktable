@@ -593,9 +593,7 @@ void init_presets(dt_iop_module_so_t *self)
 static gboolean _dev_is_D65_chroma(const dt_develop_t *dev)
 {
   const dt_dev_chroma_t *chr = &dev->chroma;
-  return chr->late_correction
-    ? dt_dev_equal_chroma(chr->wb_coeffs, chr->as_shot)
-    : dt_dev_equal_chroma(chr->wb_coeffs, chr->D65coeffs);
+  return chr->late_correction || dt_dev_equal_chroma(chr->wb_coeffs, chr->D65coeffs);
 }
 
 static gboolean _area_mapping_active(const dt_iop_channelmixer_rgb_gui_data_t *g)
