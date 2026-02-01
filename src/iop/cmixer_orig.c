@@ -590,10 +590,14 @@ void init_presets(dt_iop_module_so_t *self)
                              self->version(), &p, sizeof(p), TRUE, DEVELOP_BLEND_CS_RGB_SCENE);
 }
 
+// if late_correction is set, and temperature.c uses the as-shot coefficients ('as shot to reference' mode)
+// or if temperature.c uses the D65 coefficients ('camera reference' mode)
 static gboolean _dev_is_D65_chroma(const dt_develop_t *dev)
 {
   const dt_dev_chroma_t *chr = &dev->chroma;
-  return chr->late_correction || dt_dev_equal_chroma(chr->wb_coeffs, chr->D65coeffs);
+  return chr->late_correction
+    ? dt_dev_equal_chroma(chr->wb_coeffs, chr->as_shot) // should always return true
+    : dt_dev_equal_chroma(chr->wb_coeffs, chr->D65coeffs);
 }
 
 static gboolean _area_mapping_active(const dt_iop_channelmixer_rgb_gui_data_t *g)
@@ -609,21 +613,30 @@ static const char *_area_mapping_section_text(const dt_iop_channelmixer_rgb_gui_
   return _area_mapping_active(g) ? _("area color mapping (active)") : _("area color mapping");
 }
 
-static gboolean _calculate_adaptation_ratios(const dt_iop_module_t *self,
-                                         dt_aligned_pixel_t adaptation_ratios)
+// return TRUE if failed
+// wrong name: if we succeed (and return FALSE), custom_wb contains not direct WB multipliers, but rather
+// multipliers to correct the D65 coefficients (in workaround mode) or (1, 1, 1) normally
+static gboolean _get_white_balance_coeff(const dt_iop_module_t *self,
+                                         dt_aligned_pixel_t custom_wb)
 {
   const dt_dev_chroma_t *chr = &self->dev->chroma;
 
   // Init output with a no-op
   for_four_channels(k)
-    adaptation_ratios[k] = 1.0f;
+    custom_wb[k] = 1.0f;
 
+  // colour (non-monochrome) (s)RAW image
   if(!dt_image_is_matrix_correction_supported(&self->dev->image_storage))
     return TRUE;
 
   // If we use D65 there are unchanged corrections
   if(_dev_is_D65_chroma(self->dev))
-    return FALSE;
+    return FALSE; // incoming data was processed using D65 coefficients
+
+  // if we get here, then either:
+  // -- late correction is set, but temperature.c does not use as-shot coefficients (should never happen)
+  // -- late correction is not set, and temperature.c does not use the D65 coefficients - the user provided
+  // their own, we are in 'caveats' workaround mode
 
   const gboolean valid_chroma =
     chr->D65coeffs[0] > 0.0 && chr->D65coeffs[1] > 0.0 && chr->D65coeffs[2] > 0.0;
@@ -633,10 +646,14 @@ static gboolean _calculate_adaptation_ratios(const dt_iop_module_t *self,
 
   // Otherwise - for example because the user made a correct preset, find the
   // WB adaptation ratio
+  // this is the 'workaround' mode described in 'caveats': the user made a preset from a D65-balanced screen
+  // that should be used to correct the wrong D65 coefficients
+  // for example, D65 multipliers might be (1/0.6, 1, 1/0.5)
+  // and the user's corrective multipliers (1/0.65, 1, 1/0.55).
   if(valid_chroma && changed_chroma)
   {
     for_four_channels(k)
-      adaptation_ratios[k] = (float)chr->D65coeffs[k] / chr->wb_coeffs[k];
+      custom_wb[k] = (float)chr->D65coeffs[k] / chr->wb_coeffs[k];
   }
   return FALSE;
 }
@@ -1170,7 +1187,7 @@ static inline void _auto_detect_WB(const float *const restrict in,
 
 static void _declare_cat_on_pipe(dt_iop_module_t *self, const gboolean preset)
 {
-  // Advertise in dev->chroma that we are doing chromatic adaptation here
+  // Avertise in dev->chroma that we are doing chromatic adaptation here
   // preset = TRUE allows to capture the CAT a priori at init time
   const dt_iop_channelmixer_rgb_params_t *p = self->params;
   const dt_iop_channelmixer_rgb_gui_data_t *g = self->gui_data;
@@ -2040,12 +2057,10 @@ static void _set_trouble_messages(dt_iop_module_t *self)
       problem1 ? "white balance applied twice, " : "",
       problem2 ? "double CAT applied, " : "",
       problem3 ? "white balance missing, " : "",
-      STR_YESNO(_dev_is_D65_chroma(dev)),
+      _dev_is_D65_chroma(dev) ? "YES" : "NO",
       chr->D65coeffs[0], chr->D65coeffs[1], chr->D65coeffs[2],
       chr->as_shot[0], chr->as_shot[1], chr->as_shot[2],
       img->id);
-
-  // FIXME kofa: reword all of these to cover the valid white balance modes
 
   if(problem2)
   {
@@ -2067,18 +2082,17 @@ static void _set_trouble_messages(dt_iop_module_t *self)
         _("white balance applied twice"),
         _("the color calibration module is enabled and already provides\n"
           "chromatic adaptation.\n"
-          "set the white balance here to 'camera reference' or to 'as shot to reference'\n"
+          "set the white balance here to camera reference (D65)\n"
           "or disable chromatic adaptation in color calibration."),
         NULL);
 
     dt_iop_set_module_trouble_message
       (self,
         _("white balance module error"),
-        _("the white balance module must be in one of the following modes:\n"
-          "'camera reference' or 'as shot to reference', or 'late correction'"
-          "must be checked. the current setting will cause issues here\n"
-          "with chromatic adaptation. either set white balance as described\n"
-          "above, or disable chromatic adaptation here."),
+        _("the white balance module is not using the camera\n"
+          "reference illuminant, which will cause issues here\n"
+          "with chromatic adaptation. either set it to reference\n"
+          "or disable chromatic adaptation here."),
         NULL);
     return;
   }
@@ -2090,10 +2104,8 @@ static void _set_trouble_messages(dt_iop_module_t *self)
         _("white balance missing"),
         _("this module is not providing a valid reference illuminant\n"
           "causing chromatic adaptation issues in color calibration.\n"
-          "enable this module and either set it up in a way compatible\n"
-          "with chromatic adaptation ('camera reference' 'as shot to\n"
-          "reference' mode, or check 'late correction'), or disable\n"
-          "chromatic adaptation in color calibration."),
+          "enable this module and either set it to reference\n"
+          "or disable chromatic adaptation in color calibration."),
         NULL);
 
     dt_iop_set_module_trouble_message
@@ -2211,10 +2223,10 @@ void process(dt_iop_module_t *self,
     // change here, so we can't update the defaults.  So we need to
     // re-run the detection at runtime…
     float x, y;
-    dt_aligned_pixel_t adaptation_ratios;
-    _calculate_adaptation_ratios(self, adaptation_ratios);
+    dt_aligned_pixel_t custom_wb;
+    _get_white_balance_coeff(self, custom_wb);
 
-    if(find_temperature_from_raw_coeffs(&(self->dev->image_storage), adaptation_ratios, &(x), &(y)))
+    if(find_temperature_from_raw_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
     {
       // Convert illuminant from xyY to XYZ
       dt_aligned_pixel_t XYZ;
@@ -2322,10 +2334,10 @@ int process_cl(dt_iop_module_t *self,
     // change here, so we can't update the defaults.  So we need to
     // re-run the detection at runtime…
     float x, y;
-    dt_aligned_pixel_t adaptation_ratios;
-    _calculate_adaptation_ratios(self, adaptation_ratios);
+    dt_aligned_pixel_t custom_wb;
+    _get_white_balance_coeff(self, custom_wb);
 
-    if(find_temperature_from_raw_coeffs(&(self->dev->image_storage), adaptation_ratios, &(x), &(y)))
+    if(find_temperature_from_raw_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
     {
       // Convert illuminant from xyY to XYZ
       dt_aligned_pixel_t XYZ;
@@ -2466,51 +2478,20 @@ static inline void _init_bounding_box(dt_iop_channelmixer_rgb_gui_data_t *g,
 {
   if(!g->checker_ready)
   {
-    const float handle_offset = 10.0f;
-
-    dt_develop_t *dev = darktable.develop;
-    dt_dev_viewport_t *port = &dev->full;
-
-    float x1 = handle_offset;
-    float y1 = handle_offset;
-    float x2 = width - handle_offset;
-    float y2 = height - handle_offset;
-
-    float zoom_x, zoom_y, boxw, boxh;
-
-    if(dt_dev_get_zoom_bounds(port, &zoom_x, &zoom_y, &boxw, &boxh))
-    {
-      // size of the view box
-      const float h_box = width * boxw;
-      const float v_box = height * boxh;
-      // size of the non visible borders
-      const float h_border = width - h_box;
-      const float v_border = height - v_box;
-
-      const float offx = (h_border / 2.0f) + (zoom_x * width);
-      const float offy = (v_border / 2.0f) + (zoom_y * height);
-
-      x1 = offx + handle_offset;
-      y1 = offy + handle_offset;
-      x2 = offx + h_box - handle_offset;
-      y2 = offy + v_box - handle_offset;
-    }
-
     // top left
-    g->box[0].x = x1;
-    g->box[0].y = y1;
+    g->box[0].x = g->box[0].y = 10.;
 
     // top right
-    g->box[1].x = x2;
-    g->box[1].y = y1;
+    g->box[1].x = (width - 10.);
+    g->box[1].y = g->box[0].y;
 
     // bottom right
-    g->box[2].x = x2;
-    g->box[2].y = y2;
+    g->box[2].x = g->box[1].x;
+    g->box[2].y = (width - 10.) * g->checker->ratio;
 
     // bottom left
-    g->box[3].x = x1;
-    g->box[3].y = y2;
+    g->box[3].x = g->box[0].x;
+    g->box[3].y = g->box[2].y;
 
     g->checker_ready = TRUE;
   }
@@ -2908,6 +2889,7 @@ static void _start_profiling_callback(GtkWidget *togglebutton, dt_iop_module_t *
 }
 
 static void _run_profile_callback(GtkWidget *widget,
+                                 GdkEventButton *event,
                                  dt_iop_module_t *self)
 {
   if(darktable.gui->reset) return;
@@ -2921,6 +2903,7 @@ static void _run_profile_callback(GtkWidget *widget,
 }
 
 static void _run_validation_callback(GtkWidget *widget,
+                                    GdkEventButton *event,
                                     dt_iop_module_t *self)
 {
   if(darktable.gui->reset) return;
@@ -2934,6 +2917,7 @@ static void _run_validation_callback(GtkWidget *widget,
 }
 
 static void _commit_profile_callback(GtkWidget *widget,
+                                     GdkEventButton *event,
                                      dt_iop_module_t *self)
 {
   if(darktable.gui->reset) return;
@@ -3113,10 +3097,12 @@ void commit_params(dt_iop_module_t *self,
   // find x y coordinates of illuminant for CIE 1931 2° observer
   float x = p->x;
   float y = p->y;
-  dt_aligned_pixel_t adaptation_ratios;
-  _calculate_adaptation_ratios(self, adaptation_ratios);
+  // wrong name: if we succeed (and return FALSE), custom_wb contains not direct WB multipliers, but rather
+  // multipliers to correct the D65 coefficients (in workaround mode)
+  dt_aligned_pixel_t custom_wb;
+  _get_white_balance_coeff(self, custom_wb);
   illuminant_to_xy(p->illuminant, &(self->dev->image_storage),
-                   adaptation_ratios, &x, &y, p->temperature, p->illum_fluo, p->illum_led);
+                   custom_wb, &x, &y, p->temperature, p->illum_fluo, p->illum_led);
 
   // if illuminant is set as camera, x and y are set on-the-fly at
   // commit time, so we need to set adaptation too
@@ -3558,9 +3544,9 @@ static gboolean _illuminant_color_draw(GtkWidget *widget,
   float x = p->x;
   float y = p->y;
   dt_aligned_pixel_t RGB = { 0 };
-  dt_aligned_pixel_t adaptation_ratios;
-  _calculate_adaptation_ratios(self, adaptation_ratios);
-  illuminant_to_xy(p->illuminant, &(self->dev->image_storage), adaptation_ratios,
+  dt_aligned_pixel_t custom_wb;
+  _get_white_balance_coeff(self, custom_wb);
+  illuminant_to_xy(p->illuminant, &(self->dev->image_storage), custom_wb,
                    &x, &y, p->temperature, p->illum_fluo, p->illum_led);
   illuminant_xy_to_RGB(x, y, RGB);
   cairo_set_source_rgb(cr, RGB[0], RGB[1], RGB[2]);
@@ -3661,10 +3647,10 @@ static void _update_approx_cct(const dt_iop_module_t *self)
 
   float x = p->x;
   float y = p->y;
-  dt_aligned_pixel_t adaptation_ratios;
-  _calculate_adaptation_ratios(self, adaptation_ratios);
+  dt_aligned_pixel_t custom_wb;
+  _get_white_balance_coeff(self, custom_wb);
   illuminant_to_xy(p->illuminant, &(self->dev->image_storage),
-                   adaptation_ratios, &x, &y, p->temperature, p->illum_fluo, p->illum_led);
+                   custom_wb, &x, &y, p->temperature, p->illum_fluo, p->illum_led);
 
   dt_illuminant_t test_illuminant;
   float t = 5000.f;
@@ -3898,14 +3884,10 @@ void reload_defaults(dt_iop_module_t *self)
   {
     d->adaptation = DT_ADAPTATION_CAT16;
 
-    dt_aligned_pixel_t adaptation_ratios;
-    if(!_calculate_adaptation_ratios(self, adaptation_ratios))
+    dt_aligned_pixel_t custom_wb;
+    if(!_get_white_balance_coeff(self, custom_wb))
     {
-      // FIXME kofa: need to handle the case of user WB multipliers
-      // currently, find_temperature_from_raw_coeffs uses the raw as-shot multipliers
-      // img->wb_coeffs; that check has to be factored out, so we can decide between
-      // DT_ILLUMINANT_CAMERA and DT_ILLUMINANT_FROM_WB
-      if(find_temperature_from_raw_coeffs(img, adaptation_ratios, &(d->x), &(d->y)))
+      if(find_temperature_from_raw_coeffs(img, custom_wb, &(d->x), &(d->y)))
         d->illuminant = DT_ILLUMINANT_CAMERA;
       _check_if_close_to_daylight(d->x, d->y,
                                   &(d->temperature), &(d->illuminant), &(d->adaptation));
@@ -4006,9 +3988,9 @@ void gui_changed(dt_iop_module_t *self,
         // illuminant = "as set in camera", temperature and
         // chromaticity are inited with the preset content when
         // illuminant is changed.
-        dt_aligned_pixel_t adaptation_ratios;
-        _calculate_adaptation_ratios(self, adaptation_ratios);
-        find_temperature_from_raw_coeffs(&(self->dev->image_storage), adaptation_ratios,
+        dt_aligned_pixel_t custom_wb;
+        _get_white_balance_coeff(self, custom_wb);
+        find_temperature_from_raw_coeffs(&(self->dev->image_storage), custom_wb,
                                          &(p->x), &(p->y));
         _check_if_close_to_daylight(p->x, p->y, &(p->temperature), NULL, &(p->adaptation));
       }
@@ -4023,10 +4005,10 @@ void gui_changed(dt_iop_module_t *self,
     if(p->illuminant == DT_ILLUMINANT_CAMERA)
     {
       // Get camera WB and update illuminant
-      dt_aligned_pixel_t adaptation_ratios;
-      _calculate_adaptation_ratios(self, adaptation_ratios);
+      dt_aligned_pixel_t custom_wb;
+      _get_white_balance_coeff(self, custom_wb);
       const gboolean found = find_temperature_from_raw_coeffs(&(self->dev->image_storage),
-                                                         adaptation_ratios, &(p->x), &(p->y));
+                                                         custom_wb, &(p->x), &(p->y));
       _check_if_close_to_daylight(p->x, p->y, &(p->temperature), NULL, &(p->adaptation));
 
       if(found)
@@ -4231,10 +4213,10 @@ static void _auto_set_illuminant(dt_iop_module_t *self,
     float x = p->x;
     float y = p->y;
     dt_adaptation_t adaptation = p->adaptation;
-    dt_aligned_pixel_t adaptation_ratios;
-    _calculate_adaptation_ratios(self, adaptation_ratios);
+    dt_aligned_pixel_t custom_wb;
+    _get_white_balance_coeff(self, custom_wb);
     illuminant_to_xy(p->illuminant, &(self->dev->image_storage),
-                     adaptation_ratios, &x, &y, p->temperature, p->illum_fluo, p->illum_led);
+                     custom_wb, &x, &y, p->temperature, p->illum_fluo, p->illum_led);
 
     // if illuminant is set as camera, x and y are set on-the-fly at
     // commit time, so we need to set adaptation too
@@ -4728,7 +4710,7 @@ void gui_init(dt_iop_module_t *self)
   g->button_commit = dtgtk_button_new(dtgtk_cairo_paint_check_mark, 0, NULL);
   dt_action_define_iop(self, N_("calibrate"), N_("accept"),
                        g->button_commit, &dt_action_def_button);
-  g_signal_connect(G_OBJECT(g->button_commit), "clicked",
+  g_signal_connect(G_OBJECT(g->button_commit), "button-press-event",
                    G_CALLBACK(_commit_profile_callback), (gpointer)self);
   gtk_widget_set_tooltip_text(g->button_commit,
                               _("accept the computed profile and set it in the module"));
@@ -4736,14 +4718,14 @@ void gui_init(dt_iop_module_t *self)
   g->button_profile = dtgtk_button_new(dtgtk_cairo_paint_refresh, 0, NULL);
   dt_action_define_iop(self, N_("calibrate"), N_("recompute"),
                        g->button_profile, &dt_action_def_button);
-  g_signal_connect(G_OBJECT(g->button_profile), "clicked",
+  g_signal_connect(G_OBJECT(g->button_profile), "button-press-event",
                    G_CALLBACK(_run_profile_callback), (gpointer)self);
   gtk_widget_set_tooltip_text(g->button_profile, _("recompute the profile"));
 
   g->button_validate = dtgtk_button_new(dtgtk_cairo_paint_softproof, 0, NULL);
   dt_action_define_iop(self, N_("calibrate"), N_("validate"),
                        g->button_validate, &dt_action_def_button);
-  g_signal_connect(G_OBJECT(g->button_validate), "clicked",
+  g_signal_connect(G_OBJECT(g->button_validate), "button-press-event",
                    G_CALLBACK(_run_validation_callback), (gpointer)self);
   gtk_widget_set_tooltip_text(g->button_validate, _("check the output delta E"));
 
