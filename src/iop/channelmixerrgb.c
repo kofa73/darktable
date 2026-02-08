@@ -2209,7 +2209,7 @@ void process(dt_iop_module_t *self,
     dt_aligned_pixel_t custom_wb;
     _get_white_balance_coeff(self, custom_wb);
 
-    if(find_temperature_from_raw_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
+    if(find_temperature_from_as_shot_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
     {
       // Convert illuminant from xyY to XYZ
       dt_aligned_pixel_t XYZ;
@@ -2320,7 +2320,7 @@ int process_cl(dt_iop_module_t *self,
     dt_aligned_pixel_t custom_wb;
     _get_white_balance_coeff(self, custom_wb);
 
-    if(find_temperature_from_raw_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
+    if(find_temperature_from_as_shot_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
     {
       // Convert illuminant from xyY to XYZ
       dt_aligned_pixel_t XYZ;
@@ -3897,7 +3897,7 @@ void reload_defaults(dt_iop_module_t *self)
     dt_aligned_pixel_t custom_wb;
     if(!_get_white_balance_coeff(self, custom_wb))
     {
-      if(find_temperature_from_raw_coeffs(img, custom_wb, &(d->x), &(d->y)))
+      if(find_temperature_from_as_shot_coeffs(img, custom_wb, &(d->x), &(d->y)))
         d->illuminant = DT_ILLUMINANT_CAMERA;
       _check_if_close_to_daylight(d->x, d->y,
                                   &(d->temperature), &(d->illuminant), &(d->adaptation));
@@ -4000,7 +4000,7 @@ void gui_changed(dt_iop_module_t *self,
         // illuminant is changed.
         dt_aligned_pixel_t custom_wb;
         _get_white_balance_coeff(self, custom_wb);
-        find_temperature_from_raw_coeffs(&(self->dev->image_storage), custom_wb,
+        find_temperature_from_as_shot_coeffs(&(self->dev->image_storage), custom_wb,
                                          &(p->x), &(p->y));
         _check_if_close_to_daylight(p->x, p->y, &(p->temperature), NULL, &(p->adaptation));
       }
@@ -4017,7 +4017,7 @@ void gui_changed(dt_iop_module_t *self,
       // Get camera WB and update illuminant
       dt_aligned_pixel_t custom_wb;
       _get_white_balance_coeff(self, custom_wb);
-      const gboolean found = find_temperature_from_raw_coeffs(&(self->dev->image_storage),
+      const gboolean found = find_temperature_from_as_shot_coeffs(&(self->dev->image_storage),
                                                          custom_wb, &(p->x), &(p->y));
       _check_if_close_to_daylight(p->x, p->y, &(p->temperature), NULL, &(p->adaptation));
 
