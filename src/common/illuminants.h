@@ -216,18 +216,15 @@ static inline void illuminant_CCT_to_RGB(const float t, dt_aligned_pixel_t RGB)
   illuminant_xy_to_RGB(x, y, RGB);
 }
 
-static inline gboolean find_temperature_from_wb_coeffs(const dt_image_t *img, const dt_aligned_pixel_t wb_coeffs,
-                                            float *chroma_x, float *chroma_y);
 
 // Fetch image from pipeline and read EXIF for camera RAW WB coeffs
-static inline gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t adaptation_ratios,
+static inline gboolean find_temperature_from_raw_coeffs(const dt_image_t *img, const dt_aligned_pixel_t custom_wb,
                                                    float *chroma_x, float *chroma_y);
 
 
 static inline int illuminant_to_xy(const dt_illuminant_t illuminant, // primary type of illuminant
                                    const dt_image_t *img,            // image container
-                                   const dt_aligned_pixel_t wb_coeffs,
-                                   const dt_aligned_pixel_t adaptation_ratios, // optional ratios to adapt camera WB
+                                   const dt_aligned_pixel_t custom_wb, // optional user-set WB coeffs
                                    float *x_out, float *y_out,       // chromaticity output
                                    const float t,                    // temperature in K, if needed
                                    const dt_illuminant_fluo_t fluo,  // sub-type of fluorescent illuminant, if needed
@@ -304,11 +301,13 @@ static inline int illuminant_to_xy(const dt_illuminant_t illuminant, // primary 
     {
       // Detect WB from RAW EXIF
       if(img)
-        if(find_temperature_from_as_shot_coeffs(img, adaptation_ratios, &x, &y)) break;
+        if(find_temperature_from_raw_coeffs(img, custom_wb, &x, &y)) break;
     }
-    case DT_ILLUMINANT_FROM_WB: {
+    case DT_ILLUMINANT_FROM_WB:
+    { // FIXME copy-paste
+      // Detect WB from RAW EXIF
       if(img)
-        if(find_temperature_from_wb_coeffs(img, wb_coeffs, &x, &y)) break;
+        if(find_temperature_from_raw_coeffs(img, custom_wb, &x, &y)) break;
     }
     case DT_ILLUMINANT_CUSTOM: // leave x and y as-is
     case DT_ILLUMINANT_DETECT_EDGES:
@@ -337,8 +336,6 @@ static inline void WB_coeffs_to_illuminant_xy(const float CAM_to_XYZ[4][3], cons
   dt_aligned_pixel_t XYZ, LMS;
   // Simulate white point, aka convert (1, 1, 1) in camera space to XYZ
   // warning : we multiply the transpose of CAM_to_XYZ  since the pseudoinverse transposes it
-  // if we're not in 'caveat' workaround mode, we'll push (1, 1, 1) through the matrix to find the
-  // XYZ of the illuminant
   XYZ[0] = CAM_to_XYZ[0][0] / WB[0] + CAM_to_XYZ[1][0] / WB[1] + CAM_to_XYZ[2][0] / WB[2];
   XYZ[1] = CAM_to_XYZ[0][1] / WB[0] + CAM_to_XYZ[1][1] / WB[1] + CAM_to_XYZ[2][1] / WB[2];
   XYZ[2] = CAM_to_XYZ[0][2] / WB[0] + CAM_to_XYZ[1][2] / WB[1] + CAM_to_XYZ[2][2] / WB[2];
@@ -395,10 +392,31 @@ static inline void matrice_pseudoinverse(float (*in)[3], float (*out)[3], int si
     }
 }
 
-// returns TRUE is OK, FALSE if failed
-static gboolean get_CAM_to_XYZ(const dt_image_t * img, float(* CAM_to_XYZ)[3])
+
+static gboolean find_temperature_from_raw_coeffs(const dt_image_t *img, const dt_aligned_pixel_t custom_wb,
+                                            float *chroma_x, float *chroma_y)
 {
-  // Get the camera input profile (matrice of primaries) - embedded or raw library DB
+  if(img == NULL) return FALSE;
+  if(!dt_image_is_matrix_correction_supported(img)) return FALSE;
+
+  gboolean has_valid_coeffs = TRUE;
+  const int num_coeffs = (img->flags & DT_IMAGE_4BAYER) ? 4 : 3;
+
+  // Check coeffs
+  for(int k = 0; has_valid_coeffs && k < num_coeffs; k++)
+    if(!dt_isnormal(img->wb_coeffs[k]) || img->wb_coeffs[k] == 0.0f) has_valid_coeffs = FALSE;
+
+  if(!has_valid_coeffs) return FALSE;
+
+  // Get white balance camera factors
+  dt_aligned_pixel_t WB = { img->wb_coeffs[0], img->wb_coeffs[1], img->wb_coeffs[2], img->wb_coeffs[3] };
+
+  // Adapt the camera coeffs with custom white balance if provided
+  // this can deal with WB coeffs that don't use the input matrix reference
+  if(custom_wb)
+    for(size_t k = 0; k < 4; k++) WB[k] *= custom_wb[k];
+
+  // Get the camera input profile (matrice of primaries)
   float XYZ_to_CAM[4][3];
   dt_mark_colormatrix_invalid(&XYZ_to_CAM[0][0]);
 
@@ -427,60 +445,21 @@ static gboolean get_CAM_to_XYZ(const dt_image_t * img, float(* CAM_to_XYZ)[3])
 
   if(!dt_is_valid_colormatrix(XYZ_to_CAM[0][0])) return FALSE;
 
+  // Bloody input matrices define XYZ -> CAM transform, as if we often needed camera profiles to output
+  // So we need to invert them. Here go your CPU cycles again.
+  float CAM_to_XYZ[4][3];
   dt_mark_colormatrix_invalid(&CAM_to_XYZ[0][0]);
   matrice_pseudoinverse(XYZ_to_CAM, CAM_to_XYZ, 3);
-  return dt_is_valid_colormatrix(CAM_to_XYZ[0][0]);
-}
-
-// returns FALSE if failed; TRUE if successful
-static gboolean find_temperature_from_wb_coeffs(const dt_image_t *img, const dt_aligned_pixel_t wb_coeffs,
-                                            float *chroma_x, float *chroma_y)
-{
-  if(img == NULL || wb_coeffs) return FALSE;
-  if(!dt_image_is_matrix_correction_supported(img)) return FALSE;
-
-  float CAM_to_XYZ[4][3];
-  if (!get_CAM_to_XYZ(img, CAM_to_XYZ)) {
-    return FALSE;
-  }
+  if(!dt_is_valid_colormatrix(CAM_to_XYZ[0][0])) return FALSE;
 
   float x, y;
-  WB_coeffs_to_illuminant_xy(CAM_to_XYZ, wb_coeffs, &x, &y);
+  WB_coeffs_to_illuminant_xy(CAM_to_XYZ, WB, &x, &y);
   *chroma_x = x;
   *chroma_y = y;
 
   return TRUE;
 }
 
-// returns FALSE if failed; TRUE if successful
-static gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t adaptation_ratios,
-                                            float *chroma_x, float *chroma_y)
-{
-  if(img == NULL) return FALSE;
-
-  gboolean has_valid_coeffs = TRUE;
-  const int num_coeffs = (img->flags & DT_IMAGE_4BAYER) ? 4 : 3;
-
-  // Check coeffs
-  for(int k = 0; has_valid_coeffs && k < num_coeffs; k++)
-    if(!dt_isnormal(img->wb_coeffs[k]) || img->wb_coeffs[k] == 0.0f) has_valid_coeffs = FALSE;
-
-  if(!has_valid_coeffs) return FALSE;
-
-  // Get as-shot white balance camera factors (from raw)
-  // component wise raw-RGB * wb_coeffs should provide R=G=B for a neutral patch under
-  // the scene illuminant
-  dt_aligned_pixel_t WB = { img->wb_coeffs[0], img->wb_coeffs[1], img->wb_coeffs[2], img->wb_coeffs[3] };
-
-  // Adapt the camera coeffs with custom D65 coefficients if provided ('caveats' workaround)
-  // this can deal with WB coeffs that don't use the input matrix reference
-  // adaptation_ratios[k] = chr->D65coeffs[k] / chr->wb_coeffs[k]
-  if(adaptation_ratios)
-    for(size_t k = 0; k < 4; k++) WB[k] *= adaptation_ratios[k];
-  // for a neutral surface, raw RGB * img->wb_coeffs would produce neutral R=G=B
-
-  return find_temperature_from_wb_coeffs(img, WB, chroma_x, chroma_y);
-}
 
 DT_OMP_DECLARE_SIMD()
 static inline float planckian_normal(const float x, const float t)
