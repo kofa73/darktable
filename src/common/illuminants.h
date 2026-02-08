@@ -220,17 +220,18 @@ static inline gboolean find_temperature_from_wb_coeffs(const dt_image_t *img, co
                                             float *chroma_x, float *chroma_y);
 
 // Fetch image from pipeline and read EXIF for camera RAW WB coeffs
-static inline gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t custom_wb,
+static inline gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t correction_ratios,
                                                    float *chroma_x, float *chroma_y);
 
 
-static inline int illuminant_to_xy(const dt_illuminant_t illuminant, // primary type of illuminant
-                                   const dt_image_t *img,            // image container
-                                   const dt_aligned_pixel_t custom_wb, // optional user-set WB coeffs
-                                   float *x_out, float *y_out,       // chromaticity output
-                                   const float t,                    // temperature in K, if needed
-                                   const dt_illuminant_fluo_t fluo,  // sub-type of fluorescent illuminant, if needed
-                                   const dt_illuminant_led_t iled)   // sub-type of led illuminant, if needed
+static inline int illuminant_to_xy(const dt_illuminant_t illuminant,           // primary type of illuminant
+                                   const dt_image_t *img,                      // image container
+                                   const dt_aligned_pixel_t correction_ratios, // optional D65 correction ratios derived from user-set coefficients
+                                   const dt_aligned_pixel_t wb_coeffs,         // optional user-set WB coeffs (absolute)
+                                   float *x_out, float *y_out,                 // chromaticity output
+                                   const float t,                              // temperature in K, if needed
+                                   const dt_illuminant_fluo_t fluo,            // sub-type of fluorescent illuminant, if needed
+                                   const dt_illuminant_led_t iled)             // sub-type of led illuminant, if needed
 {
   /**
    * Compute the x and y chromaticity coordinates in Yxy spaces for standard illuminants
@@ -301,15 +302,15 @@ static inline int illuminant_to_xy(const dt_illuminant_t illuminant, // primary 
     }
     case DT_ILLUMINANT_CAMERA:
     {
-      // Detect WB from RAW EXIF
+      // Detect WB from RAW EXIF, correcting with D65/wb_coeff ratios
       if(img)
-        if(find_temperature_from_as_shot_coeffs(img, custom_wb, &x, &y)) break;
+        if(find_temperature_from_as_shot_coeffs(img, correction_ratios, &x, &y)) break;
     }
     case DT_ILLUMINANT_FROM_WB:
-    { // FIXME copy-paste
-      // Detect WB from RAW EXIF
+    {
+      // Detect WB from user-provided coefficients
       if(img)
-        if(find_temperature_from_as_shot_coeffs(img, custom_wb, &x, &y)) break;
+        if(find_temperature_from_wb_coeffs(img, wb_coeffs, &x, &y)) break;
     }
     case DT_ILLUMINANT_CUSTOM: // leave x and y as-is
     case DT_ILLUMINANT_DETECT_EDGES:
@@ -453,7 +454,7 @@ static gboolean find_temperature_from_wb_coeffs(const dt_image_t *img, const dt_
 }
 
 // returns FALSE if failed; TRUE if successful
-static gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t custom_wb,
+static gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t correction_ratios,
                                             float *chroma_x, float *chroma_y)
 {
   if(img == NULL) return FALSE;
@@ -475,8 +476,8 @@ static gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, cons
   // Adapt the camera coeffs with custom D65 coefficients if provided ('caveats' workaround)
   // this can deal with WB coeffs that don't use the input matrix reference
   // adaptation_ratios[k] = chr->D65coeffs[k] / chr->wb_coeffs[k]
-  if(custom_wb)
-    for(size_t k = 0; k < 4; k++) WB[k] *= custom_wb[k];
+  if(correction_ratios)
+    for(size_t k = 0; k < 4; k++) WB[k] *= correction_ratios[k];
   // for a neutral surface, raw RGB * img->wb_coeffs would produce neutral R=G=B
 
   return find_temperature_from_wb_coeffs(img, WB, chroma_x, chroma_y);
