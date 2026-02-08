@@ -2195,8 +2195,7 @@ void process(dt_iop_module_t *self,
 #endif
   }
 
-  if(data->illuminant_type == DT_ILLUMINANT_CAMERA || data->illuminant_type == DT_ILLUMINANT_FROM_WB)
-  {
+  if(data->illuminant_type == DT_ILLUMINANT_CAMERA) {
     // The camera illuminant is a behaviour rather than a preset of
     // values: it uses whatever is in the RAW EXIF. But it depends on
     // what temperature.c is doing and needs to be updated
@@ -2210,6 +2209,21 @@ void process(dt_iop_module_t *self,
     _get_white_balance_coeff(self, custom_wb);
 
     if(find_temperature_from_as_shot_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
+    {
+      // Convert illuminant from xyY to XYZ
+      dt_aligned_pixel_t XYZ;
+      illuminant_xy_to_XYZ(x, y, XYZ);
+
+      // Convert illuminant from XYZ to Bradford modified LMS
+      convert_any_XYZ_to_LMS(XYZ, data->illuminant, data->adaptation);
+      data->illuminant[3] = 0.f;
+    }
+  }
+  else if(data->illuminant_type == DT_ILLUMINANT_FROM_WB)
+  {
+    float x, y;
+
+    if(find_temperature_from_wb_coeffs(&(self->dev->image_storage), self->dev->chroma.wb_coeffs, &(x), &(y)))
     {
       // Convert illuminant from xyY to XYZ
       dt_aligned_pixel_t XYZ;
@@ -2306,7 +2320,7 @@ int process_cl(dt_iop_module_t *self,
   if(piece->pipe->type & DT_DEV_PIXELPIPE_PREVIEW)
     _declare_cat_on_pipe(self, FALSE);
 
-  if(d->illuminant_type == DT_ILLUMINANT_CAMERA || d->illuminant_type == DT_ILLUMINANT_FROM_WB)
+  if(d->illuminant_type == DT_ILLUMINANT_CAMERA)
   {
     // The camera illuminant is a behaviour rather than a preset of
     // values: it uses whatever is in the RAW EXIF. But it depends on
@@ -2321,6 +2335,29 @@ int process_cl(dt_iop_module_t *self,
     _get_white_balance_coeff(self, custom_wb);
 
     if(find_temperature_from_as_shot_coeffs(&(self->dev->image_storage), custom_wb, &(x), &(y)))
+    {
+      // Convert illuminant from xyY to XYZ
+      dt_aligned_pixel_t XYZ;
+      illuminant_xy_to_XYZ(x, y, XYZ);
+
+      // Convert illuminant from XYZ to Bradford modified LMS
+      convert_any_XYZ_to_LMS(XYZ, d->illuminant, d->adaptation);
+      d->illuminant[3] = 0.f;
+    }
+  }
+  else if(d->illuminant_type == DT_ILLUMINANT_FROM_WB)
+  {
+    // The camera illuminant is a behaviour rather than a preset of
+    // values: it uses whatever is in the RAW EXIF. But it depends on
+    // what temperature.c is doing and needs to be updated
+    // accordingly, to give a consistent result.  We initialise the
+    // CAT defaults using the temperature coeffs at startup, but if
+    // temperature is changed later, we get no notification of the
+    // change here, so we can't update the defaults.  So we need to
+    // re-run the detection at runtime…
+    float x, y;
+
+    if(find_temperature_from_wb_coeffs(&(self->dev->image_storage), self->dev->chroma.wb_coeffs, &(x), &(y)))
     {
       // Convert illuminant from xyY to XYZ
       dt_aligned_pixel_t XYZ;
@@ -3989,7 +4026,7 @@ void gui_changed(dt_iop_module_t *self,
     if(previous)
     {
       const dt_illuminant_t *prev_illuminant = (dt_illuminant_t *)previous;
-      if(*prev_illuminant == DT_ILLUMINANT_CAMERA || *prev_illuminant == DT_ILLUMINANT_FROM_WB)
+      if(*prev_illuminant == DT_ILLUMINANT_CAMERA)
       {
         // If illuminant was previously set with "as set in camera",
         // when changing it, we need to ensure the temperature and
@@ -4004,6 +4041,19 @@ void gui_changed(dt_iop_module_t *self,
                                          &(p->x), &(p->y));
         _check_if_close_to_daylight(p->x, p->y, &(p->temperature), NULL, &(p->adaptation));
       }
+      if(*prev_illuminant == DT_ILLUMINANT_FROM_WB)
+      {
+        // If illuminant was previously set with "as set in camera",
+        // when changing it, we need to ensure the temperature and
+        // chromaticity are inited with the correct values taken from
+        // camera EXIF.  Otherwise, if using a preset defining
+        // illuminant = "as set in camera", temperature and
+        // chromaticity are inited with the preset content when
+        // illuminant is changed.
+        find_temperature_from_wb_coeffs(&(self->dev->image_storage), self->dev->chroma.wb_coeffs,
+                                         &(p->x), &(p->y));
+        _check_if_close_to_daylight(p->x, p->y, &(p->temperature), NULL, &(p->adaptation));
+      }
     }
 
     if(p->illuminant == DT_ILLUMINANT_D)
@@ -4012,7 +4062,7 @@ void gui_changed(dt_iop_module_t *self,
     if(p->illuminant == DT_ILLUMINANT_BB)
       p->temperature = g->last_bb_temperature;
 
-    if(p->illuminant == DT_ILLUMINANT_CAMERA || p->illuminant == DT_ILLUMINANT_FROM_WB)
+    if(p->illuminant == DT_ILLUMINANT_CAMERA)
     {
       // Get camera WB and update illuminant
       dt_aligned_pixel_t custom_wb;
@@ -4023,6 +4073,15 @@ void gui_changed(dt_iop_module_t *self,
 
       if(found)
         dt_control_log(_("white balance successfully extracted from raw image"));
+    }
+    if(p->illuminant == DT_ILLUMINANT_FROM_WB)
+    {
+      const gboolean found = find_temperature_from_wb_coeffs(&(self->dev->image_storage),
+                                                         self->dev->chroma.wb_coeffs, &(p->x), &(p->y));
+      _check_if_close_to_daylight(p->x, p->y, &(p->temperature), NULL, &(p->adaptation));
+
+      if(found)
+        dt_control_log(_("white balance successfully extracted from white balance module"));
     }
 #ifdef AI_ACTIVATED
     else if(p->illuminant == DT_ILLUMINANT_DETECT_EDGES
