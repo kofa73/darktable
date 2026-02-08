@@ -45,7 +45,7 @@ Important data structures:
 
 The 'caveat workaround':
 - the XYZ->CAM matrix, and therefore the values derived from it (CAM_to_XYZ, CAM_D65, and the 'reference' multipliers) may be wrong (applying the reference multipliers to the **actual** D65 CAM (RGB) response will not result in (1, 1, 1). Suppose the **bad** characterisation matrix projects `XYZ_D65` to `CAM_D65_bad = (0.6, 1, 0.5)`. The **calculated** reference multipliers `D65coeffs = (1 / 0.6, 1 / 1, 1 / 0.5) = (1,67, 1, 2)`) are also wrong, leading to colour casts / incorrect white balance.
-- to fix this, the user may define their own corrective multipliers, say `dev->chroma->wb_coeffs = (1.7, 1, 1.95)`, corresponding to the actual native D65 response of `CAM_D65_correct = (1 / 1.7, 1, 1 / 1.95) = (0.588, 1, 0.513)`. 
+- to fix this, the user may define their own corrective multipliers, say `dev->chroma->wb_coeffs = (1.7, 1, 1.95)`, corresponding to the actual native D65 response of `CAM_D65_correct = (1 / 1.7, 1, 1 / 1.95) = (0.588, 1, 0.513)`. The documentation suggests taking a photo of a screen carefully calibrated for D65 to obtain these.
 - suppose the scene contains such a pixel, `CAM_D65_correct = (0.588, 1, 0.513)`
 - it will be mapped to (1, 1, 1) by the user's multipliers in `dev->chroma->wb_coeffs`
 - `colorin.c` then applies the profile matrix `M_profile`, derived from the **bad** characterisation matrix (`M_profile = CAM_to_XYZ * diag(CAM_D65) = inv(XYZ->CAM) * diag(CAM_D65)`). The resulting `XYZ` is still that of D65, because `M_profile` maps `RGB=(1, 1, 1)` to `XYZ_D65`.
@@ -71,21 +71,6 @@ Important code:
 
 matrix in `colorin.c`:
 - `commit_params` uses dt_colorspaces_create_xyzimatrix_profile (either using the embedded `d65_color_matrix` or falling back to `adobe_XYZ_to_CAM` from the DB) to create the  
-
-D65 multipliers:
-Normally, we can push the D65 WP XYZ coordinates through the XYZ -> RGB camera characterisation matrix to get the camera's native response to D65 light (e.g. `CAM_D65 = (0.6, 1, 0.5)`).
-We can then find the WB coefficients that neutralise that response (making R=G=B=1):
-`img->wb_coeffs = (1 / CAM_D65_R, 1 / CAM_D65_G, 1 / CAM_D65_B)`.
-This is the calculation done in `temperature.c#_calculate_bogus_daylight_wb.`
-These are the multipliers used in 'camera reference' mode (e.g. 1.67, 1, 2).
-
-However, as described in the 'caveats' workaround in the docs, if the multipliers are wonky, the user may take a photo of a D65-calibrated screen, and pick the WB multipliers from there, which can be used instead. In this mode, 'late correction' must not be checked by the user, so the pipeline remains in 'D65 reference' mode, but uses the right multipliers (which could be e.g. 1.7, 1, 1.95 or some other triplet). A warning will be displayed, but that's OK.
-
-Using the examples above (wrong camera multipliers: `dev->chroma->D65coeffs = (1.67, 1, 2)`, correct multipliers from user: `dev->chroma->wb_coeffs = (1.7, 1, 1.95)`):
-- Suppose we have a shot of a neutral target under D65 and the user's corrective multipliers are used.
-- The camera's reading of that is `(1/1.7, 1, 1/1.95)` (that's how we found the user multipliers).
-- In `temperature.c`, we apply the user multipliers `dev->chroma->wb_coeffs = (1.7, 1, 1.95)`, so get (1, 1, 1).
-- `colorin.c` applies the 
 
 
 What should happen in channelmixerrgb.c / illuminants.h

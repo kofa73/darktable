@@ -216,14 +216,17 @@ static inline void illuminant_CCT_to_RGB(const float t, dt_aligned_pixel_t RGB)
   illuminant_xy_to_RGB(x, y, RGB);
 }
 
+static inline gboolean find_temperature_from_wb_coeffs(const dt_image_t *img, const dt_aligned_pixel_t wb_coeffs,
+                                            float *chroma_x, float *chroma_y);
 
 // Fetch image from pipeline and read EXIF for camera RAW WB coeffs
-static inline gboolean find_temperature_from_raw_coeffs(const dt_image_t *img, const dt_aligned_pixel_t adaptation_ratios,
+static inline gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t adaptation_ratios,
                                                    float *chroma_x, float *chroma_y);
 
 
 static inline int illuminant_to_xy(const dt_illuminant_t illuminant, // primary type of illuminant
                                    const dt_image_t *img,            // image container
+                                   const dt_aligned_pixel_t wb_coeffs,
                                    const dt_aligned_pixel_t adaptation_ratios, // optional ratios to adapt camera WB
                                    float *x_out, float *y_out,       // chromaticity output
                                    const float t,                    // temperature in K, if needed
@@ -301,12 +304,11 @@ static inline int illuminant_to_xy(const dt_illuminant_t illuminant, // primary 
     {
       // Detect WB from RAW EXIF
       if(img)
-        if(find_temperature_from_raw_coeffs(img, adaptation_ratios, &x, &y)) break;
+        if(find_temperature_from_as_shot_coeffs(img, adaptation_ratios, &x, &y)) break;
     }
     case DT_ILLUMINANT_FROM_WB: {
-      // FIXME copy-paste
       if(img)
-        if(find_temperature_from_raw_coeffs(img, adaptation_ratios, &x, &y)) break;
+        if(find_temperature_from_wb_coeffs(img, wb_coeffs, &x, &y)) break;
     }
     case DT_ILLUMINANT_CUSTOM: // leave x and y as-is
     case DT_ILLUMINANT_DETECT_EDGES:
@@ -431,11 +433,30 @@ static gboolean get_CAM_to_XYZ(const dt_image_t * img, float(* CAM_to_XYZ)[3])
 }
 
 // returns FALSE if failed; TRUE if successful
-static gboolean find_temperature_from_raw_coeffs(const dt_image_t *img, const dt_aligned_pixel_t adaptation_ratios,
+static gboolean find_temperature_from_wb_coeffs(const dt_image_t *img, const dt_aligned_pixel_t wb_coeffs,
+                                            float *chroma_x, float *chroma_y)
+{
+  if(img == NULL || wb_coeffs) return FALSE;
+  if(!dt_image_is_matrix_correction_supported(img)) return FALSE;
+
+  float CAM_to_XYZ[4][3];
+  if (!get_CAM_to_XYZ(img, CAM_to_XYZ)) {
+    return FALSE;
+  }
+
+  float x, y;
+  WB_coeffs_to_illuminant_xy(CAM_to_XYZ, wb_coeffs, &x, &y);
+  *chroma_x = x;
+  *chroma_y = y;
+
+  return TRUE;
+}
+
+// returns FALSE if failed; TRUE if successful
+static gboolean find_temperature_from_as_shot_coeffs(const dt_image_t *img, const dt_aligned_pixel_t adaptation_ratios,
                                             float *chroma_x, float *chroma_y)
 {
   if(img == NULL) return FALSE;
-  if(!dt_image_is_matrix_correction_supported(img)) return FALSE;
 
   gboolean has_valid_coeffs = TRUE;
   const int num_coeffs = (img->flags & DT_IMAGE_4BAYER) ? 4 : 3;
@@ -449,7 +470,6 @@ static gboolean find_temperature_from_raw_coeffs(const dt_image_t *img, const dt
   // Get as-shot white balance camera factors (from raw)
   // component wise raw-RGB * wb_coeffs should provide R=G=B for a neutral patch under
   // the scene illuminant
-  // FIXME: we need to be able to process **any** coefficients, not just those from the EXIF
   dt_aligned_pixel_t WB = { img->wb_coeffs[0], img->wb_coeffs[1], img->wb_coeffs[2], img->wb_coeffs[3] };
 
   // Adapt the camera coeffs with custom D65 coefficients if provided ('caveats' workaround)
@@ -458,21 +478,9 @@ static gboolean find_temperature_from_raw_coeffs(const dt_image_t *img, const dt
   if(adaptation_ratios)
     for(size_t k = 0; k < 4; k++) WB[k] *= adaptation_ratios[k];
   // for a neutral surface, raw RGB * img->wb_coeffs would produce neutral R=G=B
-  // FIXME kofa: what do we calculate here by applying the adaptation ratios above?
 
-  float CAM_to_XYZ[4][3];
-  if (!get_CAM_to_XYZ(img, CAM_to_XYZ)) {
-    return FALSE;
-  }
-
-  float x, y;
-  WB_coeffs_to_illuminant_xy(CAM_to_XYZ, WB, &x, &y);
-  *chroma_x = x;
-  *chroma_y = y;
-
-  return TRUE;
+  return find_temperature_from_wb_coeffs(img, WB, chroma_x, chroma_y);
 }
-
 
 DT_OMP_DECLARE_SIMD()
 static inline float planckian_normal(const float x, const float t)
