@@ -806,18 +806,7 @@ void tiling_callback(dt_iop_module_t *self,
 #define KAPPA 0.25f // 0.25 if h = 1, 1 if h = 2
 
 
-DT_OMP_DECLARE_SIMD(aligned(pixels:64) aligned(xy:16) uniform(pixels))
-static inline void find_gradients(const dt_aligned_pixel_t pixels[9],
-                                  dt_aligned_pixel_t xy[2])
-{
-  // Compute the gradient with centered finite differences in a 3×3 stencil
-  // warning : x is vertical, y is horizontal
-  for_each_channel(c,aligned(pixels:64) aligned(xy))
-  {
-    xy[0][c] = (pixels[7][c] - pixels[1][c]) / 2.f;
-    xy[1][c] = (pixels[5][c] - pixels[3][c]) / 2.f;
-  }
-}
+
 
 DT_OMP_DECLARE_SIMD(aligned(a, c2, cos_theta_sin_theta, cos_theta2, sin_theta2:16))
 static inline void rotation_matrix_isophote(const dt_aligned_pixel_t c2,
@@ -1082,30 +1071,28 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         // c² in https://www.researchgate.net/publication/220663968
         dt_aligned_pixel_t c2[4];
         // build the local anisotropic convolution filters for gradients and laplacians
-        dt_aligned_pixel_t gradient[2], laplacian[2]; // x, y for each channel
-        find_gradients(neighbour_pixel_LF, gradient);
-        find_gradients(neighbour_pixel_HF, laplacian);
-
         dt_aligned_pixel_t cos_theta_grad_sq;
         dt_aligned_pixel_t sin_theta_grad_sq;
         dt_aligned_pixel_t cos_theta_sin_theta_grad;
         for_each_channel(c)
         {
-          float magnitude_grad = sqrtf(sqf(gradient[0][c]) + sqf(gradient[1][c]));
+          float grad_x = (neighbour_pixel_LF[7][c] - neighbour_pixel_LF[1][c]) * 0.5f;
+          float grad_y = (neighbour_pixel_LF[5][c] - neighbour_pixel_LF[3][c]) * 0.5f;
+          float magnitude_grad = sqrtf(sqf(grad_x) + sqf(grad_y));
           c2[0][c] = -magnitude_grad * anisotropy[0];
           c2[2][c] = -magnitude_grad * anisotropy[2];
           // Compute cos(arg(grad)) = dx / hypot - force arg(grad) = 0 if hypot == 0
-          gradient[0][c] = (magnitude_grad != 0.f)
-            ? gradient[0][c] / magnitude_grad
+          float cos_grad = (magnitude_grad != 0.f)
+            ? grad_x / magnitude_grad
             : 1.f; // cos(0)
           // Compute sin (arg(grad))= dy / hypot - force arg(grad) = 0 if hypot == 0
-          gradient[1][c] = (magnitude_grad != 0.f)
-            ? gradient[1][c] / magnitude_grad
+          float sin_grad = (magnitude_grad != 0.f)
+            ? grad_y / magnitude_grad
             : 0.f; // sin(0)
           // Warning : now gradient = { cos(arg(grad)) , sin(arg(grad)) }
-          cos_theta_grad_sq[c] = sqf(gradient[0][c]);
-          sin_theta_grad_sq[c] = sqf(gradient[1][c]);
-          cos_theta_sin_theta_grad[c] = gradient[0][c] * gradient[1][c];
+          cos_theta_grad_sq[c] = sqf(cos_grad);
+          sin_theta_grad_sq[c] = sqf(sin_grad);
+          cos_theta_sin_theta_grad[c] = cos_grad * sin_grad;
         }
 
         dt_aligned_pixel_t cos_theta_lapl_sq;
@@ -1113,21 +1100,23 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         dt_aligned_pixel_t cos_theta_sin_theta_lapl;
         for_each_channel(c)
         {
-          float magnitude_lapl = sqrtf(sqf(laplacian[0][c]) + sqf(laplacian[1][c]));
+          float lapl_x = (neighbour_pixel_HF[7][c] - neighbour_pixel_HF[1][c]) * 0.5f;
+          float lapl_y = (neighbour_pixel_HF[5][c] - neighbour_pixel_HF[3][c]) * 0.5f;
+          float magnitude_lapl = sqrtf(sqf(lapl_x) + sqf(lapl_y));
           c2[1][c] = -magnitude_lapl * anisotropy[1];
           c2[3][c] = -magnitude_lapl * anisotropy[3];
           // Compute cos(arg(lapl)) = dx / hypot - force arg(lapl) = 0 if hypot == 0
-          laplacian[0][c] = (magnitude_lapl != 0.f)
-            ? laplacian[0][c] / magnitude_lapl
+          float cos_lapl = (magnitude_lapl != 0.f)
+            ? lapl_x / magnitude_lapl
             : 1.f; // cos(0)
           // Compute sin (arg(lapl))= dy / hypot - force arg(lapl) = 0 if hypot == 0
-          laplacian[1][c] = (magnitude_lapl != 0.f)
-            ? laplacian[1][c] / magnitude_lapl
+          float sin_lapl = (magnitude_lapl != 0.f)
+            ? lapl_y / magnitude_lapl
             : 0.f; // sin(0)
           // Warning : now laplacian = { cos(arg(lapl)) , sin(arg(lapl)) }
-          cos_theta_lapl_sq[c] = sqf(laplacian[0][c]);
-          sin_theta_lapl_sq[c] = sqf(laplacian[1][c]);
-          cos_theta_sin_theta_lapl[c] = laplacian[0][c] * laplacian[1][c];
+          cos_theta_lapl_sq[c] = sqf(cos_lapl);
+          sin_theta_lapl_sq[c] = sqf(sin_lapl);
+          cos_theta_sin_theta_lapl[c] = cos_lapl * sin_lapl;
         }
 
         // elements of c2 need to be expf(mag*anistropy), but we
