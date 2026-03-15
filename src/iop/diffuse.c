@@ -946,6 +946,64 @@ static inline void compute_kernel(const dt_aligned_pixel_t c2,
   }
 }
 
+// Compute convolution directly using kernel symmetries, avoiding
+// intermediate 9-element kernel arrays.
+// Anisotropic kernel: b11*(N0-N2-N6+N8) + a22*(N1+N7) + a11*(N3+N5) - 2*(a11+a22)*N4
+// Isotropic kernel:   0.25*(N0+N2+N6+N8) + 0.5*(N1+N7+N3+N5) - 3*N4
+DT_OMP_DECLARE_SIMD(aligned(c2, cos_theta_sin_theta, cos_theta2, sin_theta2: 16) \
+                     aligned(cross_corners, sum_corners, sum_tb, sum_lr, center, result: 16) \
+                     uniform(isotropy_type))
+static inline void compute_convolution_direct(
+    const dt_aligned_pixel_t c2,
+    const dt_aligned_pixel_t cos_theta_sin_theta,
+    const dt_aligned_pixel_t cos_theta2,
+    const dt_aligned_pixel_t sin_theta2,
+    const dt_isotropy_t isotropy_type,
+    const dt_aligned_pixel_t cross_corners,
+    const dt_aligned_pixel_t sum_corners,
+    const dt_aligned_pixel_t sum_tb,
+    const dt_aligned_pixel_t sum_lr,
+    const dt_aligned_pixel_t center,
+    dt_aligned_pixel_t result)
+{
+  switch(isotropy_type)
+  {
+    case(DT_ISOTROPY_ISOTROPE):
+    default:
+    {
+      for_each_channel(c)
+      {
+        result[c] = 0.25f * sum_corners[c] + 0.5f * (sum_tb[c] + sum_lr[c]) - 3.f * center[c];
+      }
+      break;
+    }
+    case(DT_ISOTROPY_ISOPHOTE):
+    {
+      for_each_channel(c)
+      {
+        const float a11 = cos_theta2[c] + c2[c] * sin_theta2[c];
+        const float a22 = c2[c] * cos_theta2[c] + sin_theta2[c];
+        const float b11 = (c2[c] - 1.0f) * cos_theta_sin_theta[c] * 0.5f;
+        result[c] = b11 * cross_corners[c] + a22 * sum_tb[c] + a11 * sum_lr[c]
+                    - 2.0f * (a11 + a22) * center[c];
+      }
+      break;
+    }
+    case(DT_ISOTROPY_GRADIENT):
+    {
+      for_each_channel(c)
+      {
+        const float a11 = c2[c] * cos_theta2[c] + sin_theta2[c];
+        const float a22 = cos_theta2[c] + c2[c] * sin_theta2[c];
+        const float b11 = (1.0f - c2[c]) * cos_theta_sin_theta[c] * 0.5f;
+        result[c] = b11 * cross_corners[c] + a22 * sum_tb[c] + a11 * sum_lr[c]
+                    - 2.0f * (a11 + a22) * center[c];
+      }
+      break;
+    }
+  }
+}
+
 static inline void heat_PDE_diffusion(const float *const restrict high_freq,
                                       const float *const restrict low_freq,
                                       const uint8_t *const restrict mask,
@@ -1079,33 +1137,53 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
           dt_vector_exp(c2[k], c2[k]);
         }
 
-        dt_aligned_pixel_t kern_first[9], kern_second[9], kern_third[9], kern_fourth[9];
-        compute_kernel(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq,
-                       sin_theta_grad_sq, isotropy_type[0],
-                       kern_first);
-        compute_kernel(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq,
-                       sin_theta_lapl_sq, isotropy_type[1],
-                       kern_second);
-        compute_kernel(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq,
-                       sin_theta_grad_sq, isotropy_type[2],
-                       kern_third);
-        compute_kernel(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq,
-                       sin_theta_lapl_sq, isotropy_type[3],
-                       kern_fourth);
+        // Pre-compute symmetric pixel combinations to exploit kernel symmetries.
+        // Instead of building 9-element kernel arrays and doing 9 multiplies per order,
+        // we use 4 unique weights with pre-combined neighbor pixels.
+        dt_aligned_pixel_t LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr;
+        dt_aligned_pixel_t HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr;
+        for_each_channel(c, aligned(neighbour_pixel_LF, neighbour_pixel_HF))
+        {
+          const float lf08 = neighbour_pixel_LF[0][c] + neighbour_pixel_LF[8][c];
+          const float lf26 = neighbour_pixel_LF[2][c] + neighbour_pixel_LF[6][c];
+          LF_cross[c] = lf08 - lf26;
+          LF_sum_corners[c] = lf08 + lf26;
+          LF_sum_tb[c] = neighbour_pixel_LF[1][c] + neighbour_pixel_LF[7][c];
+          LF_sum_lr[c] = neighbour_pixel_LF[3][c] + neighbour_pixel_LF[5][c];
 
+          const float hf08 = neighbour_pixel_HF[0][c] + neighbour_pixel_HF[8][c];
+          const float hf26 = neighbour_pixel_HF[2][c] + neighbour_pixel_HF[6][c];
+          HF_cross[c] = hf08 - hf26;
+          HF_sum_corners[c] = hf08 + hf26;
+          HF_sum_tb[c] = neighbour_pixel_HF[1][c] + neighbour_pixel_HF[7][c];
+          HF_sum_lr[c] = neighbour_pixel_HF[3][c] + neighbour_pixel_HF[5][c];
+        }
+
+        // Compute convolutions directly using kernel symmetries
         dt_aligned_pixel_t derivatives[4] = { { 0.f } };
+        compute_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq,
+                                   sin_theta_grad_sq, isotropy_type[0],
+                                   LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr,
+                                   neighbour_pixel_LF[4], derivatives[0]);
+        compute_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq,
+                                   sin_theta_lapl_sq, isotropy_type[1],
+                                   LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr,
+                                   neighbour_pixel_LF[4], derivatives[1]);
+        compute_convolution_direct(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq,
+                                   sin_theta_grad_sq, isotropy_type[2],
+                                   HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr,
+                                   neighbour_pixel_HF[4], derivatives[2]);
+        compute_convolution_direct(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq,
+                                   sin_theta_lapl_sq, isotropy_type[3],
+                                   HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr,
+                                   neighbour_pixel_HF[4], derivatives[3]);
+
+        // Compute the variance for regularization
         dt_aligned_pixel_t variance = { 0.f };
-        // convolve filters and compute the variance and the regularization term
         for(size_t k = 0; k < 9; k++)
         {
-          for_each_channel(c,aligned(derivatives,neighbour_pixel_LF,kern_first,kern_second))
-          {
-            derivatives[0][c] += kern_first[k][c] * neighbour_pixel_LF[k][c];
-            derivatives[1][c] += kern_second[k][c] * neighbour_pixel_LF[k][c];
-            derivatives[2][c] += kern_third[k][c] * neighbour_pixel_HF[k][c];
-            derivatives[3][c] += kern_fourth[k][c] * neighbour_pixel_HF[k][c];
+          for_each_channel(c, aligned(variance, neighbour_pixel_HF))
             variance[c] += sqf(neighbour_pixel_HF[k][c]);
-          }
         }
         // Regularize the variance taking into account the blurring scale.
         // This allows to keep the scene-referred variance roughly constant
