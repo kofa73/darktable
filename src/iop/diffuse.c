@@ -1041,31 +1041,18 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
       = { 0.5f * anisotropy[0], 0.5f * anisotropy[1],
           0.5f * anisotropy[2], 0.5f * anisotropy[3] };
 
-#define DIFFUSE_ROW_LOOP(GRAD_ISOTROPIC, LAPL_ISOTROPIC) \
-  DT_OMP_FOR() \
-  for(size_t row = 0; row < height; ++row) \
-  { \
-    /* interleave the order in which we process the rows so that we minimize cache misses */ \
-    const size_t i = dwt_interleave_rows(row, height, mult); \
-    /* compute the 'above' and 'below' coordinates, clamping them to the image, once for the entire row */ \
-    const size_t i_neighbours[3] \
-      = { MAX((int)(i - mult * H), (int)0) * width,            /* x - mult */ \
-          i * width,                                           /* x */ \
-          MIN((int)(i + mult * H), (int)height - 1) * width }; /* x + mult */ \
-    for(size_t j = 0; j < width; ++j) \
+/* Pixel processing body extracted for column loop peeling.
+   J_LEFT and J_RIGHT are the left and right column neighbor indices. */
+#define DIFFUSE_PIXEL_BODY(J_LEFT, J_RIGHT, GRAD_ISOTROPIC, LAPL_ISOTROPIC) \
     { \
+      const size_t _jl = (J_LEFT); \
+      const size_t _jr = (J_RIGHT); \
       const size_t idx = (i * width + j); \
       const size_t index = idx * 4; \
       const uint8_t opacity = (has_mask) ? mask[idx] : 1; \
 \
       if(opacity) \
       { \
-        /* non-local neighbours coordinates */ \
-        const size_t j_neighbours[3] \
-          = { MAX((int)(j - mult * H), (int)0),            /* y - mult */ \
-              j,                                          /* y */ \
-              MIN((int)(j + mult * H), (int)width - 1) }; /* y + mult */ \
-\
         /* Pre-compute symmetric pixel combinations to exploit kernel symmetries. */ \
         /* Instead of building 9-element kernel arrays and doing 9 multiplies per order, */ \
         /* we use 4 unique weights with pre-combined neighbor pixels. */ \
@@ -1084,15 +1071,15 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         dt_aligned_pixel_t sin_theta_lapl_sq = { 0.f }; \
         dt_aligned_pixel_t cos_theta_sin_theta_lapl = { 0.f }; \
 \
-        const size_t n0 = 4 * (i_neighbours[0] + j_neighbours[0]); \
-        const size_t n1 = 4 * (i_neighbours[0] + j_neighbours[1]); \
-        const size_t n2 = 4 * (i_neighbours[0] + j_neighbours[2]); \
-        const size_t n3 = 4 * (i_neighbours[1] + j_neighbours[0]); \
-        const size_t n4 = 4 * (i_neighbours[1] + j_neighbours[1]); \
-        const size_t n5 = 4 * (i_neighbours[1] + j_neighbours[2]); \
-        const size_t n6 = 4 * (i_neighbours[2] + j_neighbours[0]); \
-        const size_t n7 = 4 * (i_neighbours[2] + j_neighbours[1]); \
-        const size_t n8 = 4 * (i_neighbours[2] + j_neighbours[2]); \
+        const size_t n0 = 4 * (i_neighbours[0] + _jl); \
+        const size_t n1 = 4 * (i_neighbours[0] + j); \
+        const size_t n2 = 4 * (i_neighbours[0] + _jr); \
+        const size_t n3 = 4 * (i_neighbours[1] + _jl); \
+        const size_t n4 = 4 * (i_neighbours[1] + j); \
+        const size_t n5 = 4 * (i_neighbours[1] + _jr); \
+        const size_t n6 = 4 * (i_neighbours[2] + _jl); \
+        const size_t n7 = 4 * (i_neighbours[2] + j); \
+        const size_t n8 = 4 * (i_neighbours[2] + _jr); \
 \
         for_each_channel(c) \
         { \
@@ -1220,6 +1207,44 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         for_each_channel(c, aligned(out, HF, LF : 64)) \
           out[index + c] = HF[index + c] + LF[index + c]; \
       } \
+    }
+
+#define DIFFUSE_ROW_LOOP(GRAD_ISOTROPIC, LAPL_ISOTROPIC) \
+  DT_OMP_FOR() \
+  for(size_t row = 0; row < height; ++row) \
+  { \
+    /* interleave the order in which we process the rows so that we minimize cache misses */ \
+    const size_t i = dwt_interleave_rows(row, height, mult); \
+    /* compute the 'above' and 'below' coordinates, clamping them to the image, once for the entire row */ \
+    const size_t i_neighbours[3] \
+      = { MAX((int)(i - mult * H), (int)0) * width,            /* x - mult */ \
+          i * width,                                           /* x */ \
+          MIN((int)(i + mult * H), (int)height - 1) * width }; /* x + mult */ \
+    /* Peel column loop into left edge, center, and right edge to eliminate */ \
+    /* MAX/MIN clamping from the performance-critical center region. */ \
+    const size_t col_step = (size_t)(mult * H); \
+    const size_t center_start = (col_step < width) ? col_step : width; \
+    const size_t center_end = (width > col_step) ? (width - col_step) : 0; \
+    const size_t right_start = (center_end > center_start) ? center_end : center_start; \
+    /* Left edge: column neighbors need boundary clamping */ \
+    for(size_t j = 0; j < center_start; ++j) \
+    { \
+      DIFFUSE_PIXEL_BODY((size_t)MAX((int)(j - mult * H), (int)0), \
+                         MIN(j + col_step, width - 1), \
+                         GRAD_ISOTROPIC, LAPL_ISOTROPIC) \
+    } \
+    /* Center: no boundary clamping needed, compiler can use fixed offsets */ \
+    for(size_t j = center_start; j < center_end; ++j) \
+    { \
+      DIFFUSE_PIXEL_BODY(j - col_step, j + col_step, \
+                         GRAD_ISOTROPIC, LAPL_ISOTROPIC) \
+    } \
+    /* Right edge: column neighbors need boundary clamping */ \
+    for(size_t j = right_start; j < width; ++j) \
+    { \
+      DIFFUSE_PIXEL_BODY((size_t)MAX((int)(j - mult * H), (int)0), \
+                         MIN(j + col_step, width - 1), \
+                         GRAD_ISOTROPIC, LAPL_ISOTROPIC) \
     } \
   }
 
@@ -1240,6 +1265,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
     DIFFUSE_ROW_LOOP(0, 0)
   }
 #undef DIFFUSE_ROW_LOOP
+#undef DIFFUSE_PIXEL_BODY
 }
 
 static inline float compute_anisotropy_factor(const float user_param)
