@@ -1034,6 +1034,13 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
   const gboolean grad_is_isotropic = (isotropy_type[0] == DT_ISOTROPY_ISOTROPE && isotropy_type[2] == DT_ISOTROPY_ISOTROPE);
   const gboolean lapl_is_isotropic = (isotropy_type[1] == DT_ISOTROPY_ISOTROPE && isotropy_type[3] == DT_ISOTROPY_ISOTROPE);
 
+  // Pre-compute half-anisotropy to absorb the 0.5 gradient/laplacian scaling factor.
+  // Removing the per-pixel 0.5f multiply from grad/lapl computation makes magnitude 2x larger,
+  // so we halve the anisotropy factor once here to compensate.
+  const dt_aligned_pixel_t half_anisotropy
+      = { 0.5f * anisotropy[0], 0.5f * anisotropy[1],
+          0.5f * anisotropy[2], 0.5f * anisotropy[3] };
+
 #define DIFFUSE_ROW_LOOP(GRAD_ISOTROPIC, LAPL_ISOTROPIC) \
   DT_OMP_FOR() \
   for(size_t row = 0; row < height; ++row) \
@@ -1109,14 +1116,14 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
 \
           if(!(GRAD_ISOTROPIC)) \
           { \
-            float grad_x = (lf7 - lf1) * 0.5f; \
-            float grad_y = (lf5 - lf3) * 0.5f; \
+            float grad_x = lf7 - lf1; \
+            float grad_y = lf5 - lf3; \
             float gx_sq = sqf(grad_x); \
             float gy_sq = sqf(grad_y); \
             float mag_sq_grad = gx_sq + gy_sq; \
             float magnitude_grad = sqrtf(mag_sq_grad); \
-            c2[0][c] = -magnitude_grad * anisotropy[0]; \
-            c2[2][c] = -magnitude_grad * anisotropy[2]; \
+            c2[0][c] = -magnitude_grad * half_anisotropy[0]; \
+            c2[2][c] = -magnitude_grad * half_anisotropy[2]; \
             /* Compute cos²θ, sin²θ, cosθ·sinθ directly from squared components */ \
             /* cos²θ = gx²/m², sin²θ = gy²/m², cosθ·sinθ = gx·gy/m² */ \
             float inv_mag_sq_grad = (mag_sq_grad != 0.f) ? 1.0f / mag_sq_grad : 0.f; \
@@ -1148,14 +1155,14 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
 \
           if(!(LAPL_ISOTROPIC)) \
           { \
-            float lapl_x = (hf7 - hf1) * 0.5f; \
-            float lapl_y = (hf5 - hf3) * 0.5f; \
+            float lapl_x = hf7 - hf1; \
+            float lapl_y = hf5 - hf3; \
             float lx_sq = sqf(lapl_x); \
             float ly_sq = sqf(lapl_y); \
             float mag_sq_lapl = lx_sq + ly_sq; \
             float magnitude_lapl = sqrtf(mag_sq_lapl); \
-            c2[1][c] = -magnitude_lapl * anisotropy[1]; \
-            c2[3][c] = -magnitude_lapl * anisotropy[3]; \
+            c2[1][c] = -magnitude_lapl * half_anisotropy[1]; \
+            c2[3][c] = -magnitude_lapl * half_anisotropy[3]; \
             /* Compute cos²θ, sin²θ, cosθ·sinθ directly from squared components */ \
             /* cos²θ = lx²/m², sin²θ = ly²/m², cosθ·sinθ = lx·ly/m² */ \
             float inv_mag_sq_lapl = (mag_sq_lapl != 0.f) ? 1.0f / mag_sq_lapl : 0.f; \
