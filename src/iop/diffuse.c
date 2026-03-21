@@ -1111,17 +1111,18 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
           { \
             float grad_x = (lf7 - lf1) * 0.5f; \
             float grad_y = (lf5 - lf3) * 0.5f; \
-            float magnitude_grad = sqrtf(sqf(grad_x) + sqf(grad_y)); \
+            float gx_sq = sqf(grad_x); \
+            float gy_sq = sqf(grad_y); \
+            float mag_sq_grad = gx_sq + gy_sq; \
+            float magnitude_grad = sqrtf(mag_sq_grad); \
             c2[0][c] = -magnitude_grad * anisotropy[0]; \
             c2[2][c] = -magnitude_grad * anisotropy[2]; \
-            /* Compute cos(arg(grad)) = dx / hypot - force arg(grad) = 0 if hypot == 0 */ \
-            float cos_grad = (magnitude_grad != 0.f) ? grad_x / magnitude_grad : 1.f; \
-            /* Compute sin (arg(grad))= dy / hypot - force arg(grad) = 0 if hypot == 0 */ \
-            float sin_grad = (magnitude_grad != 0.f) ? grad_y / magnitude_grad : 0.f; \
-            /* Warning : now gradient = { cos(arg(grad)) , sin(arg(grad)) } */ \
-            cos_theta_grad_sq[c] = sqf(cos_grad); \
-            sin_theta_grad_sq[c] = sqf(sin_grad); \
-            cos_theta_sin_theta_grad[c] = cos_grad * sin_grad; \
+            /* Compute cos²θ, sin²θ, cosθ·sinθ directly from squared components */ \
+            /* cos²θ = gx²/m², sin²θ = gy²/m², cosθ·sinθ = gx·gy/m² */ \
+            float inv_mag_sq_grad = (mag_sq_grad != 0.f) ? 1.0f / mag_sq_grad : 0.f; \
+            cos_theta_grad_sq[c] = (mag_sq_grad != 0.f) ? gx_sq * inv_mag_sq_grad : 1.f; \
+            sin_theta_grad_sq[c] = gy_sq * inv_mag_sq_grad; \
+            cos_theta_sin_theta_grad[c] = grad_x * grad_y * inv_mag_sq_grad; \
           } \
 \
           const float hf0 = HF[n0 + c]; \
@@ -1149,17 +1150,18 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
           { \
             float lapl_x = (hf7 - hf1) * 0.5f; \
             float lapl_y = (hf5 - hf3) * 0.5f; \
-            float magnitude_lapl = sqrtf(sqf(lapl_x) + sqf(lapl_y)); \
+            float lx_sq = sqf(lapl_x); \
+            float ly_sq = sqf(lapl_y); \
+            float mag_sq_lapl = lx_sq + ly_sq; \
+            float magnitude_lapl = sqrtf(mag_sq_lapl); \
             c2[1][c] = -magnitude_lapl * anisotropy[1]; \
             c2[3][c] = -magnitude_lapl * anisotropy[3]; \
-            /* Compute cos(arg(lapl)) = dx / hypot - force arg(lapl) = 0 if hypot == 0 */ \
-            float cos_lapl = (magnitude_lapl != 0.f) ? lapl_x / magnitude_lapl : 1.f; \
-            /* Compute sin (arg(lapl))= dy / hypot - force arg(lapl) = 0 if hypot == 0 */ \
-            float sin_lapl = (magnitude_lapl != 0.f) ? lapl_y / magnitude_lapl : 0.f; \
-            /* Warning : now laplacian = { cos(arg(lapl)) , sin(arg(lapl)) } */ \
-            cos_theta_lapl_sq[c] = sqf(cos_lapl); \
-            sin_theta_lapl_sq[c] = sqf(sin_lapl); \
-            cos_theta_sin_theta_lapl[c] = cos_lapl * sin_lapl; \
+            /* Compute cos²θ, sin²θ, cosθ·sinθ directly from squared components */ \
+            /* cos²θ = lx²/m², sin²θ = ly²/m², cosθ·sinθ = lx·ly/m² */ \
+            float inv_mag_sq_lapl = (mag_sq_lapl != 0.f) ? 1.0f / mag_sq_lapl : 0.f; \
+            cos_theta_lapl_sq[c] = (mag_sq_lapl != 0.f) ? lx_sq * inv_mag_sq_lapl : 1.f; \
+            sin_theta_lapl_sq[c] = ly_sq * inv_mag_sq_lapl; \
+            cos_theta_sin_theta_lapl[c] = lapl_x * lapl_y * inv_mag_sq_lapl; \
           } \
         } \
 \
