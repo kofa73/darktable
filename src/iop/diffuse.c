@@ -1194,18 +1194,22 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
                                    sin_theta_lapl_sq, isotropy_type[3], \
                                    HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
                                    HF_center, ABCD[3], acc); \
-        for_each_channel(c, aligned(acc,HF,LF,variance,out)) \
+        dt_aligned_pixel_t result; \
+        for_each_channel(c, aligned(acc,HF,LF,variance,result)) \
         { \
           acc[c] = (HF[index + c] * strength + acc[c] / variance[c]); \
           /* update the solution */ \
-          out[index + c] = fmaxf(acc[c] + LF[index + c], 0.f); \
+          result[c] = fmaxf(acc[c] + LF[index + c], 0.f); \
         } \
+        copy_pixel_nontemporal(out + index, result); \
       } \
       else \
       { \
         /* only copy input to output, do nothing */ \
-        for_each_channel(c, aligned(out, HF, LF : 64)) \
-          out[index + c] = HF[index + c] + LF[index + c]; \
+        dt_aligned_pixel_t passthrough; \
+        for_each_channel(c, aligned(passthrough, HF, LF : 64)) \
+          passthrough[c] = HF[index + c] + LF[index + c]; \
+        copy_pixel_nontemporal(out + index, passthrough); \
       } \
     }
 
@@ -1264,6 +1268,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
   {
     DIFFUSE_ROW_LOOP(0, 0)
   }
+  dt_omploop_sfence();
 #undef DIFFUSE_ROW_LOOP
 #undef DIFFUSE_PIXEL_BODY
 }
