@@ -1551,13 +1551,37 @@ void process(dt_iop_module_t *self,
   const int diffusion_scales = num_steps_to_reach_equivalent_sigma(B_SPLINE_SIGMA, final_radius);
   const int scales = CLAMP(diffusion_scales, 1, MAX_NUM_SCALES);
 
-  // wavelets scales buffers
+  // Pre-compute effective number of scales by trimming contiguous negligible
+  // scales at the deep end.  For those scales the Gaussian norm weight decays
+  // to zero, making all PDE speeds ~0 and sharpness strength ~1, so
+  // decompose + reconstruct is the identity.  Skipping them saves HF
+  // allocation, HF-write bandwidth, blur computation, and reconstruction I/O.
+  int effective_scales = scales;
+  for(int s = scales - 1; s >= 1; s--)
+  {
+    const float current_radius = equivalent_sigma_at_step(B_SPLINE_SIGMA, s);
+    const float real_radius = current_radius * scale;
+    const float norm =
+      expf(-sqf(real_radius - (float)data->radius_center) / sqf(data->radius));
+    if(fabsf(data->first * KAPPA * norm) < FLT_EPSILON
+    && fabsf(data->second * KAPPA * norm) < FLT_EPSILON
+    && fabsf(data->third * KAPPA * norm) < FLT_EPSILON
+    && fabsf(data->fourth * KAPPA * norm) < FLT_EPSILON
+    && fabsf(data->sharpness * norm) < FLT_EPSILON)
+      effective_scales = s;
+    else
+      break;
+  }
+
+  // wavelets scales buffers — only allocate for effective (non-negligible) scales
   float *restrict HF[MAX_NUM_SCALES];
-  for(int s = 0; s < scales; s++)
+  for(int s = 0; s < effective_scales; s++)
   {
     HF[s] = out_of_memory ? NULL : dt_alloc_align_float(width * height * 4);
     if(!HF[s]) out_of_memory = TRUE;
   }
+  for(int s = effective_scales; s < scales; s++)
+    HF[s] = NULL;
 
   // check that all buffers exist before processing because we use a lot of memory here.
   if(out_of_memory)
@@ -1602,7 +1626,7 @@ void process(dt_iop_module_t *self,
 
     wavelets_process(temp_in, temp_out, mask,
                      roi_out->width, roi_out->height,
-                     data, final_radius, scale, scales, has_mask, HF, LF_odd, LF_even);
+                     data, final_radius, scale, effective_scales, has_mask, HF, LF_odd, LF_even);
   }
 
 finish:
@@ -1611,7 +1635,7 @@ finish:
   dt_free_align(temp2);
   dt_free_align(LF_even);
   dt_free_align(LF_odd);
-  for(int s = 0; s < scales; s++)
+  for(int s = 0; s < effective_scales; s++)
     if(HF[s]) dt_free_align(HF[s]);
 }
 
