@@ -1405,10 +1405,41 @@ static inline gboolean wavelets_process(const float *const restrict in,
 
     if(s == 0) buffer_out = reconstructed;
 
-    // Compute wavelets low-frequency scales
-    heat_PDE_diffusion(HF[s], buffer_in, mask, has_mask, buffer_out, width, height,
-                       anisotropy, isotropy_type, regularization,
-                       variance_threshold, sqf(current_radius), mult, ABCD, strength);
+    // Check whether the Gaussian norm weight makes the PDE correction negligible
+    // for this scale. When the scale is far from the user's center radius, norm
+    // decays exponentially toward zero, making all ABCD speeds ~0 and strength ~1.
+    // In that case we can skip the expensive PDE solver entirely and just add
+    // HF[s] + buffer_in (the identity reconstruction).
+    const gboolean negligible_scale =
+        (fabsf(ABCD[0]) < FLT_EPSILON
+      && fabsf(ABCD[1]) < FLT_EPSILON
+      && fabsf(ABCD[2]) < FLT_EPSILON
+      && fabsf(ABCD[3]) < FLT_EPSILON
+      && fabsf(strength - 1.0f) < FLT_EPSILON);
+
+    if(negligible_scale)
+    {
+      // Fast path: just reconstruct output = HF[s] + buffer_in with nontemporal stores
+      const float *const restrict hf = HF[s];
+      const float *const restrict lf = buffer_in;
+      float *const restrict out = buffer_out;
+      DT_OMP_FOR()
+      for(size_t k = 0; k < (size_t)height * width * 4; k += 4)
+      {
+        dt_aligned_pixel_t pixel;
+        for_each_channel(c, aligned(pixel, hf, lf : 64))
+          pixel[c] = hf[k + c] + lf[k + c];
+        copy_pixel_nontemporal(out + k, pixel);
+      }
+      dt_omploop_sfence();
+    }
+    else
+    {
+      // Compute wavelets low-frequency scales
+      heat_PDE_diffusion(HF[s], buffer_in, mask, has_mask, buffer_out, width, height,
+                         anisotropy, isotropy_type, regularization,
+                         variance_threshold, sqf(current_radius), mult, ABCD, strength);
+    }
 
     if(darktable.dump_pfm_module)
     {
