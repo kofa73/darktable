@@ -1281,6 +1281,51 @@ static inline float compute_anisotropy_factor(const float user_param)
   return sqf(user_param);
 }
 
+// Local version of decompose_2D_Bspline that uses nontemporal (streaming)
+// stores for HF detail writes.  HF buffers are written once during
+// decomposition and not read until the reconstruction pass after ALL
+// scales have been decomposed, so the data is guaranteed to be evicted
+// from cache before first read.  Nontemporal stores avoid the
+// read-for-ownership cache line fetch that normal stores require.
+DT_OMP_DECLARE_SIMD(aligned(in, HF, LF:64) aligned(tempbuf:16))
+static inline void decompose_2D_Bspline_diffuse(const float *const restrict in,
+                                                 float *const restrict HF,
+                                                 float *const restrict LF,
+                                                 const size_t width,
+                                                 const size_t height,
+                                                 const int mult,
+                                                 float *const restrict tempbuf,
+                                                 const size_t padded_size)
+{
+  // Blur and compute the decimated wavelet at once
+  DT_OMP_FOR()
+  for(size_t row = 0; row < height; row++)
+  {
+    // get a thread-private one-row temporary buffer
+    float *restrict const temp = dt_get_perthread(tempbuf, padded_size);
+    // interleave the order in which we process the rows so that we minimize cache misses
+    const size_t i = dwt_interleave_rows(row, height, mult);
+    // Convolve B-spline filter over columns: for each pixel in the current row, compute vertical blur
+    _bspline_vertical_pass(in, temp, i, width, height, mult, TRUE); // always clip negatives
+    // Convolve B-spline filter horizontally over current row
+    for(size_t j = 0; j < width; j++)
+    {
+      const size_t index = 4U * (i * width + j);
+      dt_aligned_pixel_t blur;
+      _bspline_horizontal(temp, blur, j, width, mult, TRUE); // always clip negatives
+      // Write LF (blur) normally — it is reused as input for the next scale
+      for_four_channels(c)
+        LF[index + c] = blur[c];
+      // Write HF (detail) with nontemporal stores — not read until reconstruction
+      dt_aligned_pixel_t detail;
+      for_each_channel(c, aligned(detail, in : 64))
+        detail[c] = in[index + c] - blur[c];
+      copy_pixel_nontemporal(HF + index, detail);
+    }
+  }
+  dt_omploop_sfence();
+}
+
 static inline gboolean wavelets_process(const float *const restrict in,
                                     float *const restrict reconstructed,
                                     const uint8_t *const restrict mask,
@@ -1344,8 +1389,8 @@ static inline gboolean wavelets_process(const float *const restrict in,
       buffer_out = LF_odd;
     }
 
-    decompose_2D_Bspline(buffer_in, HF[s], buffer_out, width, height,
-                         mult, tempbuf, padded_size);
+    decompose_2D_Bspline_diffuse(buffer_in, HF[s], buffer_out, width, height,
+                                 mult, tempbuf, padded_size);
 
     residual = buffer_out;
 
