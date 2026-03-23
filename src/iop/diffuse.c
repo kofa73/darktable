@@ -1063,13 +1063,13 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         /* c² in https://www.researchgate.net/publication/220663968 */ \
         dt_aligned_pixel_t c2[4] = { { 0.f } }; \
         /* build the local anisotropic convolution filters for gradients and laplacians */ \
-        dt_aligned_pixel_t cos_theta_grad_sq = { 0.f }; \
-        dt_aligned_pixel_t sin_theta_grad_sq = { 0.f }; \
-        dt_aligned_pixel_t cos_theta_sin_theta_grad = { 0.f }; \
+        dt_aligned_pixel_t cos_theta_grad_sq; \
+        dt_aligned_pixel_t sin_theta_grad_sq; \
+        dt_aligned_pixel_t cos_theta_sin_theta_grad; \
 \
-        dt_aligned_pixel_t cos_theta_lapl_sq = { 0.f }; \
-        dt_aligned_pixel_t sin_theta_lapl_sq = { 0.f }; \
-        dt_aligned_pixel_t cos_theta_sin_theta_lapl = { 0.f }; \
+        dt_aligned_pixel_t cos_theta_lapl_sq; \
+        dt_aligned_pixel_t sin_theta_lapl_sq; \
+        dt_aligned_pixel_t cos_theta_sin_theta_lapl; \
 \
         const size_t n0 = 4 * (i_neighbours[0] + _jl); \
         const size_t n1 = 4 * (i_neighbours[0] + j); \
@@ -1178,22 +1178,44 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
 \
         /* Compute convolutions directly using kernel symmetries and accumulate directly */ \
         dt_aligned_pixel_t acc = { 0.f }; \
-        accumulate_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
-                                   sin_theta_grad_sq, isotropy_type[0], \
-                                   LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
-                                   LF_center, ABCD[0], acc); \
-        accumulate_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
-                                   sin_theta_lapl_sq, isotropy_type[1], \
-                                   LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
-                                   LF_center, ABCD[1], acc); \
-        accumulate_convolution_direct(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
-                                   sin_theta_grad_sq, isotropy_type[2], \
-                                   HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
-                                   HF_center, ABCD[2], acc); \
-        accumulate_convolution_direct(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
-                                   sin_theta_lapl_sq, isotropy_type[3], \
-                                   HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
-                                   HF_center, ABCD[3], acc); \
+        if(GRAD_ISOTROPIC) \
+        { \
+          for_each_channel(c) \
+          { \
+            acc[c] += ABCD[0] * (0.25f * LF_sum_corners[c] + 0.5f * (LF_sum_tb[c] + LF_sum_lr[c]) - 3.f * LF_center[c]); \
+            acc[c] += ABCD[2] * (0.25f * HF_sum_corners[c] + 0.5f * (HF_sum_tb[c] + HF_sum_lr[c]) - 3.f * HF_center[c]); \
+          } \
+        } \
+        else \
+        { \
+          accumulate_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
+                                     sin_theta_grad_sq, isotropy_type[0], \
+                                     LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
+                                     LF_center, ABCD[0], acc); \
+          accumulate_convolution_direct(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
+                                     sin_theta_grad_sq, isotropy_type[2], \
+                                     HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
+                                     HF_center, ABCD[2], acc); \
+        } \
+        if(LAPL_ISOTROPIC) \
+        { \
+          for_each_channel(c) \
+          { \
+            acc[c] += ABCD[1] * (0.25f * LF_sum_corners[c] + 0.5f * (LF_sum_tb[c] + LF_sum_lr[c]) - 3.f * LF_center[c]); \
+            acc[c] += ABCD[3] * (0.25f * HF_sum_corners[c] + 0.5f * (HF_sum_tb[c] + HF_sum_lr[c]) - 3.f * HF_center[c]); \
+          } \
+        } \
+        else \
+        { \
+          accumulate_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
+                                     sin_theta_lapl_sq, isotropy_type[1], \
+                                     LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
+                                     LF_center, ABCD[1], acc); \
+          accumulate_convolution_direct(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
+                                     sin_theta_lapl_sq, isotropy_type[3], \
+                                     HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
+                                     HF_center, ABCD[3], acc); \
+        } \
         dt_aligned_pixel_t result; \
         for_each_channel(c, aligned(acc,HF,LF,variance,result)) \
         { \
