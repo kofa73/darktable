@@ -1043,7 +1043,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
 
 /* Pixel processing body extracted for column loop peeling.
    J_LEFT and J_RIGHT are the left and right column neighbor indices. */
-#define DIFFUSE_PIXEL_BODY(J_LEFT, J_RIGHT, GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO) \
+#define DIFFUSE_PIXEL_BODY(J_LEFT, J_RIGHT, GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED) \
     { \
       const size_t _jl = (J_LEFT); \
       const size_t _jr = (J_RIGHT); \
@@ -1165,14 +1165,14 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         { \
           if(isotropy_type[0] != DT_ISOTROPY_ISOTROPE) \
             dt_vector_exp(c2[0], c2[0]); \
-          if(isotropy_type[2] != DT_ISOTROPY_ISOTROPE) \
+          if(isotropy_type[2] != DT_ISOTROPY_ISOTROPE && !(GRAD_MATCHED)) \
             dt_vector_exp(c2[2], c2[2]); \
         } \
         if (!(LAPL_ZERO)) \
         { \
           if(isotropy_type[1] != DT_ISOTROPY_ISOTROPE) \
             dt_vector_exp(c2[1], c2[1]); \
-          if(isotropy_type[3] != DT_ISOTROPY_ISOTROPE) \
+          if(isotropy_type[3] != DT_ISOTROPY_ISOTROPE && !(LAPL_MATCHED)) \
             dt_vector_exp(c2[3], c2[3]); \
         } \
 \
@@ -1189,46 +1189,104 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         dt_aligned_pixel_t acc = { 0.f }; \
         if (!(GRAD_ZERO)) \
         { \
-          if(GRAD_ISOTROPIC) \
+          if (GRAD_MATCHED) \
           { \
+            dt_aligned_pixel_t combined_cross, combined_sum_corners, combined_sum_tb, combined_sum_lr, combined_center; \
             for_each_channel(c) \
             { \
-              acc[c] += ABCD[0] * (0.25f * LF_sum_corners[c] + 0.5f * (LF_sum_tb[c] + LF_sum_lr[c]) - 3.f * LF_center[c]); \
-              acc[c] += ABCD[2] * (0.25f * HF_sum_corners[c] + 0.5f * (HF_sum_tb[c] + HF_sum_lr[c]) - 3.f * HF_center[c]); \
+              combined_cross[c] = LF_cross[c] + HF_cross[c]; \
+              combined_sum_corners[c] = LF_sum_corners[c] + HF_sum_corners[c]; \
+              combined_sum_tb[c] = LF_sum_tb[c] + HF_sum_tb[c]; \
+              combined_sum_lr[c] = LF_sum_lr[c] + HF_sum_lr[c]; \
+              combined_center[c] = LF_center[c] + HF_center[c]; \
+            } \
+            if (GRAD_ISOTROPIC) \
+            { \
+              for_each_channel(c) \
+              { \
+                acc[c] += ABCD[0] * (0.25f * combined_sum_corners[c] + 0.5f * (combined_sum_tb[c] + combined_sum_lr[c]) - 3.f * combined_center[c]); \
+              } \
+            } \
+            else \
+            { \
+              accumulate_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
+                                         sin_theta_grad_sq, isotropy_type[0], \
+                                         combined_cross, combined_sum_corners, combined_sum_tb, combined_sum_lr, \
+                                         combined_center, ABCD[0], acc); \
             } \
           } \
           else \
           { \
-            accumulate_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
-                                       sin_theta_grad_sq, isotropy_type[0], \
-                                       LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
-                                       LF_center, ABCD[0], acc); \
-            accumulate_convolution_direct(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
-                                       sin_theta_grad_sq, isotropy_type[2], \
-                                       HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
-                                       HF_center, ABCD[2], acc); \
+            if(GRAD_ISOTROPIC) \
+            { \
+              for_each_channel(c) \
+              { \
+                acc[c] += ABCD[0] * (0.25f * LF_sum_corners[c] + 0.5f * (LF_sum_tb[c] + LF_sum_lr[c]) - 3.f * LF_center[c]); \
+                acc[c] += ABCD[2] * (0.25f * HF_sum_corners[c] + 0.5f * (HF_sum_tb[c] + HF_sum_lr[c]) - 3.f * HF_center[c]); \
+              } \
+            } \
+            else \
+            { \
+              accumulate_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
+                                         sin_theta_grad_sq, isotropy_type[0], \
+                                         LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
+                                         LF_center, ABCD[0], acc); \
+              accumulate_convolution_direct(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
+                                         sin_theta_grad_sq, isotropy_type[2], \
+                                         HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
+                                         HF_center, ABCD[2], acc); \
+            } \
           } \
         } \
         if (!(LAPL_ZERO)) \
         { \
-          if(LAPL_ISOTROPIC) \
+          if (LAPL_MATCHED) \
           { \
+            dt_aligned_pixel_t combined_cross, combined_sum_corners, combined_sum_tb, combined_sum_lr, combined_center; \
             for_each_channel(c) \
             { \
-              acc[c] += ABCD[1] * (0.25f * LF_sum_corners[c] + 0.5f * (LF_sum_tb[c] + LF_sum_lr[c]) - 3.f * LF_center[c]); \
-              acc[c] += ABCD[3] * (0.25f * HF_sum_corners[c] + 0.5f * (HF_sum_tb[c] + HF_sum_lr[c]) - 3.f * HF_center[c]); \
+              combined_cross[c] = LF_cross[c] + HF_cross[c]; \
+              combined_sum_corners[c] = LF_sum_corners[c] + HF_sum_corners[c]; \
+              combined_sum_tb[c] = LF_sum_tb[c] + HF_sum_tb[c]; \
+              combined_sum_lr[c] = LF_sum_lr[c] + HF_sum_lr[c]; \
+              combined_center[c] = LF_center[c] + HF_center[c]; \
+            } \
+            if (LAPL_ISOTROPIC) \
+            { \
+              for_each_channel(c) \
+              { \
+                acc[c] += ABCD[1] * (0.25f * combined_sum_corners[c] + 0.5f * (combined_sum_tb[c] + combined_sum_lr[c]) - 3.f * combined_center[c]); \
+              } \
+            } \
+            else \
+            { \
+              accumulate_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
+                                         sin_theta_lapl_sq, isotropy_type[1], \
+                                         combined_cross, combined_sum_corners, combined_sum_tb, combined_sum_lr, \
+                                         combined_center, ABCD[1], acc); \
             } \
           } \
           else \
           { \
-            accumulate_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
-                                       sin_theta_lapl_sq, isotropy_type[1], \
-                                       LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
-                                       LF_center, ABCD[1], acc); \
-            accumulate_convolution_direct(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
-                                       sin_theta_lapl_sq, isotropy_type[3], \
-                                       HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
-                                       HF_center, ABCD[3], acc); \
+            if(LAPL_ISOTROPIC) \
+            { \
+              for_each_channel(c) \
+              { \
+                acc[c] += ABCD[1] * (0.25f * LF_sum_corners[c] + 0.5f * (LF_sum_tb[c] + LF_sum_lr[c]) - 3.f * LF_center[c]); \
+                acc[c] += ABCD[3] * (0.25f * HF_sum_corners[c] + 0.5f * (HF_sum_tb[c] + HF_sum_lr[c]) - 3.f * HF_center[c]); \
+              } \
+            } \
+            else \
+            { \
+              accumulate_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
+                                         sin_theta_lapl_sq, isotropy_type[1], \
+                                         LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
+                                         LF_center, ABCD[1], acc); \
+              accumulate_convolution_direct(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
+                                         sin_theta_lapl_sq, isotropy_type[3], \
+                                         HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
+                                         HF_center, ABCD[3], acc); \
+            } \
           } \
         } \
         dt_aligned_pixel_t result; \
@@ -1250,7 +1308,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
       } \
     }
 
-#define DIFFUSE_ROW_LOOP(GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO) \
+#define DIFFUSE_ROW_LOOP(GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED) \
   DT_OMP_FOR() \
   for(size_t row = 0; row < height; ++row) \
   { \
@@ -1272,35 +1330,59 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
     { \
       DIFFUSE_PIXEL_BODY((size_t)MAX((int)(j - mult * H), (int)0), \
                          MIN(j + col_step, width - 1), \
-                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO) \
+                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED) \
     } \
     /* Center: no boundary clamping needed, compiler can use fixed offsets */ \
     for(size_t j = center_start; j < center_end; ++j) \
     { \
       DIFFUSE_PIXEL_BODY(j - col_step, j + col_step, \
-                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO) \
+                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED) \
     } \
     /* Right edge: column neighbors need boundary clamping */ \
     for(size_t j = right_start; j < width; ++j) \
     { \
       DIFFUSE_PIXEL_BODY((size_t)MAX((int)(j - mult * H), (int)0), \
                          MIN(j + col_step, width - 1), \
-                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO) \
+                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED) \
     } \
   }
 
   const gboolean grad_orders_zero = (ABCD[0] == 0.f && ABCD[2] == 0.f);
   const gboolean lapl_orders_zero = (ABCD[1] == 0.f && ABCD[3] == 0.f);
 
+  const gboolean grad_matched = (ABCD[0] == ABCD[2]) && (isotropy_type[0] == isotropy_type[2]) && (anisotropy[0] == anisotropy[2]);
+  const gboolean lapl_matched = (ABCD[1] == ABCD[3]) && (isotropy_type[1] == isotropy_type[3]) && (anisotropy[1] == anisotropy[3]);
+
+#define DISPATCH_MATCHED_LOOP(GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z) \
+  if (GRAD_Z && LAPL_Z) { \
+    DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 1, 1, 0, 0) \
+  } else if (GRAD_Z && !LAPL_Z) { \
+    if (lapl_matched) { DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 1, 0, 0, 1) } \
+    else              { DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 1, 0, 0, 0) } \
+  } else if (!GRAD_Z && LAPL_Z) { \
+    if (grad_matched) { DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 1, 1, 0) } \
+    else              { DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 1, 0, 0) } \
+  } else { \
+    if (grad_matched && lapl_matched) { \
+      DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 0, 1, 1) \
+    } else if (grad_matched && !lapl_matched) { \
+      DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 0, 1, 0) \
+    } else if (!grad_matched && lapl_matched) { \
+      DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 0, 0, 1) \
+    } else { \
+      DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 0, 0, 0) \
+    } \
+  }
+
 #define DISPATCH_ROW_LOOP(GRAD_ISO, LAPL_ISO) \
   if (grad_orders_zero && lapl_orders_zero) { \
-    DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 1, 1) \
+    DISPATCH_MATCHED_LOOP(GRAD_ISO, LAPL_ISO, 1, 1) \
   } else if (grad_orders_zero && !lapl_orders_zero) { \
-    DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 1, 0) \
+    DISPATCH_MATCHED_LOOP(GRAD_ISO, LAPL_ISO, 1, 0) \
   } else if (!grad_orders_zero && lapl_orders_zero) { \
-    DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 1) \
+    DISPATCH_MATCHED_LOOP(GRAD_ISO, LAPL_ISO, 0, 1) \
   } else { \
-    DIFFUSE_ROW_LOOP(GRAD_ISO, LAPL_ISO, 0, 0) \
+    DISPATCH_MATCHED_LOOP(GRAD_ISO, LAPL_ISO, 0, 0) \
   }
 
   if(grad_is_isotropic && lapl_is_isotropic)
@@ -1321,6 +1403,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
   }
   dt_omploop_sfence();
 #undef DISPATCH_ROW_LOOP
+#undef DISPATCH_MATCHED_LOOP
 #undef DIFFUSE_ROW_LOOP
 #undef DIFFUSE_PIXEL_BODY
 }
