@@ -937,16 +937,16 @@ static inline void compute_kernel(const dt_aligned_pixel_t c2,
 
 // Compute convolution directly using kernel symmetries, avoiding
 // intermediate 9-element kernel arrays.
-// Anisotropic kernel: b11*(N0-N2-N6+N8) + a22*(N1+N7) + a11*(N3+N5) - 2*(a11+a22)*N4
+// Anisotropic paths decompose into: alpha*(sum_lr+sum_tb-4*center) ± beta*(D*(sum_lr-sum_tb)-cos_sin*cross)
+// where alpha=0.5*(1+c2), beta=0.5*(1-c2), D=2*cos²θ-1; + for isophote, - for gradient
 // Isotropic kernel:   0.25*(N0+N2+N6+N8) + 0.5*(N1+N7+N3+N5) - 3*N4
-DT_OMP_DECLARE_SIMD(aligned(c2, cos_theta_sin_theta, cos_theta2, sin_theta2: 16) \
+DT_OMP_DECLARE_SIMD(aligned(c2, cos_theta_sin_theta, cos_theta2: 16) \
                      aligned(cross_corners, sum_corners, sum_tb, sum_lr, center, acc: 16) \
                      uniform(isotropy_type, abcd))
 static inline void accumulate_convolution_direct(
     const dt_aligned_pixel_t c2,
     const dt_aligned_pixel_t cos_theta_sin_theta,
     const dt_aligned_pixel_t cos_theta2,
-    const dt_aligned_pixel_t sin_theta2,
     const dt_isotropy_t isotropy_type,
     const dt_aligned_pixel_t cross_corners,
     const dt_aligned_pixel_t sum_corners,
@@ -971,11 +971,12 @@ static inline void accumulate_convolution_direct(
     {
       for_each_channel(c)
       {
-        const float a11 = cos_theta2[c] + c2[c] * sin_theta2[c];
-        const float a22 = c2[c] * cos_theta2[c] + sin_theta2[c];
-        const float b11 = (c2[c] - 1.0f) * cos_theta_sin_theta[c] * 0.5f;
-        acc[c] += abcd * (b11 * cross_corners[c] + a22 * sum_tb[c] + a11 * sum_lr[c]
-                          - 2.0f * (a11 + a22) * center[c]);
+        const float alpha = 0.5f * (1.0f + c2[c]);
+        const float beta = 0.5f * (1.0f - c2[c]);
+        const float D = 2.0f * cos_theta2[c] - 1.0f;
+        const float iso_base = sum_lr[c] + sum_tb[c] - 4.0f * center[c];
+        const float dir_corr = D * (sum_lr[c] - sum_tb[c]) - cos_theta_sin_theta[c] * cross_corners[c];
+        acc[c] += abcd * (alpha * iso_base + beta * dir_corr);
       }
       break;
     }
@@ -983,11 +984,12 @@ static inline void accumulate_convolution_direct(
     {
       for_each_channel(c)
       {
-        const float a11 = c2[c] * cos_theta2[c] + sin_theta2[c];
-        const float a22 = cos_theta2[c] + c2[c] * sin_theta2[c];
-        const float b11 = (1.0f - c2[c]) * cos_theta_sin_theta[c] * 0.5f;
-        acc[c] += abcd * (b11 * cross_corners[c] + a22 * sum_tb[c] + a11 * sum_lr[c]
-                          - 2.0f * (a11 + a22) * center[c]);
+        const float alpha = 0.5f * (1.0f + c2[c]);
+        const float beta = 0.5f * (1.0f - c2[c]);
+        const float D = 2.0f * cos_theta2[c] - 1.0f;
+        const float iso_base = sum_lr[c] + sum_tb[c] - 4.0f * center[c];
+        const float dir_corr = D * (sum_lr[c] - sum_tb[c]) - cos_theta_sin_theta[c] * cross_corners[c];
+        acc[c] += abcd * (alpha * iso_base - beta * dir_corr);
       }
       break;
     }
@@ -1064,11 +1066,9 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         dt_aligned_pixel_t c2[4] = { { 0.f } }; \
         /* build the local anisotropic convolution filters for gradients and laplacians */ \
         dt_aligned_pixel_t cos_theta_grad_sq; \
-        dt_aligned_pixel_t sin_theta_grad_sq; \
         dt_aligned_pixel_t cos_theta_sin_theta_grad; \
 \
         dt_aligned_pixel_t cos_theta_lapl_sq; \
-        dt_aligned_pixel_t sin_theta_lapl_sq; \
         dt_aligned_pixel_t cos_theta_sin_theta_lapl; \
 \
         const size_t n0 = 4 * (i_neighbours[0] + _jl); \
@@ -1111,11 +1111,10 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
             float magnitude_grad = sqrtf(mag_sq_grad); \
             c2[0][c] = -magnitude_grad * half_anisotropy[0]; \
             c2[2][c] = -magnitude_grad * half_anisotropy[2]; \
-            /* Compute cos²θ, sin²θ, cosθ·sinθ directly from squared components */ \
-            /* cos²θ = gx²/m², sin²θ = gy²/m², cosθ·sinθ = gx·gy/m² */ \
+            /* Compute cos²θ and cosθ·sinθ directly from squared components */ \
+            /* cos²θ = gx²/m², cosθ·sinθ = gx·gy/m² (sin²θ eliminated via decomposition) */ \
             float inv_mag_sq_grad = (mag_sq_grad != 0.f) ? 1.0f / mag_sq_grad : 0.f; \
             cos_theta_grad_sq[c] = (mag_sq_grad != 0.f) ? gx_sq * inv_mag_sq_grad : 1.f; \
-            sin_theta_grad_sq[c] = gy_sq * inv_mag_sq_grad; \
             cos_theta_sin_theta_grad[c] = grad_x * grad_y * inv_mag_sq_grad; \
           } \
 \
@@ -1150,11 +1149,10 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
             float magnitude_lapl = sqrtf(mag_sq_lapl); \
             c2[1][c] = -magnitude_lapl * half_anisotropy[1]; \
             c2[3][c] = -magnitude_lapl * half_anisotropy[3]; \
-            /* Compute cos²θ, sin²θ, cosθ·sinθ directly from squared components */ \
-            /* cos²θ = lx²/m², sin²θ = ly²/m², cosθ·sinθ = lx·ly/m² */ \
+            /* Compute cos²θ and cosθ·sinθ directly from squared components */ \
+            /* cos²θ = lx²/m², cosθ·sinθ = lx·ly/m² (sin²θ eliminated via decomposition) */ \
             float inv_mag_sq_lapl = (mag_sq_lapl != 0.f) ? 1.0f / mag_sq_lapl : 0.f; \
             cos_theta_lapl_sq[c] = (mag_sq_lapl != 0.f) ? lx_sq * inv_mag_sq_lapl : 1.f; \
-            sin_theta_lapl_sq[c] = ly_sq * inv_mag_sq_lapl; \
             cos_theta_sin_theta_lapl[c] = lapl_x * lapl_y * inv_mag_sq_lapl; \
           } \
         } \
@@ -1210,7 +1208,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
             else \
             { \
               accumulate_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
-                                         sin_theta_grad_sq, isotropy_type[0], \
+                                         isotropy_type[0], \
                                          combined_cross, combined_sum_corners, combined_sum_tb, combined_sum_lr, \
                                          combined_center, ABCD[0], acc); \
             } \
@@ -1228,11 +1226,11 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
             else \
             { \
               accumulate_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
-                                         sin_theta_grad_sq, isotropy_type[0], \
+                                         isotropy_type[0], \
                                          LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
                                          LF_center, ABCD[0], acc); \
               accumulate_convolution_direct(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq, \
-                                         sin_theta_grad_sq, isotropy_type[2], \
+                                         isotropy_type[2], \
                                          HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
                                          HF_center, ABCD[2], acc); \
             } \
@@ -1261,7 +1259,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
             else \
             { \
               accumulate_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
-                                         sin_theta_lapl_sq, isotropy_type[1], \
+                                         isotropy_type[1], \
                                          combined_cross, combined_sum_corners, combined_sum_tb, combined_sum_lr, \
                                          combined_center, ABCD[1], acc); \
             } \
@@ -1279,11 +1277,11 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
             else \
             { \
               accumulate_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
-                                         sin_theta_lapl_sq, isotropy_type[1], \
+                                         isotropy_type[1], \
                                          LF_cross, LF_sum_corners, LF_sum_tb, LF_sum_lr, \
                                          LF_center, ABCD[1], acc); \
               accumulate_convolution_direct(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq, \
-                                         sin_theta_lapl_sq, isotropy_type[3], \
+                                         isotropy_type[3], \
                                          HF_cross, HF_sum_corners, HF_sum_tb, HF_sum_lr, \
                                          HF_center, ABCD[3], acc); \
             } \
