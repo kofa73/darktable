@@ -1192,10 +1192,12 @@ diffuse_pixel_body(const diffuse_ctx_t *const ctx,
 }
 
 
-// Row loop with column-loop peeling into left-edge, center, and right-edge regions.
-// always_inline is required for the same reason as diffuse_pixel_body.
+// Process one row with column-loop peeling into left-edge, center, and right-edge
+// regions. The OpenMP loop itself stays in specialized wrapper functions so the
+// outlined worker still sees compile-time constants for the PDE flags.
 static inline void __attribute__((always_inline))
-diffuse_row_loop(const diffuse_ctx_t *const ctx,
+diffuse_row_body(const diffuse_ctx_t *const ctx,
+                 const size_t row,
                  const int GRAD_ISOTROPIC,
                  const int LAPL_ISOTROPIC,
                  const int GRAD_ZERO,
@@ -1207,50 +1209,119 @@ diffuse_row_loop(const diffuse_ctx_t *const ctx,
   const size_t height = ctx->height;
   const int mult = ctx->mult;
 
-  DT_OMP_FOR()
-  for(size_t row = 0; row < height; ++row)
+  /* interleave the order in which we process the rows so that we minimize cache misses */
+  const size_t i = dwt_interleave_rows(row, height, mult);
+  /* compute the 'above' and 'below' coordinates, clamping them to the image, once for the entire row */
+  const size_t i_neighbours[3]
+    = { MAX((int)(i - mult * H), (int)0) * width,            /* x - mult */
+        i * width,                                           /* x */
+        MIN((int)(i + mult * H), (int)height - 1) * width }; /* x + mult */
+  /* Peel column loop into left edge, center, and right edge to eliminate */
+  /* MAX/MIN clamping from the performance-critical center region. */
+  const size_t col_step = (size_t)(mult * H);
+  const size_t center_start = (col_step < width) ? col_step : width;
+  const size_t center_end = (width > col_step) ? (width - col_step) : 0;
+  const size_t right_start = (center_end > center_start) ? center_end : center_start;
+  /* Left edge: column neighbors need boundary clamping */
+  for(size_t j = 0; j < center_start; ++j)
   {
-    /* interleave the order in which we process the rows so that we minimize cache misses */
-    const size_t i = dwt_interleave_rows(row, height, mult);
-    /* compute the 'above' and 'below' coordinates, clamping them to the image, once for the entire row */
-    const size_t i_neighbours[3]
-      = { MAX((int)(i - mult * H), (int)0) * width,            /* x - mult */
-          i * width,                                           /* x */
-          MIN((int)(i + mult * H), (int)height - 1) * width }; /* x + mult */
-    /* Peel column loop into left edge, center, and right edge to eliminate */
-    /* MAX/MIN clamping from the performance-critical center region. */
-    const size_t col_step = (size_t)(mult * H);
-    const size_t center_start = (col_step < width) ? col_step : width;
-    const size_t center_end = (width > col_step) ? (width - col_step) : 0;
-    const size_t right_start = (center_end > center_start) ? center_end : center_start;
-    /* Left edge: column neighbors need boundary clamping */
-    for(size_t j = 0; j < center_start; ++j)
-    {
-      diffuse_pixel_body(ctx, i, j,
-                         (size_t)MAX((int)(j - mult * H), (int)0),
-                         MIN(j + col_step, width - 1),
-                         i_neighbours,
-                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
-    }
-    /* Center: no boundary clamping needed, compiler can use fixed offsets */
-    for(size_t j = center_start; j < center_end; ++j)
-    {
-      diffuse_pixel_body(ctx, i, j,
-                         j - col_step, j + col_step,
-                         i_neighbours,
-                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
-    }
-    /* Right edge: column neighbors need boundary clamping */
-    for(size_t j = right_start; j < width; ++j)
-    {
-      diffuse_pixel_body(ctx, i, j,
-                         (size_t)MAX((int)(j - mult * H), (int)0),
-                         MIN(j + col_step, width - 1),
-                         i_neighbours,
-                         GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
-    }
+    diffuse_pixel_body(ctx, i, j,
+                       (size_t)MAX((int)(j - mult * H), (int)0),
+                       MIN(j + col_step, width - 1),
+                       i_neighbours,
+                       GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
+  }
+  /* Center: no boundary clamping needed, compiler can use fixed offsets */
+  for(size_t j = center_start; j < center_end; ++j)
+  {
+    diffuse_pixel_body(ctx, i, j,
+                       j - col_step, j + col_step,
+                       i_neighbours,
+                       GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
+  }
+  /* Right edge: column neighbors need boundary clamping */
+  for(size_t j = right_start; j < width; ++j)
+  {
+    diffuse_pixel_body(ctx, i, j,
+                       (size_t)MAX((int)(j - mult * H), (int)0),
+                       MIN(j + col_step, width - 1),
+                       i_neighbours,
+                       GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
   }
 }
+
+#define DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH) \
+  ((((unsigned)(GRAD_ISO)) << 5) | (((unsigned)(LAPL_ISO)) << 4) | (((unsigned)(GRAD_Z)) << 3) \
+   | (((unsigned)(LAPL_Z)) << 2) | (((unsigned)(GRAD_MATCH)) << 1) | ((unsigned)(LAPL_MATCH)))
+
+#define FOR_EACH_DIFFUSE_ROW_LOOP(X) \
+  X(gi1_li1_gz1_lz1_gm0_lm0, 1, 1, 1, 1, 0, 0) \
+  X(gi1_li1_gz1_lz0_gm0_lm1, 1, 1, 1, 0, 0, 1) \
+  X(gi1_li1_gz1_lz0_gm0_lm0, 1, 1, 1, 0, 0, 0) \
+  X(gi1_li1_gz0_lz1_gm1_lm0, 1, 1, 0, 1, 1, 0) \
+  X(gi1_li1_gz0_lz1_gm0_lm0, 1, 1, 0, 1, 0, 0) \
+  X(gi1_li1_gz0_lz0_gm1_lm1, 1, 1, 0, 0, 1, 1) \
+  X(gi1_li1_gz0_lz0_gm1_lm0, 1, 1, 0, 0, 1, 0) \
+  X(gi1_li1_gz0_lz0_gm0_lm1, 1, 1, 0, 0, 0, 1) \
+  X(gi1_li1_gz0_lz0_gm0_lm0, 1, 1, 0, 0, 0, 0) \
+  X(gi1_li0_gz1_lz1_gm0_lm0, 1, 0, 1, 1, 0, 0) \
+  X(gi1_li0_gz1_lz0_gm0_lm1, 1, 0, 1, 0, 0, 1) \
+  X(gi1_li0_gz1_lz0_gm0_lm0, 1, 0, 1, 0, 0, 0) \
+  X(gi1_li0_gz0_lz1_gm1_lm0, 1, 0, 0, 1, 1, 0) \
+  X(gi1_li0_gz0_lz1_gm0_lm0, 1, 0, 0, 1, 0, 0) \
+  X(gi1_li0_gz0_lz0_gm1_lm1, 1, 0, 0, 0, 1, 1) \
+  X(gi1_li0_gz0_lz0_gm1_lm0, 1, 0, 0, 0, 1, 0) \
+  X(gi1_li0_gz0_lz0_gm0_lm1, 1, 0, 0, 0, 0, 1) \
+  X(gi1_li0_gz0_lz0_gm0_lm0, 1, 0, 0, 0, 0, 0) \
+  X(gi0_li1_gz1_lz1_gm0_lm0, 0, 1, 1, 1, 0, 0) \
+  X(gi0_li1_gz1_lz0_gm0_lm1, 0, 1, 1, 0, 0, 1) \
+  X(gi0_li1_gz1_lz0_gm0_lm0, 0, 1, 1, 0, 0, 0) \
+  X(gi0_li1_gz0_lz1_gm1_lm0, 0, 1, 0, 1, 1, 0) \
+  X(gi0_li1_gz0_lz1_gm0_lm0, 0, 1, 0, 1, 0, 0) \
+  X(gi0_li1_gz0_lz0_gm1_lm1, 0, 1, 0, 0, 1, 1) \
+  X(gi0_li1_gz0_lz0_gm1_lm0, 0, 1, 0, 0, 1, 0) \
+  X(gi0_li1_gz0_lz0_gm0_lm1, 0, 1, 0, 0, 0, 1) \
+  X(gi0_li1_gz0_lz0_gm0_lm0, 0, 1, 0, 0, 0, 0) \
+  X(gi0_li0_gz1_lz1_gm0_lm0, 0, 0, 1, 1, 0, 0) \
+  X(gi0_li0_gz1_lz0_gm0_lm1, 0, 0, 1, 0, 0, 1) \
+  X(gi0_li0_gz1_lz0_gm0_lm0, 0, 0, 1, 0, 0, 0) \
+  X(gi0_li0_gz0_lz1_gm1_lm0, 0, 0, 0, 1, 1, 0) \
+  X(gi0_li0_gz0_lz1_gm0_lm0, 0, 0, 0, 1, 0, 0) \
+  X(gi0_li0_gz0_lz0_gm1_lm1, 0, 0, 0, 0, 1, 1) \
+  X(gi0_li0_gz0_lz0_gm1_lm0, 0, 0, 0, 0, 1, 0) \
+  X(gi0_li0_gz0_lz0_gm0_lm1, 0, 0, 0, 0, 0, 1) \
+  X(gi0_li0_gz0_lz0_gm0_lm0, 0, 0, 0, 0, 0, 0)
+
+#define DEFINE_DIFFUSE_ROW_LOOP(NAME, GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH) \
+  static void diffuse_row_loop_##NAME(const diffuse_ctx_t *const ctx) \
+  { \
+    const size_t height = ctx->height; \
+    DT_OMP_FOR() \
+    for(size_t row = 0; row < height; ++row) \
+    { \
+      diffuse_row_body(ctx, row, GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH); \
+    } \
+  }
+
+FOR_EACH_DIFFUSE_ROW_LOOP(DEFINE_DIFFUSE_ROW_LOOP)
+#undef DEFINE_DIFFUSE_ROW_LOOP
+
+static inline void dispatch_diffuse_row_loop(const diffuse_ctx_t *const ctx, const unsigned key)
+{
+  switch(key)
+  {
+#define DISPATCH_DIFFUSE_ROW_LOOP(NAME, GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH) \
+    case DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH): \
+      diffuse_row_loop_##NAME(ctx); \
+      break;
+    FOR_EACH_DIFFUSE_ROW_LOOP(DISPATCH_DIFFUSE_ROW_LOOP)
+#undef DISPATCH_DIFFUSE_ROW_LOOP
+    default:
+      dt_unreachable_codepath();
+  }
+}
+
+#undef FOR_EACH_DIFFUSE_ROW_LOOP
 
 
 static inline void heat_PDE_diffusion(const float *const restrict high_freq,
@@ -1323,22 +1394,22 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
 
 #define DISPATCH_MATCHED_LOOP(GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z) \
   if (GRAD_Z && LAPL_Z) { \
-    diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 1, 1, 0, 0); \
+    dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 1, 1, 0, 0)); \
   } else if (GRAD_Z && !LAPL_Z) { \
-    if (lapl_matched) { diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 1, 0, 0, 1); } \
-    else              { diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 1, 0, 0, 0); } \
+    if (lapl_matched) { dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 1, 0, 0, 1)); } \
+    else              { dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 1, 0, 0, 0)); } \
   } else if (!GRAD_Z && LAPL_Z) { \
-    if (grad_matched) { diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 0, 1, 1, 0); } \
-    else              { diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 0, 1, 0, 0); } \
+    if (grad_matched) { dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 0, 1, 1, 0)); } \
+    else              { dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 0, 1, 0, 0)); } \
   } else { \
     if (grad_matched && lapl_matched) { \
-      diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 0, 0, 1, 1); \
+      dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 0, 0, 1, 1)); \
     } else if (grad_matched && !lapl_matched) { \
-      diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 0, 0, 1, 0); \
+      dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 0, 0, 1, 0)); \
     } else if (!grad_matched && lapl_matched) { \
-      diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 0, 0, 0, 1); \
+      dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 0, 0, 0, 1)); \
     } else { \
-      diffuse_row_loop(&ctx, GRAD_ISO, LAPL_ISO, 0, 0, 0, 0); \
+      dispatch_diffuse_row_loop(&ctx, DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, 0, 0, 0, 0)); \
     } \
   }
 
@@ -1372,6 +1443,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
   dt_omploop_sfence();
 #undef DISPATCH_ROW_LOOP
 #undef DISPATCH_MATCHED_LOOP
+#undef DIFFUSE_ROW_LOOP_KEY
 }
 
 static inline float compute_anisotropy_factor(const float user_param)
