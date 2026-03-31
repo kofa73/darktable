@@ -825,7 +825,136 @@ typedef struct diffuse_ctx_t
   dt_aligned_pixel_t ABCD;
   float strength;
   int mult;
+  size_t x0;
+  size_t x1;
+  size_t y0;
+  size_t y1;
 } diffuse_ctx_t;
+
+typedef struct diffuse_region_t
+{
+  size_t x0;
+  size_t x1;
+  size_t y0;
+  size_t y1;
+} diffuse_region_t;
+
+typedef struct diffuse_sparse_plan_t
+{
+  gboolean enabled;
+  diffuse_region_t decompose[MAX_NUM_SCALES];
+  diffuse_region_t reconstruct[MAX_NUM_SCALES];
+} diffuse_sparse_plan_t;
+
+static inline diffuse_region_t diffuse_region_make(const size_t x0,
+                                                   const size_t x1,
+                                                   const size_t y0,
+                                                   const size_t y1)
+{
+  return (diffuse_region_t){ .x0 = x0, .x1 = x1, .y0 = y0, .y1 = y1 };
+}
+
+static inline diffuse_region_t diffuse_region_full(const size_t width, const size_t height)
+{
+  return diffuse_region_make(0, width, 0, height);
+}
+
+static inline gboolean diffuse_region_is_empty(const diffuse_region_t region)
+{
+  return region.x0 >= region.x1 || region.y0 >= region.y1;
+}
+
+static inline gboolean diffuse_region_is_full(const diffuse_region_t region,
+                                              const size_t width,
+                                              const size_t height)
+{
+  return region.x0 == 0 && region.y0 == 0 && region.x1 == width && region.y1 == height;
+}
+
+static inline diffuse_region_t diffuse_region_union(const diffuse_region_t first,
+                                                    const diffuse_region_t second)
+{
+  if(diffuse_region_is_empty(first)) return second;
+  if(diffuse_region_is_empty(second)) return first;
+
+  return diffuse_region_make(MIN(first.x0, second.x0),
+                             MAX(first.x1, second.x1),
+                             MIN(first.y0, second.y0),
+                             MAX(first.y1, second.y1));
+}
+
+static inline diffuse_region_t diffuse_region_dilate(const diffuse_region_t region,
+                                                     const size_t radius,
+                                                     const size_t width,
+                                                     const size_t height)
+{
+  if(diffuse_region_is_empty(region)) return region;
+
+  const size_t x0 = (region.x0 > radius) ? (region.x0 - radius) : 0;
+  const size_t y0 = (region.y0 > radius) ? (region.y0 - radius) : 0;
+  const size_t x1 = MIN(region.x1 + radius, width);
+  const size_t y1 = MIN(region.y1 + radius, height);
+  return diffuse_region_make(x0, x1, y0, y1);
+}
+
+static inline diffuse_region_t diffuse_mask_region(const uint8_t *const restrict mask,
+                                                   const size_t width,
+                                                   const size_t height)
+{
+  size_t x0 = width;
+  size_t y0 = height;
+  size_t x1 = 0;
+  size_t y1 = 0;
+
+  for(size_t y = 0; y < height; ++y)
+  {
+    const size_t row = y * width;
+    for(size_t x = 0; x < width; ++x)
+    {
+      if(!mask[row + x]) continue;
+
+      x0 = MIN(x0, x);
+      y0 = MIN(y0, y);
+      x1 = MAX(x1, x + 1);
+      y1 = MAX(y1, y + 1);
+    }
+  }
+
+  if(x0 >= x1 || y0 >= y1) return diffuse_region_make(0, 0, 0, 0);
+  return diffuse_region_make(x0, x1, y0, y1);
+}
+
+static inline diffuse_sparse_plan_t diffuse_build_sparse_plan(const diffuse_region_t mask_region,
+                                                              const size_t width,
+                                                              const size_t height,
+                                                              const int scales)
+{
+  diffuse_sparse_plan_t plan = { .enabled = FALSE };
+
+  if(diffuse_region_is_empty(mask_region)) return plan;
+
+  plan.reconstruct[0] = mask_region;
+  for(int s = 1; s < scales; ++s)
+  {
+    plan.reconstruct[s] =
+      diffuse_region_dilate(plan.reconstruct[s - 1], (size_t)(1 << (s - 1)), width, height);
+  }
+
+  plan.decompose[scales - 1] =
+    diffuse_region_dilate(plan.reconstruct[scales - 1], (size_t)(1 << (scales - 1)), width, height);
+
+  for(int s = scales - 2; s >= 0; --s)
+  {
+    const diffuse_region_t pde_input =
+      diffuse_region_dilate(plan.reconstruct[s], (size_t)(1 << s), width, height);
+    const diffuse_region_t next_scale_input =
+      diffuse_region_dilate(plan.decompose[s + 1], (size_t)(1 << (s + 2)), width, height);
+    plan.decompose[s] = diffuse_region_union(pde_input, next_scale_input);
+  }
+
+  plan.enabled = !diffuse_region_is_full(plan.decompose[0], width, height);
+  return plan;
+}
 
 
 // Isotropic Laplacian accumulation:
@@ -1211,6 +1340,8 @@ diffuse_row_body(const diffuse_ctx_t *const ctx,
 
   /* interleave the order in which we process the rows so that we minimize cache misses */
   const size_t i = dwt_interleave_rows(row, height, mult);
+  if(i < ctx->y0 || i >= ctx->y1) return;
+
   /* compute the 'above' and 'below' coordinates, clamping them to the image, once for the entire row */
   const size_t i_neighbours[3]
     = { MAX((int)(i - mult * H), (int)0) * width,            /* x - mult */
@@ -1218,12 +1349,15 @@ diffuse_row_body(const diffuse_ctx_t *const ctx,
         MIN((int)(i + mult * H), (int)height - 1) * width }; /* x + mult */
   /* Peel column loop into left edge, center, and right edge to eliminate */
   /* MAX/MIN clamping from the performance-critical center region. */
+  const size_t x0 = ctx->x0;
+  const size_t x1 = ctx->x1;
   const size_t col_step = (size_t)(mult * H);
-  const size_t center_start = (col_step < width) ? col_step : width;
-  const size_t center_end = (width > col_step) ? (width - col_step) : 0;
-  const size_t right_start = (center_end > center_start) ? center_end : center_start;
+  const size_t left_end = MIN(x1, MIN(col_step, width));
+  const size_t center_start = MAX(x0, MIN(col_step, width));
+  const size_t center_end = MIN(x1, (width > col_step) ? (width - col_step) : 0);
+  const size_t right_start = MAX(x0, MAX(center_end, MIN(col_step, width)));
   /* Left edge: column neighbors need boundary clamping */
-  for(size_t j = 0; j < center_start; ++j)
+  for(size_t j = x0; j < left_end; ++j)
   {
     diffuse_pixel_body(ctx, i, j,
                        (size_t)MAX((int)(j - mult * H), (int)0),
@@ -1240,7 +1374,7 @@ diffuse_row_body(const diffuse_ctx_t *const ctx,
                        GRAD_ISOTROPIC, LAPL_ISOTROPIC, GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
   }
   /* Right edge: column neighbors need boundary clamping */
-  for(size_t j = right_start; j < width; ++j)
+  for(size_t j = right_start; j < x1; ++j)
   {
     diffuse_pixel_body(ctx, i, j,
                        (size_t)MAX((int)(j - mult * H), (int)0),
@@ -1328,6 +1462,7 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
                                       const float *const restrict low_freq,
                                       const uint8_t *const restrict mask,
                                       const gboolean has_mask,
+                                      const diffuse_region_t output_region,
                                       float *const restrict output,
                                       const size_t width,
                                       const size_t height,
@@ -1384,6 +1519,10 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
     .ABCD = { ABCD[0], ABCD[1], ABCD[2], ABCD[3] },
     .strength = strength,
     .mult = mult,
+    .x0 = output_region.x0,
+    .x1 = output_region.x1,
+    .y0 = output_region.y0,
+    .y1 = output_region.y1,
   };
 
   const gboolean grad_orders_zero = (ABCD[0] == 0.f && ABCD[2] == 0.f);
@@ -1460,43 +1599,188 @@ static inline float compute_anisotropy_factor(const float user_param)
 // scales have been decomposed, so the data is guaranteed to be evicted
 // from cache before first read.  Nontemporal stores avoid the
 // read-for-ownership cache line fetch that normal stores require.
-DT_OMP_DECLARE_SIMD(aligned(in, HF, LF:64) aligned(tempbuf:16))
-static inline void decompose_2D_Bspline_diffuse(const float *const restrict in,
-                                                 float *const restrict HF,
-                                                 float *const restrict LF,
+DT_OMP_DECLARE_SIMD(aligned(in, temp))
+static inline void _bspline_vertical_pass_region(const float *const restrict in,
+                                                 float *const restrict temp,
+                                                 const size_t row,
                                                  const size_t width,
                                                  const size_t height,
                                                  const int mult,
-                                                 float *const restrict tempbuf,
-                                                 const size_t padded_size)
+                                                 const gboolean clip_negatives,
+                                                 const size_t x0,
+                                                 const size_t x1)
 {
-  // Blur and compute the decimated wavelet at once
-  DT_OMP_FOR()
-  for(size_t row = 0; row < height; row++)
+  size_t DT_ALIGNED_ARRAY indices[BSPLINE_FSIZE];
+  indices[0] = 4 * width * MAX((int)row - 2 * mult, 0);
+  indices[1] = 4 * width * MAX((int)row - mult, 0);
+  indices[2] = 4 * width * row;
+  indices[3] = 4 * width * MIN(row + mult, height - 1);
+  indices[4] = 4 * width * MIN(row + 2 * mult, height - 1);
+  for(size_t j = x0; j < x1; ++j)
   {
-    // get a thread-private one-row temporary buffer
+    sparse_scalar_product(in + j * 4, indices, temp + j * 4, clip_negatives);
+  }
+}
+
+DT_OMP_DECLARE_SIMD(aligned(in, HF, LF:64) aligned(temp:16))
+static inline void __attribute__((always_inline))
+decompose_2D_Bspline_diffuse_row(const float *const restrict in,
+                                 float *const restrict HF,
+                                 float *const restrict LF,
+                                 const size_t width,
+                                 const size_t height,
+                                 const int mult,
+                                 const size_t row,
+                                 const size_t x0,
+                                 const size_t x1,
+                                 const size_t temp_x0,
+                                 const size_t temp_x1,
+                                 float *const restrict temp)
+{
+  // Convolve B-spline filter over columns: for each pixel in the current row,
+  // compute the vertical blur only for the horizontal support we will reuse.
+  _bspline_vertical_pass_region(in, temp, row, width, height, mult, TRUE, temp_x0, temp_x1); // always clip negatives
+  // Convolve B-spline filter horizontally over current row
+  for(size_t j = x0; j < x1; ++j)
+  {
+    const size_t index = 4U * (row * width + j);
+    dt_aligned_pixel_t blur;
+    _bspline_horizontal(temp, blur, j, width, mult, TRUE); // always clip negatives
+    // Write LF (blur) normally — it is reused as input for the next scale
+    for_four_channels(c)
+      LF[index + c] = blur[c];
+    // Write HF (detail) with nontemporal stores — not read until reconstruction
+    dt_aligned_pixel_t detail;
+    for_each_channel(c, aligned(detail, in : 64))
+      detail[c] = in[index + c] - blur[c];
+    copy_pixel_nontemporal(HF + index, detail);
+  }
+}
+
+static inline void decompose_2D_Bspline_diffuse_dense(const float *const restrict in,
+                                                      float *const restrict HF,
+                                                      float *const restrict LF,
+                                                      const size_t width,
+                                                      const size_t height,
+                                                      const int mult,
+                                                      float *const restrict tempbuf,
+                                                      const size_t padded_size)
+{
+  DT_OMP_FOR()
+  for(size_t row = 0; row < height; ++row)
+  {
     float *restrict const temp = dt_get_perthread(tempbuf, padded_size);
-    // interleave the order in which we process the rows so that we minimize cache misses
     const size_t i = dwt_interleave_rows(row, height, mult);
-    // Convolve B-spline filter over columns: for each pixel in the current row, compute vertical blur
-    _bspline_vertical_pass(in, temp, i, width, height, mult, TRUE); // always clip negatives
-    // Convolve B-spline filter horizontally over current row
-    for(size_t j = 0; j < width; j++)
-    {
-      const size_t index = 4U * (i * width + j);
-      dt_aligned_pixel_t blur;
-      _bspline_horizontal(temp, blur, j, width, mult, TRUE); // always clip negatives
-      // Write LF (blur) normally — it is reused as input for the next scale
-      for_four_channels(c)
-        LF[index + c] = blur[c];
-      // Write HF (detail) with nontemporal stores — not read until reconstruction
-      dt_aligned_pixel_t detail;
-      for_each_channel(c, aligned(detail, in : 64))
-        detail[c] = in[index + c] - blur[c];
-      copy_pixel_nontemporal(HF + index, detail);
-    }
+    decompose_2D_Bspline_diffuse_row(in, HF, LF, width, height, mult,
+                                     i, 0, width, 0, width, temp);
   }
   dt_omploop_sfence();
+}
+
+static inline void decompose_2D_Bspline_diffuse_sparse(const float *const restrict in,
+                                                       float *const restrict HF,
+                                                       float *const restrict LF,
+                                                       const size_t width,
+                                                       const size_t height,
+                                                       const int mult,
+                                                       const diffuse_region_t output_region,
+                                                       float *const restrict tempbuf,
+                                                       const size_t padded_size)
+{
+  if(diffuse_region_is_empty(output_region)) return;
+
+  DT_OMP_FOR()
+  for(size_t row = 0; row < height; ++row)
+  {
+    float *restrict const temp = dt_get_perthread(tempbuf, padded_size);
+    const size_t i = dwt_interleave_rows(row, height, mult);
+    if(i < output_region.y0 || i >= output_region.y1) continue;
+
+    const size_t temp_x0 = (output_region.x0 > (size_t)(2 * mult)) ? (output_region.x0 - 2 * mult) : 0;
+    const size_t temp_x1 = MIN(output_region.x1 + (size_t)(2 * mult), width);
+    decompose_2D_Bspline_diffuse_row(in, HF, LF, width, height, mult,
+                                     i, output_region.x0, output_region.x1, temp_x0, temp_x1, temp);
+  }
+  dt_omploop_sfence();
+}
+
+static inline void decompose_2D_Bspline_diffuse(const float *const restrict in,
+                                                float *const restrict HF,
+                                                float *const restrict LF,
+                                                const size_t width,
+                                                const size_t height,
+                                                const int mult,
+                                                const diffuse_region_t output_region,
+                                                float *const restrict tempbuf,
+                                                const size_t padded_size)
+{
+  if(diffuse_region_is_full(output_region, width, height))
+    decompose_2D_Bspline_diffuse_dense(in, HF, LF, width, height, mult, tempbuf, padded_size);
+  else
+    decompose_2D_Bspline_diffuse_sparse(in, HF, LF, width, height, mult, output_region, tempbuf, padded_size);
+}
+
+static inline void __attribute__((always_inline))
+wavelets_reconstruct_identity_row(const float *const restrict hf,
+                                  const float *const restrict lf,
+                                  float *const restrict out,
+                                  const size_t width,
+                                  const size_t row,
+                                  const size_t x0,
+                                  const size_t x1)
+{
+  const size_t row_offset = row * width;
+  for(size_t col = x0; col < x1; ++col)
+  {
+    const size_t k = 4 * (row_offset + col);
+    dt_aligned_pixel_t pixel;
+    for_each_channel(c, aligned(pixel, hf, lf : 64))
+      pixel[c] = hf[k + c] + lf[k + c];
+    copy_pixel_nontemporal(out + k, pixel);
+  }
+}
+
+static inline void wavelets_reconstruct_identity_dense(const float *const restrict hf,
+                                                       const float *const restrict lf,
+                                                       float *const restrict out,
+                                                       const size_t width,
+                                                       const size_t height)
+{
+  DT_OMP_FOR()
+  for(size_t row = 0; row < height; ++row)
+  {
+    wavelets_reconstruct_identity_row(hf, lf, out, width, row, 0, width);
+  }
+  dt_omploop_sfence();
+}
+
+static inline void wavelets_reconstruct_identity_sparse(const float *const restrict hf,
+                                                        const float *const restrict lf,
+                                                        float *const restrict out,
+                                                        const size_t width,
+                                                        const diffuse_region_t output_region)
+{
+  if(diffuse_region_is_empty(output_region)) return;
+
+  DT_OMP_FOR()
+  for(size_t row = output_region.y0; row < output_region.y1; ++row)
+  {
+    wavelets_reconstruct_identity_row(hf, lf, out, width, row, output_region.x0, output_region.x1);
+  }
+  dt_omploop_sfence();
+}
+
+static inline void wavelets_reconstruct_identity(const float *const restrict hf,
+                                                 const float *const restrict lf,
+                                                 float *const restrict out,
+                                                 const size_t width,
+                                                 const size_t height,
+                                                 const diffuse_region_t output_region)
+{
+  if(diffuse_region_is_full(output_region, width, height))
+    wavelets_reconstruct_identity_dense(hf, lf, out, width, height);
+  else
+    wavelets_reconstruct_identity_sparse(hf, lf, out, width, output_region);
 }
 
 static inline gboolean wavelets_process(const float *const restrict in,
@@ -1509,6 +1793,7 @@ static inline gboolean wavelets_process(const float *const restrict in,
                                     const float zoom,
                                     const int scales,
                                     const gboolean has_mask,
+                                    const diffuse_sparse_plan_t *const sparse_plan,
                                     float *const restrict HF[MAX_NUM_SCALES],
                                     float *const restrict LF_odd,
                                     float *const restrict LF_even)
@@ -1534,6 +1819,7 @@ static inline gboolean wavelets_process(const float *const restrict in,
   // we know that explains it :
   // https://jo.dreggn.org/home/2010_atrous.pdf the wavelets
   // decomposition here is the same as the equalizer/atrous module,
+  const diffuse_region_t full_region = diffuse_region_full(width, height);
   float *restrict residual; // will store the temp buffer containing the last step of blur
   // allocate a one-row temporary buffer for the decomposition
   size_t padded_size;
@@ -1562,8 +1848,11 @@ static inline gboolean wavelets_process(const float *const restrict in,
       buffer_out = LF_odd;
     }
 
+    const diffuse_region_t output_region =
+      (sparse_plan && sparse_plan->enabled) ? sparse_plan->decompose[s] : full_region;
+
     decompose_2D_Bspline_diffuse(buffer_in, HF[s], buffer_out, width, height,
-                                 mult, tempbuf, padded_size);
+                                 mult, output_region, tempbuf, padded_size);
 
     residual = buffer_out;
 
@@ -1623,6 +1912,9 @@ static inline gboolean wavelets_process(const float *const restrict in,
 
     if(s == 0) buffer_out = reconstructed;
 
+    const diffuse_region_t output_region =
+      (sparse_plan && sparse_plan->enabled) ? sparse_plan->reconstruct[s] : full_region;
+
     // Check whether the Gaussian norm weight makes the PDE correction negligible
     // for this scale. When the scale is far from the user's center radius, norm
     // decays exponentially toward zero, making all ABCD speeds ~0 and strength ~1.
@@ -1638,23 +1930,12 @@ static inline gboolean wavelets_process(const float *const restrict in,
     if(negligible_scale)
     {
       // Fast path: just reconstruct output = HF[s] + buffer_in with nontemporal stores
-      const float *const restrict hf = HF[s];
-      const float *const restrict lf = buffer_in;
-      float *const restrict out = buffer_out;
-      DT_OMP_FOR()
-      for(size_t k = 0; k < (size_t)height * width * 4; k += 4)
-      {
-        dt_aligned_pixel_t pixel;
-        for_each_channel(c, aligned(pixel, hf, lf : 64))
-          pixel[c] = hf[k + c] + lf[k + c];
-        copy_pixel_nontemporal(out + k, pixel);
-      }
-      dt_omploop_sfence();
+      wavelets_reconstruct_identity(HF[s], buffer_in, buffer_out, width, height, output_region);
     }
     else
     {
       // Compute wavelets low-frequency scales
-      heat_PDE_diffusion(HF[s], buffer_in, mask, has_mask, buffer_out, width, height,
+      heat_PDE_diffusion(HF[s], buffer_in, mask, has_mask, output_region, buffer_out, width, height,
                          anisotropy, isotropy_type, regularization,
                          variance_threshold, sqf(current_radius), mult, ABCD, strength);
     }
@@ -1753,6 +2034,7 @@ void process(dt_iop_module_t *self,
 
   float *restrict temp_in = NULL;
   float *restrict temp_out = NULL;
+  diffuse_sparse_plan_t sparse_plan = { .enabled = FALSE };
 
   gboolean out_of_memory = !mask
     || !dt_iop_alloc_image_buffers(self, roi_in, roi_out,
@@ -1815,6 +2097,18 @@ void process(dt_iop_module_t *self,
     // build a boolean mask, TRUE where image is above threshold, FALSE otherwise
     build_mask(in, mask, data->threshold, roi_out->width, roi_out->height);
 
+    const diffuse_region_t mask_region = diffuse_mask_region(mask, width, height);
+    if(diffuse_region_is_empty(mask_region))
+    {
+      dt_iop_image_copy_by_size(out, in, width, height, 4);
+      goto finish;
+    }
+
+    // Restrict the CPU wavelet work to the mask bbox plus the per-scale halos
+    // needed by the blur and PDE stencils. Fall back to the dense path if that
+    // still spans the full frame.
+    sparse_plan = diffuse_build_sparse_plan(mask_region, width, height, effective_scales);
+
     // init the inpainting area with noise
     inpaint_mask(temp1, in, mask, roi_out->width, roi_out->height);
 
@@ -1842,9 +2136,14 @@ void process(dt_iop_module_t *self,
     if(it == iterations - 1)
       temp_out = out;
 
+    // Sparse reconstruction only overwrites the active masked region, so keep
+    // the untouched exterior as a straight copy of the iteration input.
+    if(sparse_plan.enabled)
+      dt_iop_image_copy_by_size(temp_out, temp_in, width, height, 4);
+
     wavelets_process(temp_in, temp_out, mask,
                      roi_out->width, roi_out->height,
-                     data, final_radius, scale, effective_scales, has_mask, HF, LF_odd, LF_even);
+                     data, final_radius, scale, effective_scales, has_mask, &sparse_plan, HF, LF_odd, LF_even);
   }
 
 finish:
