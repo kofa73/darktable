@@ -993,6 +993,48 @@ static inline void combine_stencils(
   }
 }
 
+static inline void combine_directional_stencils(
+    const dt_aligned_pixel_t LF_cross, const dt_aligned_pixel_t HF_cross,
+    const dt_aligned_pixel_t LF_sum_tb, const dt_aligned_pixel_t HF_sum_tb,
+    const dt_aligned_pixel_t LF_sum_lr, const dt_aligned_pixel_t HF_sum_lr,
+    const dt_aligned_pixel_t LF_center, const dt_aligned_pixel_t HF_center,
+    dt_aligned_pixel_t combined_cross, dt_aligned_pixel_t combined_sum_tb,
+    dt_aligned_pixel_t combined_sum_lr, dt_aligned_pixel_t combined_center)
+{
+  for_each_channel(c)
+  {
+    combined_cross[c] = LF_cross[c] + HF_cross[c];
+    combined_sum_tb[c] = LF_sum_tb[c] + HF_sum_tb[c];
+    combined_sum_lr[c] = LF_sum_lr[c] + HF_sum_lr[c];
+    combined_center[c] = LF_center[c] + HF_center[c];
+  }
+}
+
+DT_OMP_DECLARE_SIMD(aligned(c2, cos_theta_sin_theta, cos_theta2: 16) \
+                     aligned(cross_corners, sum_tb, sum_lr, center, acc: 16) \
+                     uniform(abcd))
+static inline void accumulate_isophote_convolution_direct(
+    const dt_aligned_pixel_t c2,
+    const dt_aligned_pixel_t cos_theta_sin_theta,
+    const dt_aligned_pixel_t cos_theta2,
+    const dt_aligned_pixel_t cross_corners,
+    const dt_aligned_pixel_t sum_tb,
+    const dt_aligned_pixel_t sum_lr,
+    const dt_aligned_pixel_t center,
+    const float abcd,
+    dt_aligned_pixel_t acc)
+{
+  for_each_channel(c)
+  {
+    const float alpha = 0.5f * (1.0f + c2[c]);
+    const float beta = 0.5f * (1.0f - c2[c]);
+    const float D = 2.0f * cos_theta2[c] - 1.0f;
+    const float iso_base = sum_lr[c] + sum_tb[c] - 4.0f * center[c];
+    const float dir_corr = D * (sum_lr[c] - sum_tb[c]) - cos_theta_sin_theta[c] * cross_corners[c];
+    acc[c] += abcd * (alpha * iso_base + beta * dir_corr);
+  }
+}
+
 
 // Compute convolution directly using kernel symmetries, avoiding
 // intermediate 9-element kernel arrays.
@@ -1025,15 +1067,8 @@ static inline void accumulate_convolution_direct(
     }
     case(DT_ISOTROPY_ISOPHOTE):
     {
-      for_each_channel(c)
-      {
-        const float alpha = 0.5f * (1.0f + c2[c]);
-        const float beta = 0.5f * (1.0f - c2[c]);
-        const float D = 2.0f * cos_theta2[c] - 1.0f;
-        const float iso_base = sum_lr[c] + sum_tb[c] - 4.0f * center[c];
-        const float dir_corr = D * (sum_lr[c] - sum_tb[c]) - cos_theta_sin_theta[c] * cross_corners[c];
-        acc[c] += abcd * (alpha * iso_base + beta * dir_corr);
-      }
+      accumulate_isophote_convolution_direct(c2, cos_theta_sin_theta, cos_theta2,
+                                             cross_corners, sum_tb, sum_lr, center, abcd, acc);
       break;
     }
     case(DT_ISOTROPY_GRADIENT):
@@ -1384,6 +1419,249 @@ diffuse_row_body(const diffuse_ctx_t *const ctx,
   }
 }
 
+static inline void __attribute__((always_inline))
+diffuse_pixel_body_no_mask_all_isophote(const diffuse_ctx_t *const ctx,
+                                        const size_t i,
+                                        const size_t j,
+                                        const size_t j_left,
+                                        const size_t j_right,
+                                        const size_t i_neighbours[3],
+                                        const int GRAD_ZERO,
+                                        const int LAPL_ZERO,
+                                        const int GRAD_MATCHED,
+                                        const int LAPL_MATCHED)
+{
+  /* Specialized CPU fast path: no luminance mask and all PDE orders diffusing */
+  /* along isophotes, so we can drop the generic mask and isotropy plumbing. */
+  const float *const restrict LF = ctx->LF;
+  const float *const restrict HF = ctx->HF;
+  float *const restrict out = ctx->out;
+  const size_t width = ctx->width;
+
+  const size_t index = 4 * (i * width + j);
+
+  dt_aligned_pixel_t LF_cross, LF_sum_tb, LF_sum_lr, LF_center;
+  dt_aligned_pixel_t HF_cross, HF_sum_tb, HF_sum_lr, HF_center;
+  dt_aligned_pixel_t variance = { 0.f };
+
+  /* c² in https://www.researchgate.net/publication/220663968 */
+  dt_aligned_pixel_t c2[4] = { { 0.f } };
+  dt_aligned_pixel_t cos_theta_grad_sq;
+  dt_aligned_pixel_t cos_theta_sin_theta_grad;
+  dt_aligned_pixel_t cos_theta_lapl_sq;
+  dt_aligned_pixel_t cos_theta_sin_theta_lapl;
+
+  const size_t n0 = 4 * (i_neighbours[0] + j_left);
+  const size_t n1 = 4 * (i_neighbours[0] + j);
+  const size_t n2 = 4 * (i_neighbours[0] + j_right);
+  const size_t n3 = 4 * (i_neighbours[1] + j_left);
+  const size_t n4 = 4 * (i_neighbours[1] + j);
+  const size_t n5 = 4 * (i_neighbours[1] + j_right);
+  const size_t n6 = 4 * (i_neighbours[2] + j_left);
+  const size_t n7 = 4 * (i_neighbours[2] + j);
+  const size_t n8 = 4 * (i_neighbours[2] + j_right);
+
+  for_each_channel(c)
+  {
+    const float lf0 = LF[n0 + c];
+    const float lf1 = LF[n1 + c];
+    const float lf2 = LF[n2 + c];
+    const float lf3 = LF[n3 + c];
+    const float lf4 = LF[n4 + c];
+    const float lf5 = LF[n5 + c];
+    const float lf6 = LF[n6 + c];
+    const float lf7 = LF[n7 + c];
+    const float lf8 = LF[n8 + c];
+
+    const float lf08 = lf0 + lf8;
+    const float lf26 = lf2 + lf6;
+    LF_cross[c] = lf08 - lf26;
+    LF_sum_tb[c] = lf1 + lf7;
+    LF_sum_lr[c] = lf3 + lf5;
+    LF_center[c] = lf4;
+
+    if(!(GRAD_ZERO))
+    {
+      const float grad_x = lf7 - lf1;
+      const float grad_y = lf5 - lf3;
+      const float gx_sq = sqf(grad_x);
+      const float gy_sq = sqf(grad_y);
+      const float mag_sq_grad = gx_sq + gy_sq;
+      const float magnitude_grad = sqrtf(mag_sq_grad);
+      c2[0][c] = -magnitude_grad * ctx->half_anisotropy[0];
+      if(!(GRAD_MATCHED))
+        c2[2][c] = -magnitude_grad * ctx->half_anisotropy[2];
+
+      const float inv_mag_sq_grad = (mag_sq_grad != 0.f) ? 1.0f / mag_sq_grad : 0.f;
+      cos_theta_grad_sq[c] = (mag_sq_grad != 0.f) ? gx_sq * inv_mag_sq_grad : 1.f;
+      cos_theta_sin_theta_grad[c] = grad_x * grad_y * inv_mag_sq_grad;
+    }
+
+    const float hf0 = HF[n0 + c];
+    const float hf1 = HF[n1 + c];
+    const float hf2 = HF[n2 + c];
+    const float hf3 = HF[n3 + c];
+    const float hf4 = HF[n4 + c];
+    const float hf5 = HF[n5 + c];
+    const float hf6 = HF[n6 + c];
+    const float hf7 = HF[n7 + c];
+    const float hf8 = HF[n8 + c];
+
+    const float hf08 = hf0 + hf8;
+    const float hf26 = hf2 + hf6;
+    HF_cross[c] = hf08 - hf26;
+    HF_sum_tb[c] = hf1 + hf7;
+    HF_sum_lr[c] = hf3 + hf5;
+    HF_center[c] = hf4;
+
+    variance[c] = sqf(hf0) + sqf(hf1) + sqf(hf2) + sqf(hf3) + sqf(hf4) +
+                  sqf(hf5) + sqf(hf6) + sqf(hf7) + sqf(hf8);
+
+    if(!(LAPL_ZERO))
+    {
+      const float lapl_x = hf7 - hf1;
+      const float lapl_y = hf5 - hf3;
+      const float lx_sq = sqf(lapl_x);
+      const float ly_sq = sqf(lapl_y);
+      const float mag_sq_lapl = lx_sq + ly_sq;
+      const float magnitude_lapl = sqrtf(mag_sq_lapl);
+      c2[1][c] = -magnitude_lapl * ctx->half_anisotropy[1];
+      if(!(LAPL_MATCHED))
+        c2[3][c] = -magnitude_lapl * ctx->half_anisotropy[3];
+
+      const float inv_mag_sq_lapl = (mag_sq_lapl != 0.f) ? 1.0f / mag_sq_lapl : 0.f;
+      cos_theta_lapl_sq[c] = (mag_sq_lapl != 0.f) ? lx_sq * inv_mag_sq_lapl : 1.f;
+      cos_theta_sin_theta_lapl[c] = lapl_x * lapl_y * inv_mag_sq_lapl;
+    }
+  }
+
+  if(!(GRAD_ZERO))
+  {
+    dt_vector_exp(c2[0], c2[0]);
+    if(!(GRAD_MATCHED))
+      dt_vector_exp(c2[2], c2[2]);
+  }
+  if(!(LAPL_ZERO))
+  {
+    dt_vector_exp(c2[1], c2[1]);
+    if(!(LAPL_MATCHED))
+      dt_vector_exp(c2[3], c2[3]);
+  }
+
+  /* Regularize the variance taking into account the blurring scale. */
+  /* This allows to keep the scene-referred variance roughly constant */
+  /* regardless of the wavelet scale where we compute it. */
+  /* Prevents large scale halos when deblurring. */
+  for_each_channel(c, aligned(variance))
+  {
+    variance[c] = ctx->variance_threshold + variance[c] * ctx->regularization_factor;
+  }
+
+  dt_aligned_pixel_t acc = { 0.f };
+  if(!(GRAD_ZERO))
+  {
+    if(GRAD_MATCHED)
+    {
+      dt_aligned_pixel_t combined_cross, combined_sum_tb, combined_sum_lr, combined_center;
+      combine_directional_stencils(LF_cross, HF_cross, LF_sum_tb, HF_sum_tb, LF_sum_lr, HF_sum_lr,
+                                   LF_center, HF_center, combined_cross, combined_sum_tb,
+                                   combined_sum_lr, combined_center);
+      accumulate_isophote_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq,
+                                             combined_cross, combined_sum_tb, combined_sum_lr,
+                                             combined_center, ctx->ABCD[0], acc);
+    }
+    else
+    {
+      accumulate_isophote_convolution_direct(c2[0], cos_theta_sin_theta_grad, cos_theta_grad_sq,
+                                             LF_cross, LF_sum_tb, LF_sum_lr, LF_center, ctx->ABCD[0], acc);
+      accumulate_isophote_convolution_direct(c2[2], cos_theta_sin_theta_grad, cos_theta_grad_sq,
+                                             HF_cross, HF_sum_tb, HF_sum_lr, HF_center, ctx->ABCD[2], acc);
+    }
+  }
+  if(!(LAPL_ZERO))
+  {
+    if(LAPL_MATCHED)
+    {
+      dt_aligned_pixel_t combined_cross, combined_sum_tb, combined_sum_lr, combined_center;
+      combine_directional_stencils(LF_cross, HF_cross, LF_sum_tb, HF_sum_tb, LF_sum_lr, HF_sum_lr,
+                                   LF_center, HF_center, combined_cross, combined_sum_tb,
+                                   combined_sum_lr, combined_center);
+      accumulate_isophote_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq,
+                                             combined_cross, combined_sum_tb, combined_sum_lr,
+                                             combined_center, ctx->ABCD[1], acc);
+    }
+    else
+    {
+      accumulate_isophote_convolution_direct(c2[1], cos_theta_sin_theta_lapl, cos_theta_lapl_sq,
+                                             LF_cross, LF_sum_tb, LF_sum_lr, LF_center, ctx->ABCD[1], acc);
+      accumulate_isophote_convolution_direct(c2[3], cos_theta_sin_theta_lapl, cos_theta_lapl_sq,
+                                             HF_cross, HF_sum_tb, HF_sum_lr, HF_center, ctx->ABCD[3], acc);
+    }
+  }
+
+  dt_aligned_pixel_t result;
+  for_each_channel(c, aligned(acc, HF, LF, variance, result))
+  {
+    acc[c] = (HF[index + c] * ctx->strength + acc[c] / variance[c]);
+    result[c] = fmaxf(acc[c] + LF[index + c], 0.f);
+  }
+  copy_pixel_nontemporal(out + index, result);
+}
+
+static inline void __attribute__((always_inline))
+diffuse_row_body_no_mask_all_isophote(const diffuse_ctx_t *const ctx,
+                                      const size_t row,
+                                      const int GRAD_ZERO,
+                                      const int LAPL_ZERO,
+                                      const int GRAD_MATCHED,
+                                      const int LAPL_MATCHED)
+{
+  const size_t width = ctx->width;
+  const size_t height = ctx->height;
+  const int mult = ctx->mult;
+
+  /* interleave the order in which we process the rows so that we minimize cache misses */
+  const size_t i = dwt_interleave_rows(row, height, mult);
+  if(i < ctx->y0 || i >= ctx->y1) return;
+
+  /* compute the 'above' and 'below' coordinates, clamping them to the image, once for the entire row */
+  const size_t i_neighbours[3]
+    = { MAX((int)(i - mult * H), (int)0) * width,
+        i * width,
+        MIN((int)(i + mult * H), (int)height - 1) * width };
+  const size_t x0 = ctx->x0;
+  const size_t x1 = ctx->x1;
+  const size_t col_step = (size_t)(mult * H);
+  const size_t left_end = MIN(x1, MIN(col_step, width));
+  const size_t center_start = MAX(x0, MIN(col_step, width));
+  const size_t center_end = MIN(x1, (width > col_step) ? (width - col_step) : 0);
+  const size_t right_start = MAX(x0, MAX(center_end, MIN(col_step, width)));
+
+  for(size_t j = x0; j < left_end; ++j)
+  {
+    diffuse_pixel_body_no_mask_all_isophote(ctx, i, j,
+                                            (size_t)MAX((int)(j - mult * H), (int)0),
+                                            MIN(j + col_step, width - 1),
+                                            i_neighbours,
+                                            GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
+  }
+  for(size_t j = center_start; j < center_end; ++j)
+  {
+    diffuse_pixel_body_no_mask_all_isophote(ctx, i, j,
+                                            j - col_step, j + col_step,
+                                            i_neighbours,
+                                            GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
+  }
+  for(size_t j = right_start; j < x1; ++j)
+  {
+    diffuse_pixel_body_no_mask_all_isophote(ctx, i, j,
+                                            (size_t)MAX((int)(j - mult * H), (int)0),
+                                            MIN(j + col_step, width - 1),
+                                            i_neighbours,
+                                            GRAD_ZERO, LAPL_ZERO, GRAD_MATCHED, LAPL_MATCHED);
+  }
+}
+
 #define DIFFUSE_ROW_LOOP_KEY(GRAD_ISO, LAPL_ISO, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH) \
   ((((unsigned)(GRAD_ISO)) << 5) | (((unsigned)(LAPL_ISO)) << 4) | (((unsigned)(GRAD_Z)) << 3) \
    | (((unsigned)(LAPL_Z)) << 2) | (((unsigned)(GRAD_MATCH)) << 1) | ((unsigned)(LAPL_MATCH)))
@@ -1457,6 +1735,124 @@ static inline void dispatch_diffuse_row_loop(const diffuse_ctx_t *const ctx, con
 
 #undef FOR_EACH_DIFFUSE_ROW_LOOP
 
+#define DIFFUSE_ALL_ISOPHOTE_ROW_LOOP_KEY(GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH) \
+  ((((unsigned)(GRAD_Z)) << 3) | (((unsigned)(LAPL_Z)) << 2) | (((unsigned)(GRAD_MATCH)) << 1) \
+   | ((unsigned)(LAPL_MATCH)))
+
+#define FOR_EACH_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP(X) \
+  X(gz1_lz1_gm0_lm0, 1, 1, 0, 0) \
+  X(gz1_lz0_gm0_lm1, 1, 0, 0, 1) \
+  X(gz1_lz0_gm0_lm0, 1, 0, 0, 0) \
+  X(gz0_lz1_gm1_lm0, 0, 1, 1, 0) \
+  X(gz0_lz1_gm0_lm0, 0, 1, 0, 0) \
+  X(gz0_lz0_gm1_lm1, 0, 0, 1, 1) \
+  X(gz0_lz0_gm1_lm0, 0, 0, 1, 0) \
+  X(gz0_lz0_gm0_lm1, 0, 0, 0, 1) \
+  X(gz0_lz0_gm0_lm0, 0, 0, 0, 0)
+
+#define DEFINE_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP(NAME, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH) \
+  static void diffuse_all_isophote_row_loop_##NAME(const diffuse_ctx_t *const ctx) \
+  { \
+    const size_t height = ctx->height; \
+    DT_OMP_FOR() \
+    for(size_t row = 0; row < height; ++row) \
+    { \
+      diffuse_row_body_no_mask_all_isophote(ctx, row, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH); \
+    } \
+  }
+
+FOR_EACH_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP(DEFINE_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP)
+#undef DEFINE_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP
+
+static inline void dispatch_diffuse_all_isophote_row_loop(const diffuse_ctx_t *const ctx, const unsigned key)
+{
+  switch(key)
+  {
+#define DISPATCH_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP(NAME, GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH) \
+    case DIFFUSE_ALL_ISOPHOTE_ROW_LOOP_KEY(GRAD_Z, LAPL_Z, GRAD_MATCH, LAPL_MATCH): \
+      diffuse_all_isophote_row_loop_##NAME(ctx); \
+      break;
+    FOR_EACH_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP(DISPATCH_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP)
+#undef DISPATCH_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP
+    default:
+      dt_unreachable_codepath();
+  }
+}
+
+static inline unsigned __attribute__((always_inline))
+diffuse_all_isophote_row_loop_key(const gboolean grad_orders_zero,
+                                  const gboolean lapl_orders_zero,
+                                  const gboolean grad_matched,
+                                  const gboolean lapl_matched)
+{
+  if(grad_orders_zero)
+  {
+    if(lapl_orders_zero)
+      return DIFFUSE_ALL_ISOPHOTE_ROW_LOOP_KEY(1, 1, 0, 0);
+
+    return DIFFUSE_ALL_ISOPHOTE_ROW_LOOP_KEY(1, 0, 0, lapl_matched);
+  }
+
+  if(lapl_orders_zero)
+    return DIFFUSE_ALL_ISOPHOTE_ROW_LOOP_KEY(0, 1, grad_matched, 0);
+
+  return DIFFUSE_ALL_ISOPHOTE_ROW_LOOP_KEY(0, 0, grad_matched, lapl_matched);
+}
+
+static inline void heat_PDE_diffusion_no_mask_all_isophote(const float *const restrict high_freq,
+                                                           const float *const restrict low_freq,
+                                                           const diffuse_region_t output_region,
+                                                           float *const restrict output,
+                                                           const size_t width,
+                                                           const size_t height,
+                                                           const dt_aligned_pixel_t anisotropy,
+                                                           const float regularization,
+                                                           const float variance_threshold,
+                                                           const float current_radius_square,
+                                                           const int mult,
+                                                           const dt_aligned_pixel_t ABCD,
+                                                           const float strength)
+{
+  const float regularization_factor = regularization * current_radius_square / 9.f;
+
+  const dt_aligned_pixel_t half_anisotropy
+      = { 0.5f * anisotropy[0], 0.5f * anisotropy[1],
+          0.5f * anisotropy[2], 0.5f * anisotropy[3] };
+
+  const diffuse_ctx_t ctx = {
+    .LF = DT_IS_ALIGNED(low_freq),
+    .HF = DT_IS_ALIGNED(high_freq),
+    .out = DT_IS_ALIGNED(output),
+    .width = width,
+    .height = height,
+    .half_anisotropy = { half_anisotropy[0], half_anisotropy[1],
+                         half_anisotropy[2], half_anisotropy[3] },
+    .regularization_factor = regularization_factor,
+    .variance_threshold = variance_threshold,
+    .ABCD = { ABCD[0], ABCD[1], ABCD[2], ABCD[3] },
+    .strength = strength,
+    .mult = mult,
+    .x0 = output_region.x0,
+    .x1 = output_region.x1,
+    .y0 = output_region.y0,
+    .y1 = output_region.y1,
+  };
+
+  const gboolean grad_orders_zero = (ABCD[0] == 0.f && ABCD[2] == 0.f);
+  const gboolean lapl_orders_zero = (ABCD[1] == 0.f && ABCD[3] == 0.f);
+
+  const gboolean grad_matched = (ABCD[0] == ABCD[2]) && (anisotropy[0] == anisotropy[2]);
+  const gboolean lapl_matched = (ABCD[1] == ABCD[3]) && (anisotropy[1] == anisotropy[3]);
+
+  dispatch_diffuse_all_isophote_row_loop(&ctx,
+                                         diffuse_all_isophote_row_loop_key(grad_orders_zero, lapl_orders_zero,
+                                                                           grad_matched, lapl_matched));
+  dt_omploop_sfence();
+}
+
+#undef FOR_EACH_DIFFUSE_ALL_ISOPHOTE_ROW_LOOP
+#undef DIFFUSE_ALL_ISOPHOTE_ROW_LOOP_KEY
+
 
 static inline void heat_PDE_diffusion(const float *const restrict high_freq,
                                       const float *const restrict low_freq,
@@ -1475,6 +1871,20 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
                                       const dt_aligned_pixel_t ABCD,
                                       const float strength)
 {
+  const gboolean all_orders_are_isophote = (isotropy_type[0] == DT_ISOTROPY_ISOPHOTE
+                                            && isotropy_type[1] == DT_ISOTROPY_ISOPHOTE
+                                            && isotropy_type[2] == DT_ISOTROPY_ISOPHOTE
+                                            && isotropy_type[3] == DT_ISOTROPY_ISOPHOTE);
+
+  if(!has_mask && all_orders_are_isophote)
+  {
+    heat_PDE_diffusion_no_mask_all_isophote(high_freq, low_freq, output_region, output,
+                                            width, height, anisotropy, regularization,
+                                            variance_threshold, current_radius_square, mult,
+                                            ABCD, strength);
+    return;
+  }
+
   // Simultaneous inpainting for image structure and texture using
   // anisotropic heat transfer model
   // https://www.researchgate.net/publication/220663968
