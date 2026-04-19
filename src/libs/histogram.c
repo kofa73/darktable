@@ -493,7 +493,7 @@ static void _eventbox_scroll_callback(GtkEventControllerScroll* self,
       // FIXME: should handle smooth scrolling rather than discrete?
       // FIXME: should scrolling of scope be handled in the drawable rather than
       //        the eventbox.
-      dt_dev_exposure_handle_event(0, dy - dx, event->scroll.state,
+      dt_dev_exposure_handle_event(0, dx - dy, event->scroll.state,
                                    s->highlight == DT_SCOPES_HIGHLIGHT_BLACK_POINT);
     }
     else
