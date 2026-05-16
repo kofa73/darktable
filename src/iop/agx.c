@@ -407,6 +407,8 @@ _agx_get_base_profile(dt_develop_t *dev,
 {
   dt_iop_order_iccprofile_info_t *selected_profile_info = NULL;
 
+  printf("@@@ agx _agx_get_base_profile\n");
+
   switch(base_primaries_selection)
   {
     case DT_AGX_EXPORT_PROFILE:
@@ -415,7 +417,11 @@ _agx_get_base_profile(dt_develop_t *dev,
       const char *profile_filename;
 
       dt_ioppr_get_export_profile_type(dev, &profile_type, &profile_filename);
-
+      if (profile_filename != NULL) {
+        printf("@@@ agx got export profile %s\n", dt_colorspaces_get_name(profile_type, profile_filename));
+      } else {
+        printf("@@@ agx got export profile with no name\n");
+      }
       if(profile_type != DT_COLORSPACE_NONE && profile_filename != NULL)
       {
         // intent does not matter, we just need the primaries
