@@ -571,6 +571,10 @@ static inline int dt_pthread_mutex_BAD_unlock(dt_pthread_mutex_t *mutex)
 int dt_pthread_create(pthread_t *thread, void *(*start_routine)(void *), void *arg);
 int dt_pthread_join(pthread_t thread);
 void dt_pthread_setname(const char *name);
+// Fill `buf` with the current thread's name. `buf` will be NUL-terminated
+// even on failure (becomes empty string). `bufsz` should be >= 16 to
+// accommodate the maximum length on Linux.
+void dt_pthread_getname(char *buf, size_t bufsz);
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

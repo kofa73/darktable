@@ -264,8 +264,8 @@ static int usage(const char *argv0)
          "    Enable debug output to the terminal. Valid signals are:\n\n"
          "    act_on, cache, camctl, camsupport, control, dev, expose,\n"
          "    imageio, input, ioporder, lighttable, lua, masks, memory,\n"
-         "    nan, opencl, params, perf, pipe, print, pwstorage, signal,\n"
-         "    sql, tiling, picker, undo\n"
+         "    nan, opencl, params, perf, pipe, print, pwstorage, reset,\n"
+         "    signal, sql, tiling, picker, undo\n"
          "\n"
          "    all     -> to debug all signals\n"
          "    common  -> to debug dev, imageio, masks, opencl, params, pipe\n"
@@ -1154,6 +1154,7 @@ int dt_init(int argc,
           !strcmp(darg, "expose") ? DT_DEBUG_EXPOSE :
           !strcmp(darg, "picker") ? DT_DEBUG_PICKER :
           !strcmp(darg, "ai") ? DT_DEBUG_AI : // AI related stuff.
+          !strcmp(darg, "reset") ? DT_DEBUG_RESET : // darktable.gui->reset transitions
           0;
         if(dadd)
           darktable.unmuted |= dadd;
@@ -1535,6 +1536,11 @@ int dt_init(int argc,
     // ensure that we can load the Gtk theme early enough that the splash screen
     // doesn't change as we progress through startup
     darktable.gui = (dt_gui_gtk_t *)calloc(1, sizeof(dt_gui_gtk_t));
+    // Explicit atomic store for C11 portability. calloc gives all-zero
+    // representation; on every platform we target that maps to value 0
+    // for _Atomic int, but the standard formally requires atomic_init
+    // (or any atomic store) for defined behavior.
+    dt_atomic_set_int(&darktable.gui->reset, 0);
   }
 
 #ifdef _OPENMP
@@ -2343,6 +2349,24 @@ void dt_print_nts_ext(const char *msg, ...)
   vprintf(msg, ap);
   va_end(ap);
   fflush(stdout);
+}
+
+const char *dt_gui_thread_label(void)
+{
+  if(darktable.control
+     && pthread_equal(darktable.control->gui_thread, pthread_self()))
+    return "main";
+
+  static __thread char buf[40];
+  char name[16] = { 0 };
+  dt_pthread_getname(name, sizeof(name));
+  if(name[0])
+    snprintf(buf, sizeof(buf), "%s/%lx",
+             name, (unsigned long)(uintptr_t)pthread_self());
+  else
+    snprintf(buf, sizeof(buf), "tid=%lx",
+             (unsigned long)(uintptr_t)pthread_self());
+  return buf;
 }
 
 void *dt_alloc_aligned(const size_t size)

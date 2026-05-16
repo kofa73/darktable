@@ -107,6 +107,16 @@ void dt_pthread_setname(const char *name)
   dtwin_set_thread_name((DWORD)-1, name);
 #endif
 }
+
+void dt_pthread_getname(char *buf, size_t bufsz)
+{
+  if(!buf || bufsz == 0) return;
+  buf[0] = '\0';
+#if defined(__linux__) || defined(__APPLE__)
+  pthread_getname_np(pthread_self(), buf, bufsz);
+#endif
+  buf[bufsz - 1] = '\0';
+}
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

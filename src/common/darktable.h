@@ -300,22 +300,61 @@ char *dt_version_major_minor();
   #define DT_FMA(x, y, z) ((x) * (y) + (z))
 #endif
 
-#define DT_TRY_GUI_UPDATE(ret)                                         \
-     if(!dt_atomic_incr_int_if_zero(&darktable.gui->reset)) return ret \
+// Returns a short label identifying the current thread for diagnostic
+// logging (DT_DEBUG_RESET). Implemented in darktable.c so the helper can
+// look at darktable.control->gui_thread without exposing that struct here.
+const char *dt_gui_thread_label(void);
 
-#define DT_GUARD_GUI_UPDATE(ret)                                       \
-     if(dt_atomic_get_int(&darktable.gui->reset) != 0) return ret      \
+#define DT_TRY_GUI_UPDATE(ret)                                                 \
+  do {                                                                         \
+    int _expected = 0;                                                         \
+    const gboolean _ok =                                                       \
+      dt_atomic_CAS_int(&darktable.gui->reset, &_expected, 1);                 \
+    dt_print(DT_DEBUG_RESET,                                                   \
+             "[gui_reset] %s:%d %s try saw=%d -> %s",                          \
+             __FILE__, __LINE__, dt_gui_thread_label(),                        \
+             _expected, _ok ? "ENTER(1)" : "GUARDED");                         \
+    if(!_ok) return ret;                                                       \
+  } while(0)
 
-#define DT_IN_GUI_UPDATE() (dt_atomic_get_int(&darktable.gui->reset)>0)
+#define DT_GUARD_GUI_UPDATE(ret)                                               \
+  do {                                                                         \
+    const int _v = dt_atomic_get_int(&darktable.gui->reset);                   \
+    dt_print(DT_DEBUG_RESET,                                                   \
+             "[gui_reset] %s:%d %s guard saw=%d",                              \
+             __FILE__, __LINE__, dt_gui_thread_label(), _v);                   \
+    if(_v != 0) return ret;                                                    \
+  } while(0)
 
-#define DT_CLEAR_GUI_UPDATE()                                       \
-    dt_atomic_set_int(&darktable.gui->reset, 0)                     \
+#define DT_IN_GUI_UPDATE() (dt_atomic_get_int(&darktable.gui->reset) > 0)
 
-#define DT_ENTER_GUI_UPDATE()                                       \
-    dt_atomic_incr_int(&darktable.gui->reset)                       \
+#define DT_CLEAR_GUI_UPDATE()                                                  \
+  do {                                                                         \
+    const int _old = dt_atomic_exch_int(&darktable.gui->reset, 0);             \
+    dt_print(DT_DEBUG_RESET,                                                   \
+             "[gui_reset] %s:%d %s CLEAR was=%d",                              \
+             __FILE__, __LINE__, dt_gui_thread_label(), _old);                 \
+  } while(0)
 
-#define DT_LEAVE_GUI_UPDATE()                                       \
-    dt_atomic_decr_int(&darktable.gui->reset)                       \
+#define DT_ENTER_GUI_UPDATE()                                                  \
+  do {                                                                         \
+    const int _old = dt_atomic_add_int(&darktable.gui->reset, 1);              \
+    dt_print(DT_DEBUG_RESET,                                                   \
+             "[gui_reset] %s:%d %s ENTER %d->%d",                              \
+             __FILE__, __LINE__, dt_gui_thread_label(), _old, _old + 1);       \
+  } while(0)
+
+#define DT_LEAVE_GUI_UPDATE()                                                  \
+  do {                                                                         \
+    const int _old = dt_atomic_sub_int(&darktable.gui->reset, 1);              \
+    dt_print(DT_DEBUG_RESET,                                                   \
+             "[gui_reset] %s:%d %s LEAVE %d->%d",                              \
+             __FILE__, __LINE__, dt_gui_thread_label(), _old, _old - 1);       \
+    if(_old <= 0)                                                              \
+      dt_print(DT_DEBUG_ALWAYS,                                                \
+               "[gui_reset] %s:%d UNDERFLOW: reset was %d before LEAVE",       \
+               __FILE__, __LINE__, _old);                                      \
+  } while(0)
 
 struct dt_gui_gtk_t;
 struct dt_control_t;
@@ -381,6 +420,7 @@ typedef enum dt_debug_thread_t
   DT_DEBUG_EXPOSE         = 1 << 26,
   DT_DEBUG_PICKER         = 1 << 27,
   DT_DEBUG_AI             = 1 << 28,
+  DT_DEBUG_RESET          = 1 << 29,
   DT_DEBUG_ALL            = 0xffffffff & ~DT_DEBUG_VERBOSE,
   DT_DEBUG_COMMON         = DT_DEBUG_OPENCL | DT_DEBUG_DEV | DT_DEBUG_MASKS | DT_DEBUG_PARAMS | DT_DEBUG_IMAGEIO | DT_DEBUG_PIPE,
   DT_DEBUG_RESTRICT       = DT_DEBUG_VERBOSE | DT_DEBUG_PERF,
