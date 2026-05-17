@@ -279,7 +279,14 @@ static void _signal_profile_changed(gpointer instance, dt_iop_module_t *self)
 {
   dt_develop_t *dev = self->dev;
   if(!dev->gui_attached || dev->gui_leaving) return;
-  dt_dev_reprocess_center(dev);
+
+  /* DT_SIGNAL_CONTROL_PROFILE_CHANGED fires for both display and display2
+     bytes updates and carries no payload identifying which one. Reprocessing
+     only the center would miss preview / preview2 caches, and we cannot
+     tell which pipe truly needs invalidation. Rebuild all three pipes; the
+     hit is acceptable because display profile changes are rare. */
+  dt_dev_pixelpipe_rebuild(dev);
+  dt_control_queue_redraw_center();
 }
 
 #if 1
