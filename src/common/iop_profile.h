@@ -108,26 +108,35 @@ dt_ioppr_set_pipe_input_profile_info(struct dt_develop_t *dev,
                                      const char *filename,
                                      const int intent, const dt_colormatrix_t matrix_in);
 
-dt_iop_order_iccprofile_info_t *
-dt_ioppr_set_pipe_output_profile_info(struct dt_develop_t *dev,
-                                      struct dt_dev_pixelpipe_t *pipe,
-                                      const dt_colorspaces_color_profile_type_t type,
-                                      const char *filename,
-                                      const int intent);
-
 /** returns a reference to the histogram profile info
  * histogram profile must not be cleanup()
  */
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_histogram_profile_info(struct dt_develop_t *dev);
 
-/** returns the active work/input/output profile on the pipe */
+/** returns the active work/input profile on the pipe */
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_work_profile_info(const struct dt_dev_pixelpipe_t *pipe);
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_input_profile_info(const struct dt_dev_pixelpipe_t *pipe);
+
+/** Resolved profile information for the user's chosen export profile (i.e. the gamut
+   of the deliverable). Suitable for modules that need the target primaries even when
+   rendering to a different screen profile, such as filmicrgb's gamut compression and
+   AgX. Returned struct lives in dev's profile list and must not be freed by the caller. */
 dt_iop_order_iccprofile_info_t *
-dt_ioppr_get_pipe_output_profile_info(const struct dt_dev_pixelpipe_t *pipe);
+dt_ioppr_get_pipe_export_profile_info(struct dt_develop_t *dev,
+                                      const struct dt_dev_pixelpipe_t *pipe);
+
+/** Resolved profile information for what colorout actually renders to on this pipe:
+   the export profile on EXPORT pipes, the (per-pipe) system display profile on
+   FULL/PREVIEW/THUMBNAIL, and display2 on PREVIEW2. Suitable for consumers that
+   need to know the colorspace the pipe is outputting to (e.g. GUI overlays and
+   post-colorout modules). Returned struct lives in dev's profile list and must
+   not be freed by the caller. */
+dt_iop_order_iccprofile_info_t *
+dt_ioppr_get_pipe_output_profile_info(struct dt_develop_t *dev,
+                                      const struct dt_dev_pixelpipe_t *pipe);
 
 /** Get the relevant RGB -> XYZ profile at the position of current module */
 dt_iop_order_iccprofile_info_t *

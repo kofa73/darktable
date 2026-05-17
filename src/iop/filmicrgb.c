@@ -2093,7 +2093,8 @@ void process(dt_iop_module_t *self,
 
   const dt_iop_filmicrgb_data_t *const data = piece->data;
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
-  const dt_iop_order_iccprofile_info_t *const export_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
+  const dt_iop_order_iccprofile_info_t *const export_profile =
+    dt_ioppr_get_pipe_export_profile_info(self->dev, piece->pipe);
 
   /** The log2(x) -> -INF when x -> 0
    * thus very low values (noise) will get even lower, resulting in noise negative amplification,
@@ -2382,7 +2383,8 @@ int process_cl(dt_iop_module_t *self,
 
   // fetch working color profile
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
-  const dt_iop_order_iccprofile_info_t *const export_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);
+  const dt_iop_order_iccprofile_info_t *const export_profile =
+    dt_ioppr_get_pipe_export_profile_info(self->dev, piece->pipe);
   const int use_work_profile = (work_profile == NULL) ? 0 : 1;
 
   // See colorbalancergb.c for details

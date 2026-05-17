@@ -290,7 +290,9 @@ gboolean dt_dev_pixelpipe_init_cached(dt_dev_pixelpipe_t *pipe,
   pipe->store_all_raster_masks = FALSE;
   pipe->work_profile_info = NULL;
   pipe->input_profile_info = NULL;
-  pipe->output_profile_info = NULL;
+  pipe->export_type = DT_COLORSPACE_NONE;
+  pipe->export_filename[0] = '\0';
+  pipe->export_intent = DT_INTENT_LAST;
   pipe->runs = 0;
   pipe->bcache_data = NULL;
   pipe->bcache_hash = DT_INVALID_HASH;
@@ -2929,7 +2931,8 @@ static gboolean _dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
                               (const float *const )input, &roi_in);
     }
 
-    // FIXME: read this from dt_ioppr_get_pipe_output_profile_info()?
+    // Use the resolved system display profile but keep relative-colorimetric for the
+    // histogram so the histogram colors do not track the user's chosen display intent.
     const dt_iop_order_iccprofile_info_t *const display_profile
       = dt_ioppr_add_profile_info_to_list(dev, darktable.color_profiles->display_type,
                                           darktable.color_profiles->display_filename,

@@ -143,8 +143,16 @@ typedef struct dt_dev_pixelpipe_t
   struct dt_iop_order_iccprofile_info_t *work_profile_info;
   /** input profile info **/
   struct dt_iop_order_iccprofile_info_t *input_profile_info;
-  /** output profile info **/
-  struct dt_iop_order_iccprofile_info_t *output_profile_info;
+
+  /* Resolved export profile identity for this pipe, populated by colorout's
+     commit_params. Used by AgX/filmic for gamut math and by the pipe cache
+     basichash so cached pixels invalidate when the user's chosen export
+     profile changes. Stored as bytes (not a profile_info pointer) so the
+     hash is keyed on identity, not on a struct address that the profile
+     list can recycle. */
+  dt_colorspaces_color_profile_type_t export_type;
+  char export_filename[DT_IOP_COLOR_ICC_LEN];
+  dt_iop_color_intent_t export_intent;
 
   // instances of pixelpipe, stored in GList of dt_dev_pixelpipe_iop_t
   GList *nodes;

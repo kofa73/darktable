@@ -954,35 +954,48 @@ dt_ioppr_set_pipe_input_profile_info(struct dt_develop_t *dev,
 }
 
 dt_iop_order_iccprofile_info_t *
-dt_ioppr_set_pipe_output_profile_info(struct dt_develop_t *dev,
-                                      struct dt_dev_pixelpipe_t *pipe,
-                                      const dt_colorspaces_color_profile_type_t type,
-                                      const char *filename,
-                                      const int intent)
+dt_ioppr_get_pipe_export_profile_info(struct dt_develop_t *dev,
+                                      const struct dt_dev_pixelpipe_t *pipe)
 {
+  if(pipe->export_type == DT_COLORSPACE_NONE) return NULL;
+
   dt_iop_order_iccprofile_info_t *profile_info =
-    dt_ioppr_add_profile_info_to_list(dev, type, filename, intent);
+    dt_ioppr_add_profile_info_to_list(dev, pipe->export_type,
+                                      pipe->export_filename, pipe->export_intent);
 
-  if(!profile_info && dt_pipe_is_preview(pipe) && (type == DT_COLORSPACE_FILE))
-    dt_control_log(_("output icc profile '%s' missing"), filename);
-
-  if(profile_info == NULL
-     || !dt_is_valid_colormatrix(profile_info->matrix_in[0][0])
-     || !dt_is_valid_colormatrix(profile_info->matrix_out[0][0]))
-  {
-    if(type != DT_COLORSPACE_DISPLAY)
-    {
-      // ??? this error output has been disabled for a display profile.
-      // see discussion in https://github.com/darktable-org/darktable/issues/6774
-      dt_print(DT_DEBUG_PIPE,
-         "[dt_ioppr_set_pipe_output_profile_info] profile `%s' in `%s' replaced by sRGB",
-         dt_colorspaces_get_name(type, NULL), filename);
-    }
-    profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", intent);
-  }
-  pipe->output_profile_info = profile_info;
+  if(!profile_info && dt_pipe_is_preview(pipe) && (pipe->export_type == DT_COLORSPACE_FILE))
+    dt_control_log(_("export icc profile '%s' missing"), pipe->export_filename);
 
   return profile_info;
+}
+
+dt_iop_order_iccprofile_info_t *
+dt_ioppr_get_pipe_output_profile_info(struct dt_develop_t *dev,
+                                       const struct dt_dev_pixelpipe_t *pipe)
+{
+  dt_colorspaces_color_profile_type_t type;
+  const char *filename;
+  dt_iop_color_intent_t intent;
+
+  if(dt_pipe_is_export(pipe))
+  {
+    // On export, what colorout writes to disk *is* the export profile.
+    return dt_ioppr_get_pipe_export_profile_info(dev, pipe);
+  }
+  else if(dt_pipe_is_preview2(pipe))
+  {
+    type = darktable.color_profiles->display2_type;
+    filename = darktable.color_profiles->display2_filename;
+    intent = darktable.color_profiles->display2_intent;
+  }
+  else
+  {
+    type = darktable.color_profiles->display_type;
+    filename = darktable.color_profiles->display_filename;
+    intent = darktable.color_profiles->display_intent;
+  }
+
+  return dt_ioppr_add_profile_info_to_list(dev, type, filename, intent);
 }
 
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_histogram_profile_info(struct dt_develop_t *dev)
@@ -1004,11 +1017,6 @@ dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_input_profile_info(const struc
   return pipe->input_profile_info;
 }
 
-dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_output_profile_info(const struct dt_dev_pixelpipe_t *pipe)
-{
-  return pipe->output_profile_info;
-}
-
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_current_profile_info(const dt_iop_module_t *module,
                                                                        const struct dt_dev_pixelpipe_t *pipe)
 {
@@ -1022,7 +1030,7 @@ dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_current_profile_info(const dt_
   else if(module->iop_order < colorout_order)
     color_profile = dt_ioppr_get_pipe_work_profile_info(pipe);
   else
-    color_profile = dt_ioppr_get_pipe_output_profile_info(pipe);
+    color_profile = dt_ioppr_get_pipe_output_profile_info(module->dev, pipe);
 
   if(color_profile
       && color_profile->type == DT_COLORSPACE_FILE

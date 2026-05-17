@@ -615,6 +615,15 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
     out_intent = darktable.color_profiles->display_intent;
   }
 
+  /* Record the user's chosen export profile on the pipe so AgX/filmic and
+     the pixelpipe cache basichash see a consistent identity. p->type and
+     p->intent reflect the colorout combobox; for EXPORT pipes they were
+     overridden above from pipe->icc_*. Populate before the Lab early-return
+     so cache identity is correct on Lab transitions too. */
+  pipe->export_type = p->type;
+  g_strlcpy(pipe->export_filename, p->filename, sizeof(pipe->export_filename));
+  pipe->export_intent = p->intent;
+
   // when the output type is Lab then process is a nop, so we can avoid creating a transform
   // and the subsequent error messages
   d->type = out_type;
@@ -755,8 +764,6 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 
   // softproof is never the original but always a copy that went through dt_colorspaces_make_temporary_profile()
   dt_colorspaces_cleanup_profile(softproof);
-
-  dt_ioppr_set_pipe_output_profile_info(self->dev, piece->pipe, d->type, out_filename, p->intent);
 }
 
 void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
