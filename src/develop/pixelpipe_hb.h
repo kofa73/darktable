@@ -149,7 +149,15 @@ typedef struct dt_dev_pixelpipe_t
      basichash so cached pixels invalidate when the user's chosen export
      profile changes. Stored as bytes (not a profile_info pointer) so the
      hash is keyed on identity, not on a struct address that the profile
-     list can recycle. */
+     list can recycle.
+
+     Initialization invariant: these fields default to DT_COLORSPACE_NONE / ""
+     / DT_INTENT_LAST after dt_dev_pixelpipe_init_cached. dt_dev_pixelpipe_synch_all
+     iterates pipe->nodes in pipe order and runs commit_params on every piece,
+     including colorout, before any process() callback executes. So by the time
+     a piece's process() runs, colorout has already populated these fields.
+     dt_ioppr_get_pipe_export_profile_info() asserts on the un-populated state
+     to catch any future caller that violates this ordering. */
   dt_colorspaces_color_profile_type_t export_type;
   char export_filename[DT_IOP_COLOR_ICC_LEN];
   dt_iop_color_intent_t export_intent;

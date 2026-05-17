@@ -28,6 +28,7 @@
 #include "develop/imageop_math.h"
 #include "develop/pixelpipe.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -957,6 +958,13 @@ dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_export_profile_info(struct dt_develop_t *dev,
                                       const struct dt_dev_pixelpipe_t *pipe)
 {
+  /* Invariant: colorout commit_params populates pipe->export_* during pipe synch,
+     and dt_dev_pixelpipe_synch_all commits every node in pipe order *before* any
+     process() callback runs. Consumers of this helper run from process() and so
+     observe export_* already populated. If you hit this assert, either a process
+     callback is reading the export profile before pipe synch has finished, or
+     colorout was removed from the pipe (which would be a bigger structural bug). */
+  assert(pipe->export_type != DT_COLORSPACE_NONE);
   if(pipe->export_type == DT_COLORSPACE_NONE) return NULL;
 
   dt_iop_order_iccprofile_info_t *profile_info =
