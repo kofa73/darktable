@@ -955,21 +955,21 @@ dt_ioppr_set_pipe_input_profile_info(struct dt_develop_t *dev,
 }
 
 dt_iop_order_iccprofile_info_t *
-dt_ioppr_get_pipe_export_profile_info(struct dt_develop_t *dev,
-                                      const struct dt_dev_pixelpipe_t *pipe)
+dt_ioppr_get_pipe_export_profile_info(dt_develop_t *dev,
+                                      const dt_dev_pixelpipe_t *pipe)
 {
-  /* Invariant: colorout commit_params populates pipe->export_* during pipe synch,
-     and dt_dev_pixelpipe_synch_all commits every node in pipe order *before* any
-     process() callback runs. Consumers of this helper run from process() and so
-     observe export_* already populated. If you hit this assert, either a process
-     callback is reading the export profile before pipe synch has finished, or
-     colorout was removed from the pipe (which would be a bigger structural bug). */
+  // should never occur:
+  // colorout commit_params populates pipe->export_* during pipe synch,
+  // dt_dev_pixelpipe_synch_all commits nodes before process();
+  // all callers run from process()
   assert(pipe->export_type != DT_COLORSPACE_NONE);
   if(pipe->export_type == DT_COLORSPACE_NONE) return NULL;
 
   dt_iop_order_iccprofile_info_t *profile_info =
-    dt_ioppr_add_profile_info_to_list(dev, pipe->export_type,
-                                      pipe->export_filename, pipe->export_intent);
+    dt_ioppr_add_profile_info_to_list(dev,
+                                      pipe->export_type,
+                                      pipe->export_filename,
+                                      pipe->export_intent);
 
   if(!profile_info && dt_pipe_is_preview(pipe) && (pipe->export_type == DT_COLORSPACE_FILE))
     dt_control_log(_("export icc profile '%s' missing"), pipe->export_filename);
@@ -978,32 +978,17 @@ dt_ioppr_get_pipe_export_profile_info(struct dt_develop_t *dev,
 }
 
 dt_iop_order_iccprofile_info_t *
-dt_ioppr_get_pipe_output_profile_info(struct dt_develop_t *dev,
-                                       const struct dt_dev_pixelpipe_t *pipe)
+dt_ioppr_get_pipe_output_profile_info(dt_develop_t *dev,
+                                      const dt_dev_pixelpipe_t *pipe)
 {
-  dt_colorspaces_color_profile_type_t type;
-  const char *filename;
-  dt_iop_color_intent_t intent;
-
-  if(dt_pipe_is_export(pipe))
-  {
-    // On export, what colorout writes to disk *is* the export profile.
-    return dt_ioppr_get_pipe_export_profile_info(dev, pipe);
-  }
-  else if(dt_pipe_is_preview2(pipe))
-  {
-    type = darktable.color_profiles->display2_type;
-    filename = darktable.color_profiles->display2_filename;
-    intent = darktable.color_profiles->display2_intent;
-  }
-  else
-  {
-    type = darktable.color_profiles->display_type;
-    filename = darktable.color_profiles->display_filename;
-    intent = darktable.color_profiles->display_intent;
-  }
-
-  return dt_ioppr_add_profile_info_to_list(dev, type, filename, intent);
+  /* output_* is populated by colorout commit_params according to pipe
+     Callers from process() run after pipe synch -> output_* is populated.
+     DT_COLORSPACE_NONE means no synch yet (e.g. GUI before first pipe run) */
+  if(pipe->output_type == DT_COLORSPACE_NONE) return NULL;
+  return dt_ioppr_add_profile_info_to_list(dev,
+                                           pipe->output_type,
+                                           pipe->output_filename,
+                                           pipe->output_intent);
 }
 
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_histogram_profile_info(struct dt_develop_t *dev)

@@ -280,11 +280,8 @@ static void _signal_profile_changed(gpointer instance, dt_iop_module_t *self)
   dt_develop_t *dev = self->dev;
   if(!dev->gui_attached || dev->gui_leaving) return;
 
-  /* DT_SIGNAL_CONTROL_PROFILE_CHANGED fires for both display and display2
-     bytes updates and carries no payload identifying which one. Reprocessing
-     only the center would miss preview / preview2 caches, and we cannot
-     tell which pipe truly needs invalidation. Rebuild all three pipes; the
-     hit is acceptable because display profile changes are rare. */
+  // DT_SIGNAL_CONTROL_PROFILE_CHANGED fires for both display and display2,
+  // we don't know which. Invalidate everything.
   dt_dev_pixelpipe_rebuild(dev);
   dt_control_queue_redraw_center();
 }
@@ -622,14 +619,17 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
     out_intent = darktable.color_profiles->display_intent;
   }
 
-  /* Record the user's chosen export profile on the pipe so AgX/filmic and
-     the pixelpipe cache basichash see a consistent identity. p->type and
-     p->intent reflect the colorout combobox; for EXPORT pipes they were
-     overridden above from pipe->icc_*. Populate before the Lab early-return
-     so cache identity is correct on Lab transitions too. */
+  // store export profile for modules that need the export gamut + pixelpipe
+  // cache basichash
   pipe->export_type = p->type;
   g_strlcpy(pipe->export_filename, p->filename, sizeof(pipe->export_filename));
   pipe->export_intent = p->intent;
+
+  // output profile: export, display, mipmap, see above
+  pipe->output_type = out_type;
+  g_strlcpy(pipe->output_filename, out_filename ? out_filename : "",
+            sizeof(pipe->output_filename));
+  pipe->output_intent = out_intent;
 
   // when the output type is Lab then process is a nop, so we can avoid creating a transform
   // and the subsequent error messages

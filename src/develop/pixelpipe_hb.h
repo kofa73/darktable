@@ -144,23 +144,28 @@ typedef struct dt_dev_pixelpipe_t
   /** input profile info **/
   struct dt_iop_order_iccprofile_info_t *input_profile_info;
 
-  /* Resolved export profile identity for this pipe, populated by colorout's
-     commit_params. Used by AgX/filmic for gamut math and by the pipe cache
-     basichash so cached pixels invalidate when the user's chosen export
+  /* Resolved export profile identity for this pipe, from colorout commit_params.
+     Use for gamut maths and pipe cache basichash to invalidate cache when export
      profile changes. Stored as bytes (not a profile_info pointer) so the
      hash is keyed on identity, not on a struct address that the profile
      list can recycle.
-
-     Initialization invariant: these fields default to DT_COLORSPACE_NONE / ""
-     / DT_INTENT_LAST after dt_dev_pixelpipe_init_cached. dt_dev_pixelpipe_synch_all
-     iterates pipe->nodes in pipe order and runs commit_params on every piece,
-     including colorout, before any process() callback executes. So by the time
-     a piece's process() runs, colorout has already populated these fields.
-     dt_ioppr_get_pipe_export_profile_info() asserts on the un-populated state
-     to catch any future caller that violates this ordering. */
+     See assert in dt_ioppr_get_pipe_export_profile_info. */
   dt_colorspaces_color_profile_type_t export_type;
   char export_filename[DT_IOP_COLOR_ICC_LEN];
   dt_iop_color_intent_t export_intent;
+
+  /* Resolved rendering-target identity for this pipe, from colorout commit_params.
+     Mirrors out_type/out_filename/out_intent the if/else dispatch in colorout
+     produces: export profile on EXPORT pipe, display2 on PREVIEW2, mipmap-cache
+     colorspace on THUMBNAIL, display on FULL/PREVIEW. Read via
+     dt_ioppr_get_pipe_output_profile_info to obtain the resolved profile_info.
+     Validity contract: populated by colorout commit_params before the Lab
+     early-return; consumers must run from a process() callback or otherwise
+     after pipe synch. DT_COLORSPACE_NONE is the un-populated sentinel and
+     the helper returns NULL for it. */
+  dt_colorspaces_color_profile_type_t output_type;
+  char output_filename[DT_IOP_COLOR_ICC_LEN];
+  dt_iop_color_intent_t output_intent;
 
   // instances of pixelpipe, stored in GList of dt_dev_pixelpipe_iop_t
   GList *nodes;

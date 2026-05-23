@@ -116,7 +116,7 @@ static dt_hash_t _dev_pixelpipe_cache_basichash(dt_dev_pixelpipe_t *pipe,
           for them in the piece->hash but must use the final profiles available via pipe->xxx_profile_info.
           For the export profile we hash identity bytes (type/filename/intent) rather than the profile_info
           pointer so non-matrix profiles and Lab transitions in colorout cannot collide. For display we read
-          the resolved system display profile because colorout's params only carry the symbolic
+          the resolved (primary/secondary) system display profile because colorout's params only carry the symbolic
           DT_COLORSPACE_DISPLAY for non-export pipes.
        5) Please note that position is not the iop_order but the position in the pipe
        6) Please note that pipe->type, want_details and request_color_pick are only used if a roi is provided
@@ -129,15 +129,12 @@ static dt_hash_t _dev_pixelpipe_cache_basichash(dt_dev_pixelpipe_t *pipe,
   hash = dt_hash(hash, &pipe->input_profile_info, sizeof(pipe->input_profile_info));
   hash = dt_hash(hash, &pipe->work_profile_info, sizeof(pipe->work_profile_info));
 
-  // Export profile identity (user's chosen output profile from colorout).
-  // Populated by colorout commit_params for every pipe type before the Lab early-return.
+  // export profile identity from colorout's commit_params
   hash = dt_hash(hash, &pipe->export_type, sizeof(pipe->export_type));
   hash = dt_hash(hash, pipe->export_filename, sizeof(pipe->export_filename));
   hash = dt_hash(hash, &pipe->export_intent, sizeof(pipe->export_intent));
 
-  // Display profile identity (only for pipes whose colorout converts to the system display profile).
-  // Without this, switching the monitor profile would leave cached pixels stale because colorout's
-  // params only carry the symbolic DT_COLORSPACE_DISPLAY for these pipes.
+  // display profile identities for non-export pipes
   if(dt_pipe_is_preview2(pipe))
   {
     hash = dt_hash(hash, &darktable.color_profiles->display2_type,
