@@ -155,8 +155,8 @@ typedef struct dt_dev_pixelpipe_t
   dt_iop_color_intent_t export_intent;
 
   /* Resolved rendering-target identity for this pipe, from colorout commit_params.
-     Mirrors out_type/out_filename/out_intent the if/else dispatch in colorout
-     produces: export profile on EXPORT pipe, display2 on PREVIEW2, mipmap-cache
+     Mirrors out_type/out_filename/out_intent that the if/else dispatch in
+     colorout produces: export profile on EXPORT pipe, display2 on PREVIEW2, mipmap-cache
      colorspace on THUMBNAIL, display on FULL/PREVIEW. Read via
      dt_ioppr_get_pipe_output_profile_info to obtain the resolved profile_info.
      Validity contract: populated by colorout commit_params before the Lab
