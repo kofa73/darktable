@@ -974,6 +974,18 @@ dt_ioppr_get_pipe_export_profile_info(dt_develop_t *dev,
   if(!profile_info && dt_pipe_is_preview(pipe) && (pipe->export_type == DT_COLORSPACE_FILE))
     dt_control_log(_("export icc profile '%s' missing"), pipe->export_filename);
 
+  // mirror master's set-helper fallback: missing or non-matrix profile -> sRGB
+  if(!profile_info
+     || !dt_is_valid_colormatrix(profile_info->matrix_in[0][0])
+     || !dt_is_valid_colormatrix(profile_info->matrix_out[0][0]))
+  {
+    if(pipe->export_type != DT_COLORSPACE_DISPLAY)
+      dt_print(DT_DEBUG_PIPE,
+               "[dt_ioppr_get_pipe_export_profile_info] profile `%s' in `%s' replaced by sRGB",
+               dt_colorspaces_get_name(pipe->export_type, NULL), pipe->export_filename);
+    profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", pipe->export_intent);
+  }
+
   return profile_info;
 }
 
@@ -985,10 +997,26 @@ dt_ioppr_get_pipe_output_profile_info(dt_develop_t *dev,
      Callers from process() run after pipe synch -> output_* is populated.
      DT_COLORSPACE_NONE means no synch yet (e.g. GUI before first pipe run) */
   if(pipe->output_type == DT_COLORSPACE_NONE) return NULL;
-  return dt_ioppr_add_profile_info_to_list(dev,
-                                           pipe->output_type,
-                                           pipe->output_filename,
-                                           pipe->output_intent);
+
+  dt_iop_order_iccprofile_info_t *profile_info =
+    dt_ioppr_add_profile_info_to_list(dev,
+                                      pipe->output_type,
+                                      pipe->output_filename,
+                                      pipe->output_intent);
+
+  // mirror master's set-helper fallback: missing or non-matrix profile -> sRGB
+  if(!profile_info
+     || !dt_is_valid_colormatrix(profile_info->matrix_in[0][0])
+     || !dt_is_valid_colormatrix(profile_info->matrix_out[0][0]))
+  {
+    if(pipe->output_type != DT_COLORSPACE_DISPLAY)
+      dt_print(DT_DEBUG_PIPE,
+               "[dt_ioppr_get_pipe_output_profile_info] profile `%s' in `%s' replaced by sRGB",
+               dt_colorspaces_get_name(pipe->output_type, NULL), pipe->output_filename);
+    profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", pipe->output_intent);
+  }
+
+  return profile_info;
 }
 
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_histogram_profile_info(struct dt_develop_t *dev)
