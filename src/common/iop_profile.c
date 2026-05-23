@@ -890,6 +890,66 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
   return profile_info;
 }
 
+static void _ioppr_prune_display_profile_info(dt_develop_t *dev,
+                                              const dt_colorspaces_color_profile_type_t profile_type,
+                                              const char *current_key)
+{
+  GList *profiles = dev->allprofile_info;
+  while(profiles)
+  {
+    GList *const next = g_list_next(profiles);
+    dt_iop_order_iccprofile_info_t *const prof = profiles->data;
+
+    if(prof->type == profile_type && strcmp(prof->filename, current_key) != 0)
+    {
+      dev->allprofile_info = g_list_delete_link(dev->allprofile_info, profiles);
+      dt_ioppr_cleanup_profile_info(prof);
+      dt_free_align(prof);
+    }
+    profiles = next;
+  }
+}
+
+void dt_ioppr_gc_stale_display_profile_info(dt_develop_t *dev)
+{
+  if(!dev || !dev->gui_attached || dev->gui_leaving || !darktable.color_profiles) return;
+
+  dt_dev_pixelpipe_t *const full_pipe = dev->full.pipe;
+  dt_dev_pixelpipe_t *const preview_pipe = dev->preview_pipe;
+  dt_dev_pixelpipe_t *const preview2_pipe = dev->preview2.pipe;
+
+  if(full_pipe) dt_pthread_mutex_lock(&full_pipe->busy_mutex);
+  if(preview_pipe) dt_pthread_mutex_lock(&preview_pipe->busy_mutex);
+  if(preview2_pipe) dt_pthread_mutex_lock(&preview2_pipe->busy_mutex);
+
+  char display_key[DT_IOP_COLOR_ICC_LEN] = { 0 };
+  char display2_key[DT_IOP_COLOR_ICC_LEN] = { 0 };
+  _ioppr_profile_info_cache_filename(DT_COLORSPACE_DISPLAY,
+                                     darktable.color_profiles->display_filename,
+                                     display_key);
+  _ioppr_profile_info_cache_filename(DT_COLORSPACE_DISPLAY2,
+                                     darktable.color_profiles->display2_filename,
+                                     display2_key);
+
+  /* System display ICC writers run on the GTK main thread, so the key and
+     materialised profile see the same xprofile_data bytes. Allocate current
+     entries before freeing stale ones: some GUI caches use profile_info pointer
+     identity, and the allocator may reuse freed blocks. */
+  dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_DISPLAY,
+                                    darktable.color_profiles->display_filename,
+                                    darktable.color_profiles->display_intent);
+  dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_DISPLAY2,
+                                    darktable.color_profiles->display2_filename,
+                                    darktable.color_profiles->display2_intent);
+
+  _ioppr_prune_display_profile_info(dev, DT_COLORSPACE_DISPLAY, display_key);
+  _ioppr_prune_display_profile_info(dev, DT_COLORSPACE_DISPLAY2, display2_key);
+
+  if(preview2_pipe) dt_pthread_mutex_unlock(&preview2_pipe->busy_mutex);
+  if(preview_pipe) dt_pthread_mutex_unlock(&preview_pipe->busy_mutex);
+  if(full_pipe) dt_pthread_mutex_unlock(&full_pipe->busy_mutex);
+}
+
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_iop_work_profile_info(const struct dt_iop_module_t *module,
                                                                    GList *iop_list)
 {

@@ -61,7 +61,7 @@ The hash is computed cumulatively. For a given module at position $N$, the hash 
 1.  The image ID.
 2.  The pipe type (preview, full, export, etc.).
 3.  The detail mask state.
-4.  The colour profiles: input, working, and output ICC profile info (`pipe->input_profile_info`, `pipe->work_profile_info`, `pipe->output_profile_info`). Because colour profile changes are committed globally rather than per-module, they cannot be tracked in individual `piece->hash` values and are instead included in the base hash for every cache lookup.
+4.  The colour profiles: input and working profile info pointers (`pipe->input_profile_info`, `pipe->work_profile_info`), plus resolved export/output profile identity bytes (`pipe->export_type`, `pipe->export_filename`, `pipe->export_intent`, `pipe->output_type`, `pipe->output_filename`, `pipe->output_intent`). Because colour profile changes are committed globally rather than per-module, they cannot be tracked in individual `piece->hash` values and are instead included in the base hash for every cache lookup. Export/output profiles are hashed by identity bytes rather than `profile_info` pointer so cache invalidation follows the selected profile identity.
 5.  The hashes of all preceding enabled/non-skipped modules (0 to $N-1$).
 6.  The parameters of the current module (via `piece->hash`, which covers operation name, instance, params, and blending).
 

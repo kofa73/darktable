@@ -79,6 +79,13 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
                                   const char *profile_filename,
                                   const int intent);
 
+/** Must be called from the GTK main thread with an attached darkroom dev.
+ * Prunes stale system display profile_info entries while holding all live
+ * pipe busy_mutexes so pipe workers cannot hold or publish pointers to the
+ * entries being freed.
+ */
+void dt_ioppr_gc_stale_display_profile_info(struct dt_develop_t *dev);
+
 /** returns a reference to the work profile info as set on colorin iop
  * only if module is between colorin and colorout, otherwise returns NULL
  * work profile must not be cleanup()

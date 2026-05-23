@@ -283,6 +283,7 @@ static void _signal_profile_changed(gpointer instance, dt_iop_module_t *self)
   // DT_SIGNAL_CONTROL_PROFILE_CHANGED fires for both display and display2,
   // we don't know which. Invalidate everything.
   dt_dev_pixelpipe_rebuild(dev);
+  dt_ioppr_gc_stale_display_profile_info(dev);
   dt_control_queue_redraw_center();
 }
 
