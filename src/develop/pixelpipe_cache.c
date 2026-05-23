@@ -130,29 +130,17 @@ static dt_hash_t _dev_pixelpipe_cache_basichash(dt_dev_pixelpipe_t *pipe,
   hash = dt_hash(hash, &pipe->work_profile_info, sizeof(pipe->work_profile_info));
 
   // export profile identity from colorout's commit_params
+  // (modules like filmic/agx consume the export gamut even on display pipes)
   hash = dt_hash(hash, &pipe->export_type, sizeof(pipe->export_type));
   hash = dt_hash(hash, pipe->export_filename, sizeof(pipe->export_filename));
   hash = dt_hash(hash, &pipe->export_intent, sizeof(pipe->export_intent));
 
-  // display profile identities for non-export pipes
-  if(dt_pipe_is_preview2(pipe))
-  {
-    hash = dt_hash(hash, &darktable.color_profiles->display2_type,
-                   sizeof(darktable.color_profiles->display2_type));
-    hash = dt_hash(hash, darktable.color_profiles->display2_filename,
-                   sizeof(darktable.color_profiles->display2_filename));
-    hash = dt_hash(hash, &darktable.color_profiles->display2_intent,
-                   sizeof(darktable.color_profiles->display2_intent));
-  }
-  else if(dt_pipe_is_full(pipe) || dt_pipe_is_preview(pipe) || dt_pipe_is_thumb(pipe))
-  {
-    hash = dt_hash(hash, &darktable.color_profiles->display_type,
-                   sizeof(darktable.color_profiles->display_type));
-    hash = dt_hash(hash, darktable.color_profiles->display_filename,
-                   sizeof(darktable.color_profiles->display_filename));
-    hash = dt_hash(hash, &darktable.color_profiles->display_intent,
-                   sizeof(darktable.color_profiles->display_intent));
-  }
+  // output (rendering target) identity resolved by colorout per pipe type:
+  // export -> export profile, full/preview -> display, preview2 -> display2,
+  // thumb -> dt_mipmap_cache_get_colorspace() (DISPLAY or ADOBERGB).
+  hash = dt_hash(hash, &pipe->output_type, sizeof(pipe->output_type));
+  hash = dt_hash(hash, pipe->output_filename, sizeof(pipe->output_filename));
+  hash = dt_hash(hash, &pipe->output_intent, sizeof(pipe->output_intent));
 
   // go through all modules up to position and compute a hash using the operation and params.
   GList *pieces = pipe->nodes;
