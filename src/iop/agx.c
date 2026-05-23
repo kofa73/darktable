@@ -400,6 +400,7 @@ static void _set_smooth_primaries(dt_iop_agx_params_t *p)
 // user-selected base profile
 static const dt_iop_order_iccprofile_info_t *
 _agx_get_base_profile(dt_develop_t *dev,
+                      const dt_dev_pixelpipe_t *pipe,
                       const dt_iop_order_iccprofile_info_t *
                       pipe_work_profile,
                       const dt_iop_agx_base_primaries_t
@@ -411,30 +412,20 @@ _agx_get_base_profile(dt_develop_t *dev,
   {
     case DT_AGX_EXPORT_PROFILE:
     {
-      dt_colorspaces_color_profile_type_t profile_type;
-      const char *profile_filename;
-
-      dt_ioppr_get_export_profile_type(dev, &profile_type, &profile_filename);
-
-      if(profile_type != DT_COLORSPACE_NONE && profile_filename != NULL)
+      selected_profile_info = dt_ioppr_get_pipe_export_profile_info(dev, pipe);
+      if(selected_profile_info
+         && !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
       {
-        // intent does not matter, we just need the primaries
-        selected_profile_info =
-            dt_ioppr_add_profile_info_to_list(dev, profile_type, profile_filename, INTENT_PERCEPTUAL);
-        if(!selected_profile_info
-           || !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
-        {
-          dt_print(DT_DEBUG_PIPE,
-                   "[agx] Export profile '%s' unusable or missing matrix, falling back to Rec2020.",
-                   dt_colorspaces_get_name(profile_type, profile_filename));
-          selected_profile_info = NULL; // Force fallback
-        }
+        dt_print(DT_DEBUG_PIPE,
+                 "[agx] Export profile '%s' unusable or missing matrix, falling back to Rec2020.",
+                 dt_colorspaces_get_name(selected_profile_info->type,
+                                         selected_profile_info->filename));
+        selected_profile_info = NULL; // Force fallback
       }
-      else
+      else if(!selected_profile_info)
       {
         dt_print(DT_DEBUG_ALWAYS,
-                 "[agx] Failed to get configured export profile settings, falling back to Rec2020.");
-        // fallback handled below
+                 "[agx] No export profile available, falling back to Rec2020.");
       }
     }
     break;
@@ -1344,7 +1335,7 @@ void process(dt_iop_module_t *self,
 
   // Get profiles and create matrices
   const dt_iop_order_iccprofile_info_t *const base_profile =
-    _agx_get_base_profile(self->dev, pipe_work_profile, d->primaries_params.base_primaries);
+    _agx_get_base_profile(self->dev, piece->pipe, pipe_work_profile, d->primaries_params.base_primaries);
 
   if(!base_profile)
   {
@@ -2766,7 +2757,7 @@ int process_cl(dt_iop_module_t *self,
   const dt_iop_order_iccprofile_info_t *const pipe_work_profile =
     dt_ioppr_get_pipe_work_profile_info(piece->pipe);
   const dt_iop_order_iccprofile_info_t *const base_profile =
-    _agx_get_base_profile(self->dev, pipe_work_profile, d->primaries_params.base_primaries);
+    _agx_get_base_profile(self->dev, piece->pipe, pipe_work_profile, d->primaries_params.base_primaries);
 
   if(!base_profile)
   {
