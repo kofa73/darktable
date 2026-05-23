@@ -291,10 +291,12 @@ gboolean dt_dev_pixelpipe_init_cached(dt_dev_pixelpipe_t *pipe,
   pipe->work_profile_info = NULL;
   pipe->input_profile_info = NULL;
   pipe->export_type = DT_COLORSPACE_NONE;
-  pipe->export_filename[0] = '\0';
+  // zero the full buffers: pixelpipe_cache basichash hashes sizeof(buf),
+  // so tail bytes must be deterministic across writes (see colorout.c).
+  memset(pipe->export_filename, 0, sizeof(pipe->export_filename));
   pipe->export_intent = DT_INTENT_LAST;
   pipe->output_type = DT_COLORSPACE_NONE;
-  pipe->output_filename[0] = '\0';
+  memset(pipe->output_filename, 0, sizeof(pipe->output_filename));
   pipe->output_intent = DT_INTENT_LAST;
   pipe->runs = 0;
   pipe->bcache_data = NULL;

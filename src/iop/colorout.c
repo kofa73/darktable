@@ -620,13 +620,18 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   }
 
   // store export profile for modules that need the export gamut + pixelpipe
-  // cache basichash
+  // cache basichash. The basichash hashes sizeof(buffer); zero the tail
+  // before strlcpy so the same filename always hashes the same regardless
+  // of what was previously written here, and distinct filenames cannot
+  // alias via leftover tail bytes.
   pipe->export_type = p->type;
+  memset(pipe->export_filename, 0, sizeof(pipe->export_filename));
   g_strlcpy(pipe->export_filename, p->filename, sizeof(pipe->export_filename));
   pipe->export_intent = p->intent;
 
   // output profile: export, display, mipmap, see above
   pipe->output_type = out_type;
+  memset(pipe->output_filename, 0, sizeof(pipe->output_filename));
   g_strlcpy(pipe->output_filename, out_filename ? out_filename : "",
             sizeof(pipe->output_filename));
   pipe->output_intent = out_intent;
