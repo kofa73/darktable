@@ -29,6 +29,7 @@
 #include "develop/pixelpipe.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +67,74 @@ static void _clear_lut_curves(dt_iop_order_iccprofile_info_t *const profile_info
     profile_info->lut_in[i][0] = -1.0f;
     profile_info->lut_out[i][0] = -1.0f;
   }
+}
+
+static gboolean _ioppr_is_system_display_profile(const dt_colorspaces_color_profile_type_t profile_type)
+{
+  return profile_type == DT_COLORSPACE_DISPLAY
+         || profile_type == DT_COLORSPACE_DISPLAY2;
+}
+
+static const char *_ioppr_profile_info_cache_filename(const dt_colorspaces_color_profile_type_t profile_type,
+                                                      const char *profile_filename,
+                                                      char cache_filename[DT_IOP_COLOR_ICC_LEN])
+{
+  if(!_ioppr_is_system_display_profile(profile_type))
+    return profile_filename ? profile_filename : "";
+
+  if(!darktable.color_profiles)
+    return profile_filename ? profile_filename : "";
+
+  /* System display profiles are selected by symbolic type. Include the ICC
+     bytes in the profile-info cache key so content changes don't hit stale
+     matrices, while old pointers remain valid until develop cleanup. */
+  dt_hash_t profile_hash = DT_INITHASH;
+  int profile_size = 0;
+
+  pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
+
+  if(profile_type == DT_COLORSPACE_DISPLAY2)
+  {
+    profile_size = darktable.color_profiles->xprofile_size2;
+    profile_hash = dt_hash(profile_hash, &profile_size, sizeof(profile_size));
+    if(darktable.color_profiles->xprofile_data2 && profile_size > 0)
+      profile_hash = dt_hash(profile_hash, darktable.color_profiles->xprofile_data2, profile_size);
+  }
+  else
+  {
+    profile_size = darktable.color_profiles->xprofile_size;
+    profile_hash = dt_hash(profile_hash, &profile_size, sizeof(profile_size));
+    if(darktable.color_profiles->xprofile_data && profile_size > 0)
+      profile_hash = dt_hash(profile_hash, darktable.color_profiles->xprofile_data, profile_size);
+  }
+
+  pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
+
+  snprintf(cache_filename, DT_IOP_COLOR_ICC_LEN,
+           "%s:%d:%016" PRIx64,
+           profile_type == DT_COLORSPACE_DISPLAY2 ? "display2" : "display",
+           profile_size, (uint64_t)profile_hash);
+
+  return cache_filename;
+}
+
+static dt_iop_order_iccprofile_info_t *_ioppr_get_profile_info_from_list_by_key(struct dt_develop_t *dev,
+                                                                                const dt_colorspaces_color_profile_type_t profile_type,
+                                                                                const char *cache_key)
+{
+  dt_iop_order_iccprofile_info_t *profile_info = NULL;
+
+  for(GList *profiles = dev->allprofile_info; profiles; profiles = g_list_next(profiles))
+  {
+    dt_iop_order_iccprofile_info_t *prof = profiles->data;
+    if(prof->type == profile_type && strcmp(prof->filename, cache_key) == 0)
+    {
+      profile_info = prof;
+      break;
+    }
+  }
+
+  return profile_info;
 }
 
 static void _transform_from_to_rgb_lab_lcms2(const float *const image_in,
@@ -786,19 +855,11 @@ dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev,
                                     const dt_colorspaces_color_profile_type_t profile_type,
                                     const char *profile_filename)
 {
-  dt_iop_order_iccprofile_info_t *profile_info = NULL;
+  char cache_filename[DT_IOP_COLOR_ICC_LEN] = { 0 };
+  const char *const cache_key =
+    _ioppr_profile_info_cache_filename(profile_type, profile_filename, cache_filename);
 
-  for(GList *profiles = dev->allprofile_info; profiles; profiles = g_list_next(profiles))
-  {
-    dt_iop_order_iccprofile_info_t *prof = profiles->data;
-    if(prof->type == profile_type && strcmp(prof->filename, profile_filename) == 0)
-    {
-      profile_info = prof;
-      break;
-    }
-  }
-
-  return profile_info;
+  return _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key);
 }
 
 dt_iop_order_iccprofile_info_t *
@@ -807,13 +868,16 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
                                   const char *profile_filename,
                                   const int intent)
 {
+  char cache_filename[DT_IOP_COLOR_ICC_LEN] = { 0 };
+  const char *const cache_key =
+    _ioppr_profile_info_cache_filename(profile_type, profile_filename, cache_filename);
   dt_iop_order_iccprofile_info_t *profile_info =
-    dt_ioppr_get_profile_info_from_list(dev, profile_type, profile_filename);
+    _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key);
   if(profile_info == NULL)
   {
     profile_info = dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);
     dt_ioppr_init_profile_info(profile_info, 0);
-    if(!_ioppr_generate_profile_info(profile_info, profile_type, profile_filename, intent))
+    if(!_ioppr_generate_profile_info(profile_info, profile_type, cache_key, intent))
     {
       dev->allprofile_info = g_list_append(dev->allprofile_info, profile_info);
     }

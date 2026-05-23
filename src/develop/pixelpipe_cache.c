@@ -115,9 +115,8 @@ static dt_hash_t _dev_pixelpipe_cache_basichash(dt_dev_pixelpipe_t *pipe,
        4) If we change any color profile they are committed for every history entry so we can't check
           for them in the piece->hash but must use the final profiles available via pipe->xxx_profile_info.
           For the export profile we hash identity bytes (type/filename/intent) rather than the profile_info
-          pointer so non-matrix profiles and Lab transitions in colorout cannot collide. For display we read
-          the resolved (primary/secondary) system display profile because colorout's params only carry the symbolic
-          DT_COLORSPACE_DISPLAY for non-export pipes.
+          pointer so non-matrix profiles and Lab transitions in colorout cannot collide. For system display profile
+          content changes, colorout handles DT_SIGNAL_CONTROL_PROFILE_CHANGED by rebuilding pipes and flushing caches.
        5) Please note that position is not the iop_order but the position in the pipe
        6) Please note that pipe->type, want_details and request_color_pick are only used if a roi is provided
           for better support of dt_dev_pixelpipe_piece_hash()
@@ -518,4 +517,3 @@ void dt_dev_pixelpipe_cache_report(dt_dev_pixelpipe_t *pipe)
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-
