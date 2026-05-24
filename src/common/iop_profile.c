@@ -75,9 +75,10 @@ static gboolean _ioppr_is_system_display_profile(const dt_colorspaces_color_prof
          || profile_type == DT_COLORSPACE_DISPLAY2;
 }
 
-static const char *_ioppr_profile_info_cache_filename(const dt_colorspaces_color_profile_type_t profile_type,
-                                                      const char *profile_filename,
-                                                      char cache_filename[DT_IOP_COLOR_ICC_LEN])
+static const char *
+_ioppr_profile_info_cache_filename(const dt_colorspaces_color_profile_type_t profile_type,
+                                   const char *profile_filename,
+                                   char cache_filename[DT_IOP_COLOR_ICC_LEN])
 {
   if(!_ioppr_is_system_display_profile(profile_type))
     return profile_filename ? profile_filename : "";
@@ -85,35 +86,13 @@ static const char *_ioppr_profile_info_cache_filename(const dt_colorspaces_color
   if(!darktable.color_profiles)
     return profile_filename ? profile_filename : "";
 
-  /* System display profiles are selected by symbolic type. Include the ICC
-     bytes in the profile-info cache key so content changes don't hit stale
-     matrices, while old pointers remain valid until develop cleanup. */
-  dt_hash_t profile_hash = DT_INITHASH;
-  int profile_size = 0;
-
   pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
-
-  if(profile_type == DT_COLORSPACE_DISPLAY2)
-  {
-    profile_size = darktable.color_profiles->xprofile_size2;
-    profile_hash = dt_hash(profile_hash, &profile_size, sizeof(profile_size));
-    if(darktable.color_profiles->xprofile_data2 && profile_size > 0)
-      profile_hash = dt_hash(profile_hash, darktable.color_profiles->xprofile_data2, profile_size);
-  }
-  else
-  {
-    profile_size = darktable.color_profiles->xprofile_size;
-    profile_hash = dt_hash(profile_hash, &profile_size, sizeof(profile_size));
-    if(darktable.color_profiles->xprofile_data && profile_size > 0)
-      profile_hash = dt_hash(profile_hash, darktable.color_profiles->xprofile_data, profile_size);
-  }
-
+  g_strlcpy(cache_filename,
+            profile_type == DT_COLORSPACE_DISPLAY2
+              ? darktable.color_profiles->xprofile_cache_key2
+              : darktable.color_profiles->xprofile_cache_key,
+            DT_IOP_COLOR_ICC_LEN);
   pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
-
-  snprintf(cache_filename, DT_IOP_COLOR_ICC_LEN,
-           "%s:%d:%016" PRIx64,
-           profile_type == DT_COLORSPACE_DISPLAY2 ? "display2" : "display",
-           profile_size, (uint64_t)profile_hash);
 
   return cache_filename;
 }
@@ -738,10 +717,11 @@ void dt_ioppr_cleanup_profile_info(dt_iop_order_iccprofile_info_t *profile_info)
  * it can be called multiple time between init and cleanup
  * return TRUE in case of an error
  */
-static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
-                                             const int type,
-                                             const char *filename,
-                                             const int intent)
+static gboolean _populate_profile_info_from_cms(dt_iop_order_iccprofile_info_t *profile_info,
+                                                const int type,
+                                                const char *filename,
+                                                const int intent,
+                                                cmsHPROFILE rgb_profile)
 {
   _mark_as_nonmatrix_profile(profile_info);
   _clear_lut_curves(profile_info);
@@ -749,28 +729,9 @@ static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *pro
   profile_info->nonlinearlut = 0;
   profile_info->grey = 0.1842f;
 
-  if(type == DT_COLORSPACE_FILE
-    && (!filename || !filename[0] || !g_file_test(filename, G_FILE_TEST_IS_REGULAR)))
-  {
-    dt_print(DT_DEBUG_PARAMS, "[generate_profile_info] icc profile '%s' not available",
-      filename ? filename : "???");
-    return TRUE;
-  }
-
   profile_info->type = type;
   g_strlcpy(profile_info->filename, filename, sizeof(profile_info->filename));
   profile_info->intent = intent;
-
-  if(type == DT_COLORSPACE_DISPLAY || type == DT_COLORSPACE_DISPLAY2)
-    pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
-
-  const dt_colorspaces_color_profile_t *profile =
-    dt_colorspaces_get_profile(type, filename, DT_PROFILE_DIRECTION_ANY);
-
-  cmsHPROFILE *rgb_profile = profile ? profile->profile : NULL;;
-
-  if(type == DT_COLORSPACE_DISPLAY || type == DT_COLORSPACE_DISPLAY2)
-    pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
 
   cmsColorSpaceSignature rgb_profile_color_space = rgb_profile ? cmsGetColorSpace(rgb_profile) : 0;
 
@@ -850,6 +811,27 @@ static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *pro
   return FALSE;
 }
 
+static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
+                                             const int type,
+                                             const char *filename,
+                                             const int intent)
+{
+  if(type == DT_COLORSPACE_FILE
+    && (!filename || !filename[0] || !g_file_test(filename, G_FILE_TEST_IS_REGULAR)))
+  {
+    dt_print(DT_DEBUG_PARAMS, "[generate_profile_info] icc profile '%s' not available",
+      filename ? filename : "???");
+    return TRUE;
+  }
+
+  const dt_colorspaces_color_profile_t *profile =
+    dt_colorspaces_get_profile(type, filename, DT_PROFILE_DIRECTION_ANY);
+
+  cmsHPROFILE rgb_profile = profile ? profile->profile : NULL;
+
+  return _populate_profile_info_from_cms(profile_info, type, filename, intent, rgb_profile);
+}
+
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev,
                                     const dt_colorspaces_color_profile_type_t profile_type,
@@ -869,10 +851,42 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
                                   const int intent)
 {
   char cache_filename[DT_IOP_COLOR_ICC_LEN] = { 0 };
+  dt_iop_order_iccprofile_info_t *profile_info = NULL;
+
+  if(_ioppr_is_system_display_profile(profile_type) && darktable.color_profiles)
+  {
+    // atomic key+profile snapshot, then look up under that key
+    pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
+    g_strlcpy(cache_filename,
+              profile_type == DT_COLORSPACE_DISPLAY2
+                ? darktable.color_profiles->xprofile_cache_key2
+                : darktable.color_profiles->xprofile_cache_key,
+              DT_IOP_COLOR_ICC_LEN);
+    profile_info = _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_filename);
+    if(!profile_info)
+    {
+      profile_info = dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);
+      dt_ioppr_init_profile_info(profile_info, 0);
+      const dt_colorspaces_color_profile_t *profile =
+        dt_colorspaces_get_profile(profile_type, "", DT_PROFILE_DIRECTION_ANY);
+      cmsHPROFILE rgb_profile = profile ? profile->profile : NULL;
+      const gboolean failed = _populate_profile_info_from_cms(
+          profile_info, profile_type, cache_filename, intent, rgb_profile);
+      pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
+      if(failed) { dt_free_align(profile_info); return NULL; }
+      dev->allprofile_info = g_list_append(dev->allprofile_info, profile_info);
+    }
+    else
+    {
+      pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
+    }
+    return profile_info;
+  }
+
+  // non-display: existing path
   const char *const cache_key =
     _ioppr_profile_info_cache_filename(profile_type, profile_filename, cache_filename);
-  dt_iop_order_iccprofile_info_t *profile_info =
-    _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key);
+  profile_info = _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key);
   if(profile_info == NULL)
   {
     profile_info = dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);

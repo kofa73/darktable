@@ -168,10 +168,12 @@ typedef struct dt_colorspaces_t
   gchar *colord_profile_file;
   uint8_t *xprofile_data;
   int xprofile_size;
+  char xprofile_cache_key[DT_IOP_COLOR_ICC_LEN];
 
   gchar *colord_profile_file2;
   uint8_t *xprofile_data2;
   int xprofile_size2;
+  char xprofile_cache_key2[DT_IOP_COLOR_ICC_LEN];
 
   // the current set of selected profiles
   dt_colorspaces_color_profile_type_t display_type;

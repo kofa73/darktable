@@ -18,6 +18,7 @@
 
 #include "common/colorspaces_inline_conversions.h"
 #include "common/colorspaces.h"
+#include <inttypes.h>
 #include "common/colormatrices.c"
 #include "common/darktable.h"
 #include "common/debug.h"
@@ -1241,66 +1242,119 @@ void dt_colorspaces_update_display2_transforms()
   _update_display2_transforms(darktable.color_profiles);
 }
 
-// make sure that darktable.color_profiles->xprofile_lock is held when calling this!
-static void _update_display_profile(guchar *tmp_data,
-                                    const gsize size,
-                                    char *name,
-                                    const size_t name_size)
+// helper, callable while holding xprofile_lock WR
+static void _compute_display_cache_key(const gboolean display2,
+                                       const uint8_t *data,
+                                       const int size,
+                                       char out[DT_IOP_COLOR_ICC_LEN])
 {
+  dt_hash_t h = DT_INITHASH;
+  h = dt_hash(h, &size, sizeof(size));
+  if(data && size > 0) h = dt_hash(h, data, size);
+  // zero before format to keep the buffer deterministic for hash users
+  memset(out, 0, DT_IOP_COLOR_ICC_LEN);
+  snprintf(out, DT_IOP_COLOR_ICC_LEN, "%s:%d:%016" PRIx64,
+           display2 ? "display2" : "display", size, (uint64_t)h);
+}
+
+// caller holds xprofile_lock WR. Caller MUST guarantee size > 0 && size <= G_MAXINT.
+// Returns TRUE iff bytes/key/profile published.
+// On FALSE, tmp_data is freed; xprofile state unchanged.
+// On TRUE,  tmp_data is transferred to darktable.color_profiles->xprofile_data{,2}.
+// Caller must not use tmp_data after this call (set to NULL).
+static gboolean _update_display_profile(guchar *tmp_data,
+                                        const int size,
+                                        char *name,
+                                        const size_t name_size)
+{
+  dt_colorspaces_color_profile_t *target = NULL;
+  for(GList *iter = darktable.color_profiles->profiles; iter; iter = g_list_next(iter))
+  {
+    dt_colorspaces_color_profile_t *p = iter->data;
+    if(p->type == DT_COLORSPACE_DISPLAY)
+    {
+      target = p;
+      break;
+    }
+  }
+
+  if(!target)
+  {
+    g_free(tmp_data);
+    return FALSE;
+  }
+
+  cmsHPROFILE profile = cmsOpenProfileFromMem(tmp_data, size);
+  if(!profile)
+  {
+    g_free(tmp_data);
+    return FALSE;
+  }
+
   g_free(darktable.color_profiles->xprofile_data);
   darktable.color_profiles->xprofile_data = tmp_data;
   darktable.color_profiles->xprofile_size = size;
+  _compute_display_cache_key(FALSE,
+                             darktable.color_profiles->xprofile_data,
+                             darktable.color_profiles->xprofile_size,
+                             darktable.color_profiles->xprofile_cache_key);
 
-  cmsHPROFILE profile = cmsOpenProfileFromMem(tmp_data, size);
-  if(profile)
-  {
-    for(GList *iter = darktable.color_profiles->profiles; iter; iter = g_list_next(iter))
-    {
-      dt_colorspaces_color_profile_t *p = iter->data;
-      if(p->type == DT_COLORSPACE_DISPLAY)
-      {
-        if(p->profile) dt_colorspaces_cleanup_profile(p->profile);
-        p->profile = profile;
-        if(name)
-          dt_colorspaces_get_profile_name(profile, "en", "US", name, name_size);
+  if(target->profile) dt_colorspaces_cleanup_profile(target->profile);
+  target->profile = profile;
+  if(name)
+    dt_colorspaces_get_profile_name(profile, "en", "US", name, name_size);
 
-        // update cached transforms for color management of thumbnails
-        dt_colorspaces_update_display_transforms();
+  // update cached transforms for color management of thumbnails
+  dt_colorspaces_update_display_transforms();
 
-        break;
-      }
-    }
-  }
+  return TRUE;
 }
 
-static void _update_display2_profile(guchar *tmp_data,
-                                     const gsize size,
-                                     char *name,
-                                     const size_t name_size)
+static gboolean _update_display2_profile(guchar *tmp_data,
+                                         const int size,
+                                         char *name,
+                                         const size_t name_size)
 {
+  dt_colorspaces_color_profile_t *target = NULL;
+  for(GList *iter = darktable.color_profiles->profiles; iter; iter = g_list_next(iter))
+  {
+    dt_colorspaces_color_profile_t *p = iter->data;
+    if(p->type == DT_COLORSPACE_DISPLAY2)
+    {
+      target = p;
+      break;
+    }
+  }
+
+  if(!target)
+  {
+    g_free(tmp_data);
+    return FALSE;
+  }
+
+  cmsHPROFILE profile = cmsOpenProfileFromMem(tmp_data, size);
+  if(!profile)
+  {
+    g_free(tmp_data);
+    return FALSE;
+  }
+
   g_free(darktable.color_profiles->xprofile_data2);
   darktable.color_profiles->xprofile_data2 = tmp_data;
   darktable.color_profiles->xprofile_size2 = size;
+  _compute_display_cache_key(TRUE,
+                             darktable.color_profiles->xprofile_data2,
+                             darktable.color_profiles->xprofile_size2,
+                             darktable.color_profiles->xprofile_cache_key2);
 
-  cmsHPROFILE profile = cmsOpenProfileFromMem(tmp_data, size);
-  if(profile)
-  {
-    for(GList *iter = darktable.color_profiles->profiles; iter; iter = g_list_next(iter))
-    {
-      dt_colorspaces_color_profile_t *p = iter->data;
-      if(p->type == DT_COLORSPACE_DISPLAY2)
-      {
-        if(p->profile) dt_colorspaces_cleanup_profile(p->profile);
-        p->profile = profile;
-        if(name) dt_colorspaces_get_profile_name(profile, "en", "US", name, name_size);
+  if(target->profile) dt_colorspaces_cleanup_profile(target->profile);
+  target->profile = profile;
+  if(name) dt_colorspaces_get_profile_name(profile, "en", "US", name, name_size);
 
-        // update cached transforms for color management of thumbnails
-        dt_colorspaces_update_display2_transforms();
+  // update cached transforms for color management of thumbnails
+  dt_colorspaces_update_display2_transforms();
 
-        break;
-      }
-    }
-  }
+  return TRUE;
 }
 
 static void cms_error_handler(const cmsContext ContextID,
@@ -1406,6 +1460,9 @@ dt_colorspaces_t *dt_colorspaces_init()
                                   &Rec709_Primaries_Prequantized);
 
   pthread_rwlock_init(&res->xprofile_lock, NULL);
+
+  _compute_display_cache_key(FALSE, NULL, 0, res->xprofile_cache_key);
+  _compute_display_cache_key(TRUE, NULL, 0, res->xprofile_cache_key2);
 
   int in_pos = -1,
       out_pos = -1,
@@ -1810,6 +1867,8 @@ static void dt_colorspaces_get_display_profile_colord_callback(GObject *source,
   pthread_rwlock_wrlock(&darktable.color_profiles->xprofile_lock);
 
   int profile_changed = 0;
+  gboolean published = FALSE;
+
   CdWindow *window = CD_WINDOW(source);
   GError *error = NULL;
   CdProfile *profile = cd_window_get_profile_finish(window, res, &error);
@@ -1823,49 +1882,69 @@ static void dt_colorspaces_get_display_profile_colord_callback(GObject *source,
          || (profile_type != DT_COLORSPACE_DISPLAY2
              && g_strcmp0(filename, darktable.color_profiles->colord_profile_file)))
       {
-        /* the profile has changed (either because the user changed
-         * the colord settings or because we are on a different screen
-         * now) */
-        // update darktable.color_profiles->colord_profile_file
-        if(profile_type == DT_COLORSPACE_DISPLAY2)
-        {
-          g_free(darktable.color_profiles->colord_profile_file2);
-          darktable.color_profiles->colord_profile_file2 = g_strdup(filename);
-        }
-        else
-        {
-          g_free(darktable.color_profiles->colord_profile_file);
-          darktable.color_profiles->colord_profile_file = g_strdup(filename);
-        }
-        // read the file
         guchar *tmp_data = NULL;
-        gsize size;
-        g_file_get_contents(filename, (gchar **)&tmp_data, &size, NULL);
-        if(profile_type == DT_COLORSPACE_DISPLAY2)
-        {
-          profile_changed = size > 0
-            && (darktable.color_profiles->xprofile_size2 != size
-                || memcmp(darktable.color_profiles->xprofile_data2, tmp_data, size) != 0);
-        }
-        else
-        {
-          profile_changed = size > 0
-            && (darktable.color_profiles->xprofile_size != size
-                || memcmp(darktable.color_profiles->xprofile_data, tmp_data, size) != 0);
-        }
-        if(profile_changed)
-        {
-          if(profile_type == DT_COLORSPACE_DISPLAY2)
-            _update_display2_profile(tmp_data, size, NULL, 0);
-          else
-            _update_display_profile(tmp_data, size, NULL, 0);
-          dt_print(DT_DEBUG_CONTROL,
-                   "[color profile] colord gave us a new screen profile:"
-                   " '%s' (size: %zu)", filename, size);
-        }
-        else
+        gsize size = 0;
+        const gboolean read_ok =
+          g_file_get_contents(filename, (gchar **)&tmp_data, &size, NULL);
+
+        if(!read_ok || !tmp_data || size == 0 || size > G_MAXINT)
         {
           g_free(tmp_data);
+          tmp_data = NULL;
+        }
+        else
+        {
+          const int profile_size = (int)size;
+          if(profile_type == DT_COLORSPACE_DISPLAY2)
+            profile_changed =
+              darktable.color_profiles->xprofile_size2 != profile_size
+              || memcmp(darktable.color_profiles->xprofile_data2, tmp_data, profile_size) != 0;
+          else
+            profile_changed =
+              darktable.color_profiles->xprofile_size != profile_size
+              || memcmp(darktable.color_profiles->xprofile_data, tmp_data, profile_size) != 0;
+
+          if(profile_changed)
+          {
+            if(profile_type == DT_COLORSPACE_DISPLAY2)
+              published = _update_display2_profile(tmp_data, profile_size, NULL, 0);
+            else
+              published = _update_display_profile(tmp_data, profile_size, NULL, 0);
+
+            tmp_data = NULL;
+
+            if(published)
+            {
+              if(profile_type == DT_COLORSPACE_DISPLAY2)
+              {
+                g_free(darktable.color_profiles->colord_profile_file2);
+                darktable.color_profiles->colord_profile_file2 = g_strdup(filename);
+              }
+              else
+              {
+                g_free(darktable.color_profiles->colord_profile_file);
+                darktable.color_profiles->colord_profile_file = g_strdup(filename);
+              }
+              dt_print(DT_DEBUG_CONTROL,
+                       "[color profile] colord gave us a new screen profile:"
+                       " '%s' (size: %d)", filename, profile_size);
+            }
+          }
+          else
+          {
+            g_free(tmp_data);
+            tmp_data = NULL;
+            if(profile_type == DT_COLORSPACE_DISPLAY2)
+            {
+              g_free(darktable.color_profiles->colord_profile_file2);
+              darktable.color_profiles->colord_profile_file2 = g_strdup(filename);
+            }
+            else
+            {
+              g_free(darktable.color_profiles->colord_profile_file);
+              darktable.color_profiles->colord_profile_file = g_strdup(filename);
+            }
+          }
         }
       }
     }
@@ -1876,7 +1955,7 @@ static void dt_colorspaces_get_display_profile_colord_callback(GObject *source,
 
   pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
 
-  if(profile_changed) DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_CONTROL_PROFILE_CHANGED);
+  if(published) DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_CONTROL_PROFILE_CHANGED);
 }
 #endif
 
@@ -1916,6 +1995,8 @@ void dt_colorspaces_set_display_profile
   guint8 *buffer = NULL;
   gint buffer_size = 0;
   gchar *profile_source = NULL;
+  int profile_changed = 0;
+  gboolean published = FALSE;
 
 #if defined GDK_WINDOWING_X11
 
@@ -2023,14 +2104,14 @@ void dt_colorspaces_set_display_profile
   if(!hMonitor)
   {
     dt_print(DT_DEBUG_ALWAYS, "[win32 dt_colorspaces_set_display_profile] error getting monitor handle");
-    return;
+    goto cleanup_unlock;
   }
   MONITORINFOEX monitorInfo;
   monitorInfo.cbSize = sizeof(MONITORINFOEX);
   if(!GetMonitorInfoW(hMonitor, (LPMONITORINFO) &monitorInfo))  //get monitor info
   {
     dt_print(DT_DEBUG_ALWAYS, "[win32 dt_colorspaces_set_display_profile] error getting monitor info");
-    return;
+    goto cleanup_unlock;
   }
   HDC hdc = CreateIC(L"MONITOR", monitorInfo.szDevice, NULL, NULL); // get device-info context of the monitor
   if(hdc != NULL)
@@ -2044,9 +2125,18 @@ void dt_colorspaces_set_display_profile
       gchar *path = g_utf16_to_utf8(wpath, -1, NULL, NULL, NULL);
       if(path)
       {
-        gsize size;
-        g_file_get_contents(path, (gchar **)&buffer, &size, NULL);
-        buffer_size = size;
+        gsize size = 0;
+        const gboolean read_ok = g_file_get_contents(path, (gchar **)&buffer, &size, NULL);
+        if(read_ok && buffer && size > 0 && size <= G_MAXINT)
+        {
+          buffer_size = (int)size;
+        }
+        else
+        {
+          g_free(buffer);
+          buffer = NULL;
+          buffer_size = 0;
+        }
         g_free(path);
       }
     }
@@ -2056,7 +2146,6 @@ void dt_colorspaces_set_display_profile
   profile_source = g_strdup("windows color profile api");
 #endif
 
-  int profile_changed = 0;
   if(profile_type == DT_COLORSPACE_DISPLAY2)
   {
     profile_changed
@@ -2075,19 +2164,30 @@ void dt_colorspaces_set_display_profile
   {
     char name[512] = { 0 };
     if(profile_type == DT_COLORSPACE_DISPLAY2)
-      _update_display2_profile(buffer, buffer_size, name, sizeof(name));
+      published = _update_display2_profile(buffer, buffer_size, name, sizeof(name));
     else
-      _update_display_profile(buffer, buffer_size, name, sizeof(name));
-    dt_print(DT_DEBUG_CONTROL, "[color profile] we got a new screen profile `%s'"
-             " from the %s (size: %d)",
-             *name ? name : "(unknown)", profile_source, buffer_size);
+      published = _update_display_profile(buffer, buffer_size, name, sizeof(name));
+
+    buffer = NULL;
+
+    if(published)
+    {
+      dt_print(DT_DEBUG_CONTROL, "[color profile] we got a new screen profile `%s'"
+               " from the %s (size: %d)",
+               *name ? name : "(unknown)", profile_source, buffer_size);
+    }
   }
   else
   {
     g_free(buffer);
+    buffer = NULL;
   }
+
+#if defined G_OS_WIN32
+cleanup_unlock:
+#endif
   pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
-  if(profile_changed) DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_CONTROL_PROFILE_CHANGED);
+  if(published) DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_CONTROL_PROFILE_CHANGED);
   g_free(profile_source);
 }
 
