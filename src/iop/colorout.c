@@ -287,6 +287,27 @@ static void _signal_profile_changed(gpointer instance, dt_iop_module_t *self)
   dt_control_queue_redraw_center();
 }
 
+static void _profile_identity_filename(const dt_colorspaces_color_profile_type_t type,
+                                       const char *filename,
+                                       char out[DT_IOP_COLOR_ICC_LEN])
+{
+  memset(out, 0, DT_IOP_COLOR_ICC_LEN);
+
+  if((type == DT_COLORSPACE_DISPLAY || type == DT_COLORSPACE_DISPLAY2)
+     && darktable.color_profiles)
+  {
+    g_strlcpy(out,
+              type == DT_COLORSPACE_DISPLAY2
+                ? darktable.color_profiles->xprofile_cache_key2
+                : darktable.color_profiles->xprofile_cache_key,
+              DT_IOP_COLOR_ICC_LEN);
+  }
+  else
+  {
+    g_strlcpy(out, filename ? filename : "", DT_IOP_COLOR_ICC_LEN);
+  }
+}
+
 #if 1
 static float lerp_lut(const float *const lut, const float v)
 {
@@ -603,7 +624,10 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   {
     out_type = dt_mipmap_cache_get_colorspace();
     out_filename = (out_type == DT_COLORSPACE_DISPLAY ? darktable.color_profiles->display_filename : "");
-    out_intent = darktable.color_profiles->display_intent;
+    // AdobeRGB mipmaps are stored working data; keep the conversion colorimetric.
+    out_intent = (out_type == DT_COLORSPACE_ADOBERGB)
+      ? DT_INTENT_RELATIVE_COLORIMETRIC
+      : darktable.color_profiles->display_intent;
   }
   else if(dt_pipe_is_preview2(pipe))
   {
@@ -620,28 +644,59 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
     out_intent = darktable.color_profiles->display_intent;
   }
 
-  // store export profile for modules that need the export gamut + pixelpipe
-  // cache basichash. The basichash hashes sizeof(buffer); zero the tail
-  // before strlcpy so the same filename always hashes the same regardless
-  // of what was previously written here, and distinct filenames cannot
-  // alias via leftover tail bytes.
-  pipe->export_type = p->type;
-  memset(pipe->export_filename, 0, sizeof(pipe->export_filename));
-  g_strlcpy(pipe->export_filename, p->filename, sizeof(pipe->export_filename));
-  pipe->export_intent = p->intent;
+  // Store export/output profile identities for modules that need gamut data
+  // and for the pixelpipe cache basichash. The basichash hashes the full
+  // buffers, so local identity strings are zero-filled before copying.
+  const gboolean needs_lock = (p->type == DT_COLORSPACE_DISPLAY || p->type == DT_COLORSPACE_DISPLAY2
+                            || out_type == DT_COLORSPACE_DISPLAY || out_type == DT_COLORSPACE_DISPLAY2);
+
+  if(needs_lock)
+    pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
+
+  char export_identity_filename[DT_IOP_COLOR_ICC_LEN];
+  _profile_identity_filename(p->type, p->filename, export_identity_filename);
+  const char *const actual_out_filename = out_filename ? out_filename : "";
+  char output_identity_filename[DT_IOP_COLOR_ICC_LEN];
+  _profile_identity_filename(out_type, actual_out_filename, output_identity_filename);
+
+  dt_pthread_mutex_lock(&pipe->profile_identity_mutex);
+  const gboolean export_changed =
+      pipe->export_type != p->type
+      || pipe->export_intent != p->intent
+      || memcmp(pipe->export_filename, export_identity_filename,
+                sizeof(pipe->export_filename)) != 0;
+  if(export_changed)
+  {
+    pipe->export_type = p->type;
+    memcpy(pipe->export_filename, export_identity_filename,
+           sizeof(pipe->export_filename));
+    pipe->export_intent = p->intent;
+  }
 
   // output profile: export, display, mipmap, see above
-  pipe->output_type = out_type;
-  memset(pipe->output_filename, 0, sizeof(pipe->output_filename));
-  g_strlcpy(pipe->output_filename, out_filename ? out_filename : "",
-            sizeof(pipe->output_filename));
-  pipe->output_intent = out_intent;
+  const gboolean output_changed =
+      pipe->output_type != out_type
+      || pipe->output_intent != out_intent
+      || memcmp(pipe->output_filename, output_identity_filename,
+                sizeof(pipe->output_filename)) != 0;
+  if(output_changed)
+  {
+    pipe->output_type = out_type;
+    memcpy(pipe->output_filename, output_identity_filename,
+           sizeof(pipe->output_filename));
+    pipe->output_intent = out_intent;
+  }
+  dt_pthread_mutex_unlock(&pipe->profile_identity_mutex);
 
   // when the output type is Lab then process is a nop, so we can avoid creating a transform
   // and the subsequent error messages
   d->type = out_type;
   if(out_type == DT_COLORSPACE_LAB)
+  {
+    if(needs_lock)
+      pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
     return;
+  }
 
   /*
    * Setup transform flags
@@ -649,8 +704,6 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   uint32_t transformFlags = 0;
 
   /* creating output profile */
-  if(out_type == DT_COLORSPACE_DISPLAY || out_type == DT_COLORSPACE_DISPLAY2)
-    pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
 
   const dt_colorspaces_color_profile_t *out_profile
       = dt_colorspaces_get_profile(out_type, out_filename,
@@ -752,7 +805,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
     }
   }
 
-  if(out_type == DT_COLORSPACE_DISPLAY || out_type == DT_COLORSPACE_DISPLAY2)
+  if(needs_lock)
     pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
 
   // now try to initialize unbounded mode:

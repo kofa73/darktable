@@ -99,19 +99,39 @@ _ioppr_profile_info_cache_filename(const dt_colorspaces_color_profile_type_t pro
 
 static dt_iop_order_iccprofile_info_t *_ioppr_get_profile_info_from_list_by_key(struct dt_develop_t *dev,
                                                                                 const dt_colorspaces_color_profile_type_t profile_type,
-                                                                                const char *cache_key)
+                                                                                const char *cache_key,
+                                                                                const int intent,
+                                                                                const gboolean match_intent)
 {
   dt_iop_order_iccprofile_info_t *profile_info = NULL;
 
   for(GList *profiles = dev->allprofile_info; profiles; profiles = g_list_next(profiles))
   {
     dt_iop_order_iccprofile_info_t *prof = profiles->data;
-    if(prof->type == profile_type && strcmp(prof->filename, cache_key) == 0)
+    if(prof->type == profile_type
+       && strcmp(prof->filename, cache_key) == 0
+       && (!match_intent || prof->intent == intent))
     {
       profile_info = prof;
       break;
     }
   }
+
+  return profile_info;
+}
+
+static dt_iop_order_iccprofile_info_t *_ioppr_get_profile_info_from_list_by_key_locked
+  (struct dt_develop_t *dev,
+   const dt_colorspaces_color_profile_type_t profile_type,
+   const char *cache_key,
+   const int intent,
+   const gboolean match_intent)
+{
+  dt_pthread_mutex_lock(&dev->allprofile_mutex);
+  dt_iop_order_iccprofile_info_t *const profile_info =
+    _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key,
+                                             intent, match_intent);
+  dt_pthread_mutex_unlock(&dev->allprofile_mutex);
 
   return profile_info;
 }
@@ -682,6 +702,8 @@ static inline void _transform_matrix(struct dt_iop_module_t *self,
 void dt_ioppr_init_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
                                 const int lutsize)
 {
+  if(!profile_info) return;
+
   profile_info->type = DT_COLORSPACE_NONE;
   profile_info->filename[0] = '\0';
   profile_info->intent = DT_INTENT_PERCEPTUAL;
@@ -696,9 +718,9 @@ void dt_ioppr_init_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
   for(int i = 0; i < 3; i++)
   {
     profile_info->lut_in[i] = dt_alloc_align_float(profile_info->lutsize);
-    profile_info->lut_in[i][0] = -1.0f;
+    if(profile_info->lut_in[i]) profile_info->lut_in[i][0] = -1.0f;
     profile_info->lut_out[i] = dt_alloc_align_float(profile_info->lutsize);
-    profile_info->lut_out[i][0] = -1.0f;
+    if(profile_info->lut_out[i]) profile_info->lut_out[i][0] = -1.0f;
   }
 }
 
@@ -713,6 +735,34 @@ void dt_ioppr_cleanup_profile_info(dt_iop_order_iccprofile_info_t *profile_info)
   }
 }
 
+static gboolean _ioppr_profile_info_has_luts(const dt_iop_order_iccprofile_info_t *profile_info)
+{
+  if(!profile_info) return FALSE;
+
+  for(int i = 0; i < 3; i++)
+    if(!profile_info->lut_in[i] || !profile_info->lut_out[i])
+      return FALSE;
+
+  return TRUE;
+}
+
+static dt_iop_order_iccprofile_info_t *_ioppr_alloc_profile_info(void)
+{
+  dt_iop_order_iccprofile_info_t *profile_info =
+    dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);
+  if(!profile_info) return NULL;
+
+  dt_ioppr_init_profile_info(profile_info, 0);
+  if(!_ioppr_profile_info_has_luts(profile_info))
+  {
+    dt_ioppr_cleanup_profile_info(profile_info);
+    dt_free_align(profile_info);
+    return NULL;
+  }
+
+  return profile_info;
+}
+
 /** generate the info for the profile (type, filename) if matrix can be retrieved from lcms2
  * it can be called multiple time between init and cleanup
  * return TRUE in case of an error
@@ -723,6 +773,8 @@ static gboolean _populate_profile_info_from_cms(dt_iop_order_iccprofile_info_t *
                                                 const int intent,
                                                 cmsHPROFILE rgb_profile)
 {
+  assert(type != DT_COLORSPACE_FILE || (filename && filename[0]));
+
   _mark_as_nonmatrix_profile(profile_info);
   _clear_lut_curves(profile_info);
 
@@ -841,7 +893,8 @@ dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev,
   const char *const cache_key =
     _ioppr_profile_info_cache_filename(profile_type, profile_filename, cache_filename);
 
-  return _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key);
+  return _ioppr_get_profile_info_from_list_by_key_locked(dev, profile_type, cache_key,
+                                                        DT_INTENT_PERCEPTUAL, FALSE);
 }
 
 dt_iop_order_iccprofile_info_t *
@@ -855,6 +908,21 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
 
   if(_ioppr_is_system_display_profile(profile_type) && darktable.color_profiles)
   {
+    // If the caller already captured a synthetic ICC content key for the
+    // display profile (colorout writes xprofile_cache_key into
+    // pipe->{output,export}_filename under xprofile_lock, basichash hashes
+    // that buffer), look up that specific entry so the rendered bytes stay
+    // consistent with the cache key. Callers passing the live system display
+    // filename (e.g. set_pipe_input_profile_info) miss this lookup and fall
+    // through to the live-snapshot path below, which is what they want.
+    if(profile_filename && profile_filename[0])
+    {
+      profile_info = _ioppr_get_profile_info_from_list_by_key_locked(dev, profile_type,
+                                                                     profile_filename,
+                                                                     intent, TRUE);
+      if(profile_info) return profile_info;
+    }
+
     // atomic key+profile snapshot, then look up under that key
     pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
     g_strlcpy(cache_filename,
@@ -862,19 +930,51 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
                 ? darktable.color_profiles->xprofile_cache_key2
                 : darktable.color_profiles->xprofile_cache_key,
               DT_IOP_COLOR_ICC_LEN);
-    profile_info = _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_filename);
+
+    if(profile_filename && profile_filename[0]
+       && (strncmp(profile_filename, "display:", 8) == 0 || strncmp(profile_filename, "display2:", 9) == 0)
+       && strcmp(profile_filename, cache_filename) != 0)
+    {
+      pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
+      return NULL;
+    }
+
+    profile_info = _ioppr_get_profile_info_from_list_by_key_locked(dev, profile_type,
+                                                                   cache_filename,
+                                                                   intent, TRUE);
     if(!profile_info)
     {
-      profile_info = dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);
-      dt_ioppr_init_profile_info(profile_info, 0);
+      profile_info = _ioppr_alloc_profile_info();
+      if(!profile_info)
+      {
+        pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
+        return NULL;
+      }
       const dt_colorspaces_color_profile_t *profile =
         dt_colorspaces_get_profile(profile_type, "", DT_PROFILE_DIRECTION_ANY);
       cmsHPROFILE rgb_profile = profile ? profile->profile : NULL;
       const gboolean failed = _populate_profile_info_from_cms(
           profile_info, profile_type, cache_filename, intent, rgb_profile);
       pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
-      if(failed) { dt_free_align(profile_info); return NULL; }
+      if(failed)
+      {
+        dt_ioppr_cleanup_profile_info(profile_info);
+        dt_free_align(profile_info);
+        return NULL;
+      }
+      dt_pthread_mutex_lock(&dev->allprofile_mutex);
+      dt_iop_order_iccprofile_info_t *const existing_profile_info =
+        _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_filename,
+                                                 intent, TRUE);
+      if(existing_profile_info)
+      {
+        dt_pthread_mutex_unlock(&dev->allprofile_mutex);
+        dt_ioppr_cleanup_profile_info(profile_info);
+        dt_free_align(profile_info);
+        return existing_profile_info;
+      }
       dev->allprofile_info = g_list_append(dev->allprofile_info, profile_info);
+      dt_pthread_mutex_unlock(&dev->allprofile_mutex);
     }
     else
     {
@@ -886,17 +986,33 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
   // non-display: existing path
   const char *const cache_key =
     _ioppr_profile_info_cache_filename(profile_type, profile_filename, cache_filename);
-  profile_info = _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key);
+  profile_info = _ioppr_get_profile_info_from_list_by_key_locked(dev, profile_type,
+                                                                 cache_key,
+                                                                 intent, TRUE);
   if(profile_info == NULL)
   {
-    profile_info = dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);
-    dt_ioppr_init_profile_info(profile_info, 0);
+    profile_info = _ioppr_alloc_profile_info();
+    if(!profile_info) return NULL;
+
     if(!_ioppr_generate_profile_info(profile_info, profile_type, cache_key, intent))
     {
+      dt_pthread_mutex_lock(&dev->allprofile_mutex);
+      dt_iop_order_iccprofile_info_t *const existing_profile_info =
+        _ioppr_get_profile_info_from_list_by_key(dev, profile_type, cache_key,
+                                                 intent, TRUE);
+      if(existing_profile_info)
+      {
+        dt_pthread_mutex_unlock(&dev->allprofile_mutex);
+        dt_ioppr_cleanup_profile_info(profile_info);
+        dt_free_align(profile_info);
+        return existing_profile_info;
+      }
       dev->allprofile_info = g_list_append(dev->allprofile_info, profile_info);
+      dt_pthread_mutex_unlock(&dev->allprofile_mutex);
     }
     else
     {
+      dt_ioppr_cleanup_profile_info(profile_info);
       dt_free_align(profile_info);
       profile_info = NULL;
     }
@@ -904,64 +1020,34 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
   return profile_info;
 }
 
-static void _ioppr_prune_display_profile_info(dt_develop_t *dev,
-                                              const dt_colorspaces_color_profile_type_t profile_type,
-                                              const char *current_key)
-{
-  GList *profiles = dev->allprofile_info;
-  while(profiles)
-  {
-    GList *const next = g_list_next(profiles);
-    dt_iop_order_iccprofile_info_t *const prof = profiles->data;
-
-    if(prof->type == profile_type && strcmp(prof->filename, current_key) != 0)
-    {
-      dev->allprofile_info = g_list_delete_link(dev->allprofile_info, profiles);
-      dt_ioppr_cleanup_profile_info(prof);
-      dt_free_align(prof);
-    }
-    profiles = next;
-  }
-}
-
 void dt_ioppr_gc_stale_display_profile_info(dt_develop_t *dev)
 {
   if(!dev || !dev->gui_attached || dev->gui_leaving || !darktable.color_profiles) return;
 
-  dt_dev_pixelpipe_t *const full_pipe = dev->full.pipe;
-  dt_dev_pixelpipe_t *const preview_pipe = dev->preview_pipe;
-  dt_dev_pixelpipe_t *const preview2_pipe = dev->preview2.pipe;
-
-  if(full_pipe) dt_pthread_mutex_lock(&full_pipe->busy_mutex);
-  if(preview_pipe) dt_pthread_mutex_lock(&preview_pipe->busy_mutex);
-  if(preview2_pipe) dt_pthread_mutex_lock(&preview2_pipe->busy_mutex);
-
-  char display_key[DT_IOP_COLOR_ICC_LEN] = { 0 };
-  char display2_key[DT_IOP_COLOR_ICC_LEN] = { 0 };
-  _ioppr_profile_info_cache_filename(DT_COLORSPACE_DISPLAY,
-                                     darktable.color_profiles->display_filename,
-                                     display_key);
-  _ioppr_profile_info_cache_filename(DT_COLORSPACE_DISPLAY2,
-                                     darktable.color_profiles->display2_filename,
-                                     display2_key);
-
-  /* System display ICC writers run on the GTK main thread, so the key and
-     materialised profile see the same xprofile_data bytes. Allocate current
-     entries before freeing stale ones: some GUI caches use profile_info pointer
-     identity, and the allocator may reuse freed blocks. */
+  // Ensure entries for the current display profile bytes exist so GUI
+  // handlers that compare profile_info pointers (e.g. colorbalancergb
+  // g->sliders_output_profile, primaries g->painted_display_profile) see a
+  // fresh pointer immediately after a profile change without having to wait
+  // for the next pipe run.
+  //
+  // No stale display entries are pruned here. Pipe workers may still hold
+  // synthetic keys captured into pipe->{output,export}_filename before the
+  // ICC change; basichash hashes that buffer, so the matching profile_info
+  // entry must remain reachable for dt_ioppr_get_pipe_output_profile_info
+  // to return bytes consistent with the cached key. Stale entries are freed
+  // wholesale by dt_dev_cleanup at darkroom teardown. Per-session memory is
+  // bounded by the count of distinct display ICCs touched (~1.5 MB each).
+  //
+  // Running on the GTK main thread with no pipe locks held: the only
+  // mutation is g_list_append guarded by dev->allprofile_mutex inside
+  // dt_ioppr_add_profile_info_to_list, never freeing.
   dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_DISPLAY,
                                     darktable.color_profiles->display_filename,
                                     darktable.color_profiles->display_intent);
-  dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_DISPLAY2,
-                                    darktable.color_profiles->display2_filename,
-                                    darktable.color_profiles->display2_intent);
-
-  _ioppr_prune_display_profile_info(dev, DT_COLORSPACE_DISPLAY, display_key);
-  _ioppr_prune_display_profile_info(dev, DT_COLORSPACE_DISPLAY2, display2_key);
-
-  if(preview2_pipe) dt_pthread_mutex_unlock(&preview2_pipe->busy_mutex);
-  if(preview_pipe) dt_pthread_mutex_unlock(&preview_pipe->busy_mutex);
-  if(full_pipe) dt_pthread_mutex_unlock(&full_pipe->busy_mutex);
+  if(dev->second_wnd)
+    dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_DISPLAY2,
+                                      darktable.color_profiles->display2_filename,
+                                      darktable.color_profiles->display2_intent);
 }
 
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_iop_work_profile_info(const struct dt_iop_module_t *module,
@@ -1096,32 +1182,42 @@ dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_export_profile_info(dt_develop_t *dev,
                                       const dt_dev_pixelpipe_t *pipe)
 {
-  // should never occur:
+  dt_colorspaces_color_profile_type_t export_type;
+  char export_filename[DT_IOP_COLOR_ICC_LEN] = { 0 };
+  dt_iop_color_intent_t export_intent;
+  dt_dev_pixelpipe_t *const mutable_pipe = (dt_dev_pixelpipe_t *)pipe;
+
+  dt_pthread_mutex_lock(&mutable_pipe->profile_identity_mutex);
+  export_type = pipe->export_type;
+  g_strlcpy(export_filename, pipe->export_filename, sizeof(export_filename));
+  export_intent = pipe->export_intent;
+  dt_pthread_mutex_unlock(&mutable_pipe->profile_identity_mutex);
+
+  // DT_COLORSPACE_NONE means colorout commit_params has not populated export_* yet.
   // colorout commit_params populates pipe->export_* during pipe synch,
   // dt_dev_pixelpipe_synch_all commits nodes before process();
-  // all callers run from process()
-  assert(pipe->export_type != DT_COLORSPACE_NONE);
-  if(pipe->export_type == DT_COLORSPACE_NONE) return NULL;
+  // current callers run from process(), but GUI/probe callers may ask earlier.
+  if(export_type == DT_COLORSPACE_NONE) return NULL;
 
   dt_iop_order_iccprofile_info_t *profile_info =
     dt_ioppr_add_profile_info_to_list(dev,
-                                      pipe->export_type,
-                                      pipe->export_filename,
-                                      pipe->export_intent);
+                                      export_type,
+                                      export_filename,
+                                      export_intent);
 
-  if(!profile_info && dt_pipe_is_preview(pipe) && (pipe->export_type == DT_COLORSPACE_FILE))
-    dt_control_log(_("export icc profile '%s' missing"), pipe->export_filename);
+  if(!profile_info && dt_pipe_is_preview(pipe) && (export_type == DT_COLORSPACE_FILE))
+    dt_control_log(_("export icc profile '%s' missing"), export_filename);
 
   // mirror master's set-helper fallback: missing or non-matrix profile -> sRGB
   if(!profile_info
      || !dt_is_valid_colormatrix(profile_info->matrix_in[0][0])
      || !dt_is_valid_colormatrix(profile_info->matrix_out[0][0]))
   {
-    if(pipe->export_type != DT_COLORSPACE_DISPLAY)
+    if(export_type != DT_COLORSPACE_DISPLAY && export_type != DT_COLORSPACE_DISPLAY2)
       dt_print(DT_DEBUG_PIPE,
                "[dt_ioppr_get_pipe_export_profile_info] profile `%s' in `%s' replaced by sRGB",
-               dt_colorspaces_get_name(pipe->export_type, NULL), pipe->export_filename);
-    profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", pipe->export_intent);
+               dt_colorspaces_get_name(export_type, NULL), export_filename);
+    profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", export_intent);
   }
 
   return profile_info;
@@ -1131,27 +1227,38 @@ dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_output_profile_info(dt_develop_t *dev,
                                       const dt_dev_pixelpipe_t *pipe)
 {
+  dt_colorspaces_color_profile_type_t output_type;
+  char output_filename[DT_IOP_COLOR_ICC_LEN] = { 0 };
+  dt_iop_color_intent_t output_intent;
+  dt_dev_pixelpipe_t *const mutable_pipe = (dt_dev_pixelpipe_t *)pipe;
+
+  dt_pthread_mutex_lock(&mutable_pipe->profile_identity_mutex);
+  output_type = pipe->output_type;
+  g_strlcpy(output_filename, pipe->output_filename, sizeof(output_filename));
+  output_intent = pipe->output_intent;
+  dt_pthread_mutex_unlock(&mutable_pipe->profile_identity_mutex);
+
   /* output_* is populated by colorout commit_params according to pipe
      Callers from process() run after pipe synch -> output_* is populated.
      DT_COLORSPACE_NONE means no synch yet (e.g. GUI before first pipe run) */
-  if(pipe->output_type == DT_COLORSPACE_NONE) return NULL;
+  if(output_type == DT_COLORSPACE_NONE) return NULL;
 
   dt_iop_order_iccprofile_info_t *profile_info =
     dt_ioppr_add_profile_info_to_list(dev,
-                                      pipe->output_type,
-                                      pipe->output_filename,
-                                      pipe->output_intent);
+                                      output_type,
+                                      output_filename,
+                                      output_intent);
 
   // mirror master's set-helper fallback: missing or non-matrix profile -> sRGB
   if(!profile_info
      || !dt_is_valid_colormatrix(profile_info->matrix_in[0][0])
      || !dt_is_valid_colormatrix(profile_info->matrix_out[0][0]))
   {
-    if(pipe->output_type != DT_COLORSPACE_DISPLAY)
+    if(output_type != DT_COLORSPACE_DISPLAY && output_type != DT_COLORSPACE_DISPLAY2)
       dt_print(DT_DEBUG_PIPE,
                "[dt_ioppr_get_pipe_output_profile_info] profile `%s' in `%s' replaced by sRGB",
-               dt_colorspaces_get_name(pipe->output_type, NULL), pipe->output_filename);
-    profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", pipe->output_intent);
+               dt_colorspaces_get_name(output_type, NULL), output_filename);
+    profile_info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", output_intent);
   }
 
   return profile_info;

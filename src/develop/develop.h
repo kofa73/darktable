@@ -215,6 +215,7 @@ typedef struct dt_develop_t
   GList *iop_order_list;
 
   // profiles info
+  dt_pthread_mutex_t allprofile_mutex;
   GList *allprofile_info;
 
   // histogram for display.

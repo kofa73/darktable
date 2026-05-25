@@ -69,6 +69,7 @@ void dt_dev_init(dt_develop_t *dev,
   pthread_mutexattr_init(&recursive_locking);
   pthread_mutexattr_settype(&recursive_locking, PTHREAD_MUTEX_RECURSIVE);
   dt_pthread_mutex_init(&dev->history_mutex, &recursive_locking);
+  dt_pthread_mutex_init(&dev->allprofile_mutex, NULL);
 
   dev->snapshot_id = -1;
   dev->history_end = 0;
@@ -233,6 +234,7 @@ void dt_dev_cleanup(dt_develop_t *dev)
     dev->alliop = g_list_delete_link(dev->alliop, dev->alliop);
   }
   g_list_free_full(dev->iop_order_list, free);
+  dt_pthread_mutex_lock(&dev->allprofile_mutex);
   while(dev->allprofile_info)
   {
     dt_ioppr_cleanup_profile_info
@@ -240,6 +242,8 @@ void dt_dev_cleanup(dt_develop_t *dev)
     dt_free_align(dev->allprofile_info->data);
     dev->allprofile_info = g_list_delete_link(dev->allprofile_info, dev->allprofile_info);
   }
+  dt_pthread_mutex_unlock(&dev->allprofile_mutex);
+  dt_pthread_mutex_destroy(&dev->allprofile_mutex);
   dt_pthread_mutex_destroy(&dev->history_mutex);
   if(dev->histogram_pre_tonecurve) free(dev->histogram_pre_tonecurve);
   if(dev->histogram_pre_levels) free(dev->histogram_pre_levels);

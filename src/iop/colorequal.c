@@ -2801,7 +2801,7 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   if(work_profile != g->work_profile)
   {
     // Re-init the profiles
-    dt_free_align(g->white_adapted_profile);
+    D65_adapted_iccprofile_free(g->white_adapted_profile);
     g->white_adapted_profile = D65_adapt_iccprofile(work_profile);
     g->work_profile = work_profile;
     g->gradients_cached = FALSE;
@@ -2846,7 +2846,7 @@ void gui_cleanup(dt_iop_module_t *self)
 
   if(g->white_adapted_profile)
   {
-    dt_free_align(g->white_adapted_profile);
+    D65_adapted_iccprofile_free(g->white_adapted_profile);
     g->white_adapted_profile = NULL;
   }
 
@@ -2901,6 +2901,43 @@ void gui_update(dt_iop_module_t *self)
   gtk_stack_set_visible_child_name(g->stack, numstr);
 }
 
+static void _signal_profile_changed(gpointer instance,
+                                    dt_iop_module_t *self)
+{
+  dt_iop_colorequal_gui_data_t *g = self->gui_data;
+  if(!g) return;
+
+  D65_adapted_iccprofile_free(g->white_adapted_profile);
+  g->white_adapted_profile = NULL;
+  g->work_profile = NULL;
+  g->gradients_cached = FALSE;
+
+  if(self->dev && self->dev->full.pipe)
+    gui_changed(self, NULL, NULL);
+}
+
+static void _signal_profile_user_changed(gpointer instance,
+                                         uint8_t profile_type,
+                                         dt_iop_module_t *self)
+{
+  if(profile_type != DT_COLORSPACES_PROFILE_TYPE_DISPLAY
+     && profile_type != DT_COLORSPACES_PROFILE_TYPE_DISPLAY2)
+    return;
+
+  _signal_profile_changed(instance, self);
+}
+
+static void _signal_pipe_finished(gpointer instance, dt_iop_module_t *self)
+{
+  dt_iop_colorequal_gui_data_t *g = self->gui_data;
+  if(!g || !self->dev || !self->dev->full.pipe) return;
+
+  struct dt_iop_order_iccprofile_info_t *const work_profile =
+    dt_ioppr_get_pipe_output_profile_info(self->dev, self->dev->full.pipe);
+  if(work_profile && work_profile != g->work_profile)
+    _signal_profile_changed(instance, self);
+}
+
 static float _action_process_colorequal(const gpointer target,
                                         const dt_action_element_t element,
                                         const dt_action_effect_t effect,
@@ -2943,7 +2980,7 @@ void gui_init(dt_iop_module_t *self)
   if(self->dev)
     work_profile = dt_ioppr_get_pipe_output_profile_info(self->dev, self->dev->full.pipe);
   if(g->white_adapted_profile)
-    dt_free_align(g->white_adapted_profile);
+    D65_adapted_iccprofile_free(g->white_adapted_profile);
   g->white_adapted_profile = D65_adapt_iccprofile(work_profile);
   g->work_profile = work_profile;
   g->gradients_cached = FALSE;
@@ -3159,6 +3196,9 @@ void gui_init(dt_iop_module_t *self)
 
   g_signal_connect(G_OBJECT(g->notebook), "switch_page",
                    G_CALLBACK(_channel_tabs_switch_callback), self);
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_CONTROL_PROFILE_CHANGED, _signal_profile_changed);
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_CONTROL_PROFILE_USER_CHANGED, _signal_profile_user_changed);
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _signal_pipe_finished);
 }
 
 // clang-format off

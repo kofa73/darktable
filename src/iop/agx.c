@@ -414,7 +414,16 @@ _agx_get_base_profile(dt_develop_t *dev,
     {
       selected_profile_info = dt_ioppr_get_pipe_export_profile_info(dev, pipe);
       if(selected_profile_info
-         && !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
+         && selected_profile_info->type == DT_COLORSPACE_SRGB
+         && pipe->export_type != DT_COLORSPACE_SRGB)
+      {
+        dt_print(DT_DEBUG_PIPE,
+                 "[agx] Export profile '%s' unusable or missing matrix, falling back to Rec2020.",
+                 dt_colorspaces_get_name(pipe->export_type, pipe->export_filename));
+        selected_profile_info = NULL; // Force fallback
+      }
+      else if(selected_profile_info
+              && !dt_is_valid_colormatrix(selected_profile_info->matrix_in_transposed[0][0]))
       {
         dt_print(DT_DEBUG_PIPE,
                  "[agx] Export profile '%s' unusable or missing matrix, falling back to Rec2020.",

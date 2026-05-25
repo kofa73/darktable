@@ -28,6 +28,7 @@
 #include "common/focus_peaking.h"
 #include "common/history.h"
 #include "common/image_cache.h"
+#include "common/iop_profile.h"
 #include "common/overlay.h"
 #include "common/selection.h"
 #include "common/styles.h"
@@ -1969,6 +1970,7 @@ static void _display_intent_callback(GtkWidget *combo,
   if(new_intent != darktable.color_profiles->display_intent)
   {
     darktable.color_profiles->display_intent = new_intent;
+    dt_ioppr_gc_stale_display_profile_info(d);
     dt_dev_reprocess_all(d);
   }
 }
@@ -2001,6 +2003,7 @@ static void _display2_intent_callback(GtkWidget *combo,
   if(new_intent != darktable.color_profiles->display2_intent)
   {
     darktable.color_profiles->display2_intent = new_intent;
+    dt_ioppr_gc_stale_display_profile_info(d);
     dt_dev_reprocess_all(d);
   }
 }

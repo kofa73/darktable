@@ -281,6 +281,7 @@ gboolean dt_dev_pixelpipe_init_cached(dt_dev_pixelpipe_t *pipe,
   dt_pthread_mutex_init(&pipe->mutex, NULL);
   dt_pthread_mutex_init(&pipe->backbuf_mutex, NULL);
   dt_pthread_mutex_init(&pipe->busy_mutex, NULL);
+  dt_pthread_mutex_init(&pipe->profile_identity_mutex, NULL);
   pipe->icc_type = DT_COLORSPACE_NONE;
   pipe->icc_filename = NULL;
   pipe->icc_intent = DT_INTENT_LAST;
@@ -386,6 +387,7 @@ void dt_dev_pixelpipe_cleanup(dt_dev_pixelpipe_t *pipe)
     pipe->forms = NULL;
   }
   dt_pthread_mutex_destroy(&pipe->busy_mutex);
+  dt_pthread_mutex_destroy(&pipe->profile_identity_mutex);
   dt_pthread_mutex_destroy(&pipe->mutex);
 }
 

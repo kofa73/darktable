@@ -148,8 +148,9 @@ typedef struct dt_dev_pixelpipe_t
      Use for gamut maths and pipe cache basichash to invalidate cache when export
      profile changes. Stored as bytes (not a profile_info pointer) so the
      hash is keyed on identity, not on a struct address that the profile
-     list can recycle.
-     See assert in dt_ioppr_get_pipe_export_profile_info. */
+     list can recycle. For system display profiles the filename stores the
+     synthetic display ICC content key. DT_COLORSPACE_NONE means colorout
+     commit_params has not populated the fields yet. */
   dt_colorspaces_color_profile_type_t export_type;
   char export_filename[DT_IOP_COLOR_ICC_LEN];
   dt_iop_color_intent_t export_intent;
@@ -159,13 +160,15 @@ typedef struct dt_dev_pixelpipe_t
      colorout produces: export profile on EXPORT pipe, display2 on PREVIEW2, mipmap-cache
      colorspace on THUMBNAIL, display on FULL/PREVIEW. Read via
      dt_ioppr_get_pipe_output_profile_info to obtain the resolved profile_info.
-     Validity contract: populated by colorout commit_params before the Lab
-     early-return; consumers must run from a process() callback or otherwise
-     after pipe synch. DT_COLORSPACE_NONE is the un-populated sentinel and
-     the helper returns NULL for it. */
+     For system display profiles the filename stores the synthetic display
+     ICC content key.
+     Validity contract: populated by colorout commit_params. Consumers running
+     before the first pipe synch get DT_COLORSPACE_NONE, and the helper returns
+     NULL for it. */
   dt_colorspaces_color_profile_type_t output_type;
   char output_filename[DT_IOP_COLOR_ICC_LEN];
   dt_iop_color_intent_t output_intent;
+  dt_pthread_mutex_t profile_identity_mutex;
 
   // instances of pixelpipe, stored in GList of dt_dev_pixelpipe_iop_t
   GList *nodes;

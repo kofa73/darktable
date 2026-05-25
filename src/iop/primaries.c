@@ -341,6 +341,11 @@ static void _signal_profile_user_changed(gpointer instance,
                                          const uint8_t profile_type,
                                          dt_iop_module_t *self)
 {
+  if(profile_type != DT_COLORSPACES_PROFILE_TYPE_WORK
+     && profile_type != DT_COLORSPACES_PROFILE_TYPE_DISPLAY
+     && profile_type != DT_COLORSPACES_PROFILE_TYPE_DISPLAY2)
+    return;
+
   gui_changed(self, NULL, NULL);
 }
 
@@ -348,6 +353,21 @@ static void _signal_profile_changed(gpointer instance,
                                     dt_iop_module_t *self)
 {
   gui_changed(self, NULL, NULL);
+}
+
+static void _signal_pipe_finished(gpointer instance, dt_iop_module_t *self)
+{
+  if(!self->dev || !self->dev->full.pipe) return;
+
+  dt_iop_primaries_gui_data_t *g = self->gui_data;
+  const dt_iop_order_iccprofile_info_t *const work_profile =
+    dt_ioppr_get_pipe_current_profile_info(self, self->dev->full.pipe);
+  const dt_iop_order_iccprofile_info_t *const display_profile =
+    dt_ioppr_get_pipe_output_profile_info(self->dev, self->dev->full.pipe);
+
+  if((work_profile && work_profile != g->painted_work_profile)
+     || (display_profile && display_profile != g->painted_display_profile))
+    gui_changed(self, NULL, NULL);
 }
 
 static GtkWidget *_setup_hue_slider(dt_iop_module_t *self,
@@ -406,7 +426,7 @@ void gui_init(dt_iop_module_t *self)
 
   DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_CONTROL_PROFILE_USER_CHANGED, _signal_profile_user_changed);
   DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_CONTROL_PROFILE_CHANGED, _signal_profile_changed);
-  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _signal_profile_changed);
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _signal_pipe_finished);
 }
 
 void init_global(dt_iop_module_so_t *self)

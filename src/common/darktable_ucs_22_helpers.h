@@ -193,19 +193,64 @@ static inline void gamut_map_HSB(dt_aligned_pixel_t HSB, const float gamut_LUT[L
 }
 
 
+static inline void D65_adapted_iccprofile_free(struct dt_iop_order_iccprofile_info_t *profile)
+{
+  if(!profile) return;
+
+  for(int i = 0; i < 3; i++)
+  {
+    if(profile->lut_in[i]) dt_free_align(profile->lut_in[i]);
+    if(profile->lut_out[i]) dt_free_align(profile->lut_out[i]);
+  }
+  dt_free_align(profile);
+}
+
+static inline gboolean _D65_adapt_iccprofile_copy_luts(struct dt_iop_order_iccprofile_info_t *dst,
+                                                       const struct dt_iop_order_iccprofile_info_t *src)
+{
+  for(int i = 0; i < 3; i++)
+  {
+    dst->lut_in[i] = NULL;
+    dst->lut_out[i] = NULL;
+  }
+
+  if(!src->nonlinearlut) return TRUE;
+
+  const size_t lut_bytes = (size_t)src->lutsize * sizeof(float);
+  for(int i = 0; i < 3; i++)
+  {
+    if(!src->lut_in[i] || !src->lut_out[i]) return FALSE;
+
+    dst->lut_in[i] = dt_alloc_align_float(src->lutsize);
+    dst->lut_out[i] = dt_alloc_align_float(src->lutsize);
+    if(!dst->lut_in[i] || !dst->lut_out[i]) return FALSE;
+
+    memcpy(dst->lut_in[i], src->lut_in[i], lut_bytes);
+    memcpy(dst->lut_out[i], src->lut_out[i], lut_bytes);
+  }
+
+  return TRUE;
+}
+
 static inline struct dt_iop_order_iccprofile_info_t * D65_adapt_iccprofile(struct dt_iop_order_iccprofile_info_t *work_profile)
 {
   // Premultiply the input and output matrices of a typical D50 ICC profile by a chromatic adaptation matrix to adapt them for D65
   // such that we perform XYZ D65 -> XYZ D50 -> display RGB and display RGB -> XYZ D50 -> XYZ D65 in one matrix multiplication
-  // WARNING: white_adapted_profile needs to be freed outside of this function.
+  // WARNING: white_adapted_profile needs to be freed outside of this function with D65_adapted_iccprofile_free().
 
   if(work_profile) // && !isnan(work_profile->matrix_in[0][0]))
   {
     // Alloc
     struct dt_iop_order_iccprofile_info_t *white_adapted_profile = dt_alloc_aligned(sizeof(dt_iop_order_iccprofile_info_t));
+    if(!white_adapted_profile) return NULL;
 
     // Init a new temp profile by copying the base profile
     memcpy(white_adapted_profile, work_profile, sizeof(dt_iop_order_iccprofile_info_t));
+    if(!_D65_adapt_iccprofile_copy_luts(white_adapted_profile, work_profile))
+    {
+      D65_adapted_iccprofile_free(white_adapted_profile);
+      return NULL;
+    }
 
     // Multiply the in/out matrices by the chromatic adaptation matrix
     dt_colormatrix_t input_matrix;

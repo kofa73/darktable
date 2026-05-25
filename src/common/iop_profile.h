@@ -61,8 +61,10 @@ void dt_ioppr_init_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
 /** must be called when done with profile_info */
 void dt_ioppr_cleanup_profile_info(dt_iop_order_iccprofile_info_t *profile_info);
 
-/** returns the profile info from dev profiles info list that matches
- * (profile_type, profile_filename) NULL if not found
+/** returns the first profile info from dev profiles info list that matches
+ * (profile_type, profile_filename), ignoring rendering intent; NULL if not found.
+ * Use dt_ioppr_add_profile_info_to_list() when the caller needs an
+ * intent-specific profile_info.
  */
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev,
@@ -80,9 +82,13 @@ dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
                                   const int intent);
 
 /** Must be called from the GTK main thread with an attached darkroom dev.
- * Prunes stale system display profile_info entries while holding all live
- * pipe busy_mutexes so pipe workers cannot hold or publish pointers to the
- * entries being freed.
+ * Materialises entries for the current display{,2} ICC bytes so GUI
+ * pointer-identity checks see fresh pointers immediately after a profile
+ * change. Does NOT prune stale entries: pipe workers may hold synthetic
+ * keys captured into pipe->{output,export}_filename before the change, and
+ * the basichash needs the corresponding profile_info entries to remain
+ * reachable for bytes/key consistency. Stale entries are freed wholesale
+ * at dt_dev_cleanup.
  */
 void dt_ioppr_gc_stale_display_profile_info(struct dt_develop_t *dev);
 
@@ -130,14 +136,21 @@ dt_ioppr_get_pipe_input_profile_info(const struct dt_dev_pixelpipe_t *pipe);
 /** Resolved profile information for the user's chosen export profile (i.e. the gamut
    of the deliverable). Suitable for modules that need the target (export) primaries
    even when rendering to a different screen profile, such as filmicrgb's gamut compression and
-   AgX. Returned struct lives in dev's profile list and must not be freed by the caller. */
+   AgX. Returned struct lives in dev's profile list and must not be freed by the caller.
+   Returns NULL if called before colorout commit_params has populated the pipe export identity.
+   The pipe identity fields are snapshotted under pipe->profile_identity_mutex, so GUI callers
+   must only tolerate NULL from an unsynchronised first-pipe state and treat the returned pointer
+   as a profile-list reference. */
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_export_profile_info(struct dt_develop_t *dev,
                                       const struct dt_dev_pixelpipe_t *pipe);
 
-/** Resolved pipe profile. Suitable for consumers that need the current output
-   (export, display, display2) profile. Returned struct lives in dev's profile list and must
-   not be freed by the caller. */
+/** Resolved current pipe output profile (export for export pipes; display/display2 for darkroom).
+    Returned struct lives in dev's profile list and must not be freed.
+    Returns NULL when colorout has not yet populated pipe->output_* (e.g. GUI lookups before
+    the first pipe synch). The pipe identity fields are snapshotted under
+    pipe->profile_identity_mutex, so GUI callers must only tolerate NULL from an
+    unsynchronised first-pipe state and treat the returned pointer as a profile-list reference. */
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_output_profile_info(struct dt_develop_t *dev,
                                       const struct dt_dev_pixelpipe_t *pipe);
