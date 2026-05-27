@@ -3,6 +3,10 @@
 Source branch: `agx-export-profile` (13 commits after `4004550db279`, May 17 2026).
 Status: branch was messy (heavy iteration, multiple back-and-forth corrections, Codex collateral finds) but solidified a coherent design. This document distills the reusable ideas for a clean re-implementation on master.
 
+**Note:** issue number below reference `verified_1.md`, _not_ our headings.
+
+**Note:** the 'filmic→export switch' below refers to filmicrgb `const dt_iop_order_iccprofile_info_t *const export_profile = dt_ioppr_get_pipe_output_profile_info(piece->pipe);` -- however, when not in the export pipe, that does _not_ read the export profile. Suggestion: actually use the export profile for gamut mapping, so users with 'wide-gamut' (AdobeRGB, Display P3) displays, typically still exporting to sRGB, see a valid preview of the export in the darkroom, instead of processing changing on export, potentially producing unexpected results.
+
 Branch commit map (chronological):
 
 | Commit | Title |
