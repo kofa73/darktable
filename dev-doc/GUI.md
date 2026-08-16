@@ -292,11 +292,85 @@ In general, darktable widgets do not set their GDK window cursors. If a widget n
 
 ---
 
-## 3. Thread Safety — Updating GUI from `process()`
+## 3. Thread Safety — Sharing `gui_data` Between Threads
 
 ### The Problem
 
 `process()` runs on worker threads. GTK+ is not thread-safe. You **cannot** call GTK functions directly from `process()`.
+
+The same split applies to data: `gui_data` is not owned by the GTK thread alone. Both
+directions need care — the pipe writing values for the GUI to display, and the GUI
+writing values the pipe will read.
+
+### Which Thread Am I On?
+
+| Runs on the GTK main thread | Runs on a pixelpipe worker thread |
+| --- | --- |
+| `gui_init()`, `gui_cleanup()` | `commit_params()` |
+| `gui_update()`, `gui_changed()` | `process()`, `process_cl()` |
+| widget callbacks (sliders, buttons, combos) | |
+| draw / expose callbacks, `gui_post_expose()` | |
+| mouse and scroll handlers | |
+
+`commit_params()` is the one that surprises people. It reads like module setup code
+that belongs to the GUI, but it is called while a pipe is being synchronised, on a
+worker thread. Worse, the full, preview and thumbnail pipes are separate threads, so
+`commit_params()` can run **concurrently with itself** for the same module.
+
+### Writing `gui_data` from a Widget Callback
+
+This is allowed and common. The question is only whether you need the lock:
+
+- **Field touched by the GTK thread only** — no lock. Mouse position, which node is
+  selected, a cached gradient used solely for drawing the widget.
+- **Field also read or written by `commit_params()` or `process()`** — take the lock.
+  Typically these are cached results and their validity flags.
+
+```c
+static void _slider_callback(GtkWidget *slider, dt_iop_module_t *self)
+{
+  dt_iop_mymodule_params_t *p = self->params;
+  dt_iop_mymodule_gui_data_t *g = self->gui_data;
+
+  p->xyz = dt_bauhaus_slider_get(slider);
+
+  // g->cached_xyz is also written by commit_params() on a pipe thread
+  dt_iop_gui_enter_critical_section(self);
+  if(g->cached_xyz != p->xyz) g->cache_valid = FALSE;
+  g->cached_xyz = p->xyz;
+  dt_iop_gui_leave_critical_section(self);
+
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
+}
+```
+
+If you are unsure whether a field crosses threads, search for every read and write of
+it and check which callback each one sits in, using the table above.
+
+### The Lock Is Not Recursive
+
+`dt_iop_gui_enter_critical_section()` takes a plain, non-recursive mutex. Taking it
+twice on the same thread deadlocks — and the second acquisition is usually invisible,
+hidden inside a helper you call.
+
+```c
+// WRONG — self-deadlock if _rebuild_cache() takes the lock itself
+dt_iop_gui_enter_critical_section(self);
+g->cached_xyz = p->xyz;
+_rebuild_cache(self);
+dt_iop_gui_leave_critical_section(self);
+
+// RIGHT — keep the section around the writes only
+dt_iop_gui_enter_critical_section(self);
+g->cached_xyz = p->xyz;
+dt_iop_gui_leave_critical_section(self);
+
+_rebuild_cache(self);   // takes the lock itself
+```
+
+So before calling anything from inside a critical section, check whether the callee
+locks. Keep critical sections short and free of function calls where you can — that
+avoids the problem instead of reasoning about it.
 
 ### Guards Before Sending GUI Updates
 
@@ -411,6 +485,21 @@ static gboolean callback(gpointer data) {
 if(g != NULL) {  // Missing pipe type check — floods with updates
   g_idle_add(...);
 }
+
+// WRONG — No mutex in a widget callback either, if the pipe reads the field
+static void _callback(GtkWidget *w, dt_iop_module_t *self) {
+  g->cache_valid = FALSE;   // commit_params() reads this on a worker thread
+}
+
+// WRONG — Assuming commit_params() runs on the GTK thread
+void commit_params(...) {
+  gtk_widget_queue_draw(g->area);  // Not the GTK thread; use a thread-safe redraw
+}
+
+// WRONG — Calling a locking helper from inside a critical section
+dt_iop_gui_enter_critical_section(self);
+_update_cache(self);   // Deadlock: the mutex is not recursive
+dt_iop_gui_leave_critical_section(self);
 ```
 
 ---

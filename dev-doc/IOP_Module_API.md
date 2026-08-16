@@ -201,7 +201,10 @@ void process(dt_iop_module_t *self,
 ```
 
 **Important:**
-- **Never use GTK+ API directly in `process()`** — see [GUI.md](GUI.md#3-thread-safety--updating-gui-from-process) for the correct approach
+- **Never use GTK+ API directly in `process()`** — see [GUI.md](GUI.md#3-thread-safety--sharing-gui_data-between-threads) for the correct approach
+- **`commit_params()` does not run on the GTK thread** — it is called on a pixelpipe
+  worker thread, so `gui_data` it shares with widget callbacks needs the GUI critical
+  section; see [GUI.md](GUI.md#which-thread-am-i-on)
 - Use `piece->data` for parameters, not `self->params`
 - Use `DT_OMP_FOR()` for parallelization
 - Use `for_each_channel()` for vectorization
