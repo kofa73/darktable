@@ -448,6 +448,10 @@ if(g != NULL                          // GUI exists (not export)
 }
 ```
 
+Necessary, not sufficient: `g` is read once and the GUI can be torn down while
+`process()` is still running — see [The Callback Must Not Outlive the
+Module](#the-callback-must-not-outlive-the-module).
+
 ### Pattern A: Critical Section + `g_idle_add`
 
 Store computed values in `gui_data` under mutex, then schedule a GTK-thread callback.
@@ -520,14 +524,33 @@ if(g != NULL && self->dev->gui_attached
 
 ### The Callback Must Not Outlive the Module
 
-`g_idle_add()` hands the main loop a raw `dt_iop_module_t *`. Leaving the darkroom, or
-deleting an instance, runs `gui_cleanup()`, frees `gui_data` and then frees the module
-itself — while your source is still sitting in the main loop. It fires afterwards, on
-freed memory. Stopping the pipes prevents *new* sources from being queued; it does not
-retract the ones already there.
+> **TODO — revisit once the GUI-teardown race is fixed.**
+>
+> Deleting a module instance, and undoing/redoing a module add or delete, tear the
+> module GUI down without first stopping the pixelpipes. A worker can therefore be
+> inside `commit_params()` or `process()` when `gui_data` is freed and `gui_lock` is
+> destroyed. Darkroom exit and image switching do take the pipe mutexes first and are
+> not affected.
+>
+> Until that is fixed, the advice below is the best a module can do and is **not**
+> sufficient on those two paths. When the framework closes the window, this section
+> should lose the "necessary, not sufficient" hedging and the guard in *Guards Before
+> Sending GUI Updates* becomes meaningful again.
+
+`g_idle_add()` hands the main loop a raw `dt_iop_module_t *`. Both teardown paths pull
+the GUI out from under it:
+
+- **Leaving the darkroom** — `gui_cleanup()` runs, `gui_lock` is destroyed, `gui_data`
+  is freed, and then the module itself is freed.
+- **Deleting an instance** — the same GUI teardown runs, but the module struct survives:
+  it is parked in `dev->alliop` for pipes that may still reference it, and freed only
+  when the darkroom is left.
+
+Either way your source is still sitting in the main loop and fires afterwards, against
+freed GUI state.
 
 Testing `self->gui_data` inside the callback is not protection: reading it has already
-dereferenced the freed module, and the framework does not set the field to NULL.
+dereferenced state that may be gone, and the framework does not set the field to NULL.
 
 Cancel in `gui_cleanup()` instead. If the source data is `self`, that is one line:
 
@@ -542,13 +565,24 @@ void gui_cleanup(dt_iop_module_t *self)
 
 `exposure` is the in-tree example of Pattern A, cancellation included.
 
+**What the drain closes, and what it does not.** Darkroom exit takes all three pipe
+mutexes before it cleans up any module GUI, so no pipe can be running when the drain
+happens and nothing can queue a source afterwards. Deleting a single instance does not
+do that: it tears the module GUI down while pipes may still be mid-`process()` for that
+module, and the pipe rebuild it asks for only flags the pipes instead of waiting for
+them. On that path a worker can still queue a source — or touch `gui_data` — after the
+drain has run. Closing that window needs a framework-level teardown protocol; no
+module-local recipe can do it. Cancelling is necessary, not sufficient.
+
 If the source data is a heap message (Pattern B), `g_idle_remove_by_data()` cannot find
 it — the source is keyed on the message, not on the module. You then have to track the
-source ids yourself: keep the id in `gui_data`, queue with `g_idle_add_full()` so a
-`GDestroyNotify` frees the message when the source is cancelled, and make a second
-update supersede the first rather than overwrite its id unremoved. That is more
-bookkeeping than the critical section Pattern B set out to avoid, so prefer Pattern A
-unless the payload genuinely cannot live in `gui_data`.
+source ids yourself: keep the id in `gui_data`, and queue with `g_idle_add_full()`
+passing `g_free` as the `GDestroyNotify`. Drop the `g_free(msg)` from the callback if
+you do — the notification runs after a normal dispatch as well as on cancellation, so
+keeping both frees the message twice. A second update also has to supersede the first
+rather than overwrite its id unremoved. That is more bookkeeping than the critical
+section Pattern B set out to avoid, so prefer Pattern A unless the payload genuinely
+cannot live in `gui_data`.
 
 ### Thread-Safe Redraw Helpers
 
@@ -575,11 +609,12 @@ void process(...) {
 // WRONG — Forgetting to free message
 static gboolean callback(gpointer data) {
   // ... use data ...
-  return G_SOURCE_REMOVE;  // Memory leak — g_free(data) here, or pass g_free
-}                          // as the GDestroyNotify of g_idle_add_full()
+  return G_SOURCE_REMOVE;  // Memory leak — g_free(data) here, or pass g_free as
+}                          // the GDestroyNotify of g_idle_add_full(). Not both:
+                           // the notify also runs after a normal dispatch
 
 // WRONG — Queued callback with no cancellation
-g_idle_add(_update_gui, self);  // Fires after gui_cleanup() freed the module,
+g_idle_add(_update_gui, self);  // Fires after gui_cleanup() freed the GUI state,
                                 // unless gui_cleanup() drains the queued sources
 
 // WRONG — Sending updates for preview/preview2 pipes
