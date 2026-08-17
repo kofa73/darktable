@@ -296,7 +296,7 @@ In general, darktable widgets do not set their GDK window cursors. If a widget n
 
 ### The Problem
 
-`process()` runs on worker threads. GTK+ is not thread-safe. You **cannot** call GTK functions directly from `process()`.
+`process()` is not a GTK callback and has no guaranteed thread affinity. GTK+ is not thread-safe. You **cannot** call GTK functions directly from `process()`.
 
 The same split applies to data: `gui_data` is not owned by the GTK thread alone. Both
 directions need care — the pipe writing values for the GUI to display, and the GUI
@@ -304,7 +304,7 @@ writing values the pipe will read.
 
 ### Which Thread Am I On?
 
-| Runs on the GTK main thread | Runs on a pixelpipe worker thread |
+| Always the GTK main thread | Pipeline callbacks — no thread guarantee |
 | --- | --- |
 | `gui_init()`, `gui_cleanup()` | `commit_params()` |
 | `gui_update()`, `gui_changed()` | `process()`, `process_cl()` |
@@ -312,10 +312,71 @@ writing values the pipe will read.
 | draw / expose callbacks, `gui_post_expose()` | |
 | mouse and scroll handlers | |
 
+The left column only exists when the module has a GUI, and it is always the GTK main
+thread. The right column has no fixed thread, but for the instance that owns your
+`gui_data` the picture is narrower:
+
+- **Your darkroom instance** — `commit_params()` and `process()` run on one of the
+  three darkroom pipe threads (full, preview, preview2), never on the GTK main thread.
+- **Every other instance** — export, thumbnail generation, snapshots, the duplicate
+  manager and the tethering histogram each build a throw-away `dt_develop_t` with its
+  own module instances and no GUI (`gui_data == NULL`). Several of those run the pipe
+  synchronously from a GTK draw handler, so there the very same callbacks *do* run on
+  the GTK main thread.
+
+Hence the two-sided rule: `commit_params()` must never touch GTK, and must never block
+waiting for the GTK thread either.
+
 `commit_params()` is the one that surprises people. It reads like module setup code
-that belongs to the GUI, but it is called while a pipe is being synchronised, on a
-worker thread. Worse, the full, preview and thumbnail pipes are separate threads, so
-`commit_params()` can run **concurrently with itself** for the same module.
+that belongs to the GUI, but it is called while a pipe is being synchronised. The
+three darkroom pipes are separate threads, yet synchronisation holds
+`dev->history_mutex` across the commit, so `commit_params()` does not run concurrently
+with itself for one module instance. It can still overlap with `process()` on another
+pipe and with any GTK-thread callback — that is what the lock is for.
+
+### Using `gui_data` from `commit_params()`
+
+Two preconditions, both mandatory:
+
+- **The GUI may not exist.** `gui_data` is `NULL` in export and batch mode, and
+  `gui_lock` — the mutex behind `dt_iop_gui_enter_critical_section()` — is only
+  initialised by `dt_iop_gui_init()`. Entering the critical section without a GUI
+  locks a mutex that was never set up.
+- **Processing must not depend on the GUI cache.** The same `commit_params()` runs
+  during export, where there is nothing to read. Whatever the cache saves for the
+  darkroom, the non-GUI branch has to compute independently.
+
+`toneequal` is the reference for the shape:
+
+```c
+void commit_params(dt_iop_module_t *self, ...)
+{
+  dt_iop_toneequalizer_gui_data_t *g = self->gui_data;
+  ...
+  if(self->dev->gui_attached && g)
+  {
+    // darkroom: refresh and reuse the GUI-side cache
+    dt_iop_gui_enter_critical_section(self);
+    if(g->sigma != p->smoothing) g->interpolation_valid = FALSE;
+    g->sigma = p->smoothing;
+    dt_iop_gui_leave_critical_section(self);
+
+    update_curve_lut(self);   // takes the lock itself — see below
+    ...
+  }
+  else
+  {
+    // export / headless: solve from scratch, no cache
+    build_interpolation_matrix(A, p->smoothing);
+    pseudo_solve(A, factors, CHANNELS, PIXEL_CHAN, TRUE);
+    ...
+  }
+}
+```
+
+`g != NULL` is the load-bearing half of the guard: `gui_data` is allocated by
+`gui_init()`, so a non-NULL `g` is what tells you `gui_lock` has been initialised.
+`self->dev->gui_attached` adds that the darkroom is live.
 
 ### Writing `gui_data` from a Widget Callback
 
@@ -381,7 +442,7 @@ dt_iop_mymodule_gui_data_t *g = self->gui_data;
 
 if(g != NULL                          // GUI exists (not export)
    && self->dev->gui_attached         // darkroom active
-   && dt_pipe_is_full(piece->pipe))   // not preview/thumbnail
+   && dt_pipe_is_full(piece->pipe))   // not preview/preview2
 {
   // Schedule GUI update...
 }
@@ -488,12 +549,19 @@ if(g != NULL) {  // Missing pipe type check — floods with updates
 
 // WRONG — No mutex in a widget callback either, if the pipe reads the field
 static void _callback(GtkWidget *w, dt_iop_module_t *self) {
-  g->cache_valid = FALSE;   // commit_params() reads this on a worker thread
+  g->cache_valid = FALSE;   // commit_params() reads this on a pipe thread
 }
 
 // WRONG — Assuming commit_params() runs on the GTK thread
 void commit_params(...) {
-  gtk_widget_queue_draw(g->area);  // Not the GTK thread; use a thread-safe redraw
+  gtk_widget_queue_draw(g->area);  // No thread guarantee; use a thread-safe redraw
+}
+
+// WRONG — Locking in commit_params() without checking that the GUI exists
+void commit_params(...) {
+  dt_iop_gui_enter_critical_section(self);  // gui_lock is only initialised by
+  g->cache_valid = FALSE;                   // dt_iop_gui_init(); g is NULL on export
+  dt_iop_gui_leave_critical_section(self);
 }
 
 // WRONG — Calling a locking helper from inside a critical section
