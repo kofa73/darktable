@@ -475,11 +475,16 @@ static gboolean _show_computed(gpointer user_data)
 
   return G_SOURCE_REMOVE;  // Run once, then remove
 }
+
+// In gui_cleanup(): drop callbacks still queued for this module
+while(g_idle_remove_by_data(self)) ;
 ```
 
-### Pattern B: Message Passing (Preferred)
+### Pattern B: Message Passing
 
-Allocate a message struct that the callback owns and frees. No critical sections needed.
+Allocate a message struct that the callback owns and frees. The payload never lives in
+`gui_data`, so no critical section is needed for it — but cancelling the callback is
+harder, see below.
 
 ```c
 typedef struct
@@ -494,11 +499,8 @@ static gboolean _update_gui(gpointer data)
   mymodule_gui_msg_t *msg = data;
   dt_iop_mymodule_gui_data_t *g = msg->self->gui_data;
 
-  if(g)  // GUI might have been destroyed
-  {
-    memcpy(g->display_values, msg->values, sizeof(g->display_values));
-    gtk_widget_queue_draw(msg->self->widget);
-  }
+  memcpy(g->display_values, msg->values, sizeof(g->display_values));
+  gtk_widget_queue_draw(msg->self->widget);
 
   g_free(msg);  // Callback owns the message
   return G_SOURCE_REMOVE;
@@ -511,13 +513,47 @@ if(g != NULL && self->dev->gui_attached
   mymodule_gui_msg_t *msg = g_malloc(sizeof(*msg));
   msg->self = self;
   memcpy(msg->values, local_values, sizeof(msg->values));
+  // keyed on msg, so it cannot be cancelled by data — see the next section
   g_idle_add(_update_gui, msg);
 }
 ```
 
+### The Callback Must Not Outlive the Module
+
+`g_idle_add()` hands the main loop a raw `dt_iop_module_t *`. Leaving the darkroom, or
+deleting an instance, runs `gui_cleanup()`, frees `gui_data` and then frees the module
+itself — while your source is still sitting in the main loop. It fires afterwards, on
+freed memory. Stopping the pipes prevents *new* sources from being queued; it does not
+retract the ones already there.
+
+Testing `self->gui_data` inside the callback is not protection: reading it has already
+dereferenced the freed module, and the framework does not set the field to NULL.
+
+Cancel in `gui_cleanup()` instead. If the source data is `self`, that is one line:
+
+```c
+void gui_cleanup(dt_iop_module_t *self)
+{
+  ...
+  // g_idle_remove_by_data() drops one source per call, so drain
+  while(g_idle_remove_by_data(self)) ;
+}
+```
+
+`exposure` is the in-tree example of Pattern A, cancellation included.
+
+If the source data is a heap message (Pattern B), `g_idle_remove_by_data()` cannot find
+it — the source is keyed on the message, not on the module. You then have to track the
+source ids yourself: keep the id in `gui_data`, queue with `g_idle_add_full()` so a
+`GDestroyNotify` frees the message when the source is cancelled, and make a second
+update supersede the first rather than overwrite its id unremoved. That is more
+bookkeeping than the critical section Pattern B set out to avoid, so prefer Pattern A
+unless the payload genuinely cannot live in `gui_data`.
+
 ### Thread-Safe Redraw Helpers
 
-These use `g_idle_add` internally and are safe to call from any thread:
+These marshal the redraw onto the GTK main context internally and are safe to call from
+any thread:
 
 - `dt_control_queue_redraw_widget(widget)` — redraw a specific widget
 - `dt_control_queue_redraw_center()` — redraw the center view
@@ -539,10 +575,14 @@ void process(...) {
 // WRONG — Forgetting to free message
 static gboolean callback(gpointer data) {
   // ... use data ...
-  return G_SOURCE_REMOVE;  // Memory leak — must g_free(data)
-}
+  return G_SOURCE_REMOVE;  // Memory leak — g_free(data) here, or pass g_free
+}                          // as the GDestroyNotify of g_idle_add_full()
 
-// WRONG — Sending updates for preview/thumbnail pipes
+// WRONG — Queued callback with no cancellation
+g_idle_add(_update_gui, self);  // Fires after gui_cleanup() freed the module,
+                                // unless gui_cleanup() drains the queued sources
+
+// WRONG — Sending updates for preview/preview2 pipes
 if(g != NULL) {  // Missing pipe type check — floods with updates
   g_idle_add(...);
 }
