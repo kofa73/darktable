@@ -312,6 +312,12 @@ writing values the pipe will read.
 | draw / expose callbacks, `gui_post_expose()` | |
 | mouse and scroll handlers | |
 
+Each column covers the static helpers called from it too. A `process()` that hands
+`gui_data` to a helper does not make the access GTK-thread-safe, and that is where
+in-tree mistakes hide: `denoiseprofile` writes its variance readout from
+`process_variance()`, not from `process()` itself. When you audit a field, follow the
+call chain, not just the callback name.
+
 The left column only exists when the module has a GUI, and it is always the GTK main
 thread. The right column has no fixed thread, but for the instance that owns your
 `gui_data` the picture is narrower:
@@ -407,6 +413,37 @@ static void _slider_callback(GtkWidget *slider, dt_iop_module_t *self)
 
 If you are unsure whether a field crosses threads, search for every read and write of
 it and check which callback each one sits in, using the table above.
+
+**Asking for a reprocess is not synchronisation.** A widget callback that writes a
+field and then calls `dt_dev_reprocess_center()`, `dt_dev_reprocess_all()` or
+`dt_dev_add_history_item()` still needs the lock. Those calls set `pipe->changed`,
+invalidate buffers and queue a redraw; none of them waits for a running pipe or issues
+a barrier. A pipe already inside `process()` will not see the write, and a pipe
+starting afterwards is only ordered by luck.
+
+### Publishing `gui_data` Through a Proxy
+
+Some modules expose a `gui_data` field to the rest of darktable through
+`dev->proxy` — `exposure` publishes its computed exposure that way, and `agx` reads it
+from a GTK-thread helper. The caller is in another module and has no way to take your
+`gui_lock`, so the accessor has to do it:
+
+```c
+static float _mymodule_proxy_get_value(dt_iop_module_t *self)
+{
+  dt_iop_mymodule_gui_data_t *g = self->gui_data;
+  if(!g) return 0.0f;
+
+  dt_iop_gui_enter_critical_section(self);
+  const float v = g->computed_value;
+  dt_iop_gui_leave_critical_section(self);
+  return v;
+}
+```
+
+The producing side — usually `commit_params()` or `process()` — must take the same
+lock. Publishing a raw pointer into `gui_data` through a proxy is worse still: the
+reader then has no lock to take at all, and no way to know the GUI is being torn down.
 
 ### The Lock Is Not Recursive
 
@@ -626,6 +663,13 @@ if(g != NULL) {  // Missing pipe type check — floods with updates
 static void _callback(GtkWidget *w, dt_iop_module_t *self) {
   g->cache_valid = FALSE;   // commit_params() reads this on a pipe thread
 }
+
+// WRONG — Treating a reprocess request as a barrier
+static void _callback(GtkWidget *w, dt_iop_module_t *self) {
+  g->show_mask = TRUE;                  // process() reads this on a pipe thread
+  dt_dev_reprocess_center(self->dev,    // only flags the pipe and queues a redraw;
+                          self->iop_order);   // it orders nothing, so the lock is
+}                                             // still required around the write
 
 // WRONG — Assuming commit_params() runs on the GTK thread
 void commit_params(...) {
