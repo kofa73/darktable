@@ -328,8 +328,10 @@ does *not* have that property despite the similar name — it is invoked only fr
 pipeline code.
 
 If you override `blend_colorspace()`, note that the GTK-side callers pass `NULL` for
-both `pipe` and `piece`. The default implementation ignores them, so nothing breaks
-today, but an override that dereferences either will crash from the blend GUI.
+both `pipe` and `piece`. Inheriting the default is not automatically safe either:
+`default_blend_colorspace()` forwards both arguments straight to your
+`default_colorspace()`, so that one has to tolerate `NULL` too. In-tree implementations
+currently do, which is why nothing breaks today.
 
 Each column covers the static helpers called from it too. A `process()` that hands
 `gui_data` to a helper does not make the access GTK-thread-safe, and that is where
@@ -516,10 +518,13 @@ For anything the other thread can free or resize — a heap pointer, a buffer pl
 width and height that describe it — it ends when you stop using the value, and you have
 to pick one of:
 
-- **Hold the lock through the last use.** Correct, and the simplest thing that works.
-  Only viable when that use is short; it is the wrong answer if you would be holding the
-  mutex across an allocation, a device transfer or a full-buffer copy, since a pipe
-  thread blocking the GTK thread there is visible to the user.
+- **Hold the lock through the last use.** The simplest thing that works — but only if
+  *every* path that frees or replaces the object takes the same lock, teardown included.
+  `gui_cleanup()` typically does not, so this option does not survive [The Callback Must
+  Not Outlive the Module](#the-callback-must-not-outlive-the-module). It also needs that
+  use to be short: holding the mutex across an allocation, a device transfer or a
+  full-buffer copy blocks the other thread for as long as it takes, and when the blocked
+  thread is the GTK one the user sees it.
 - **Copy the data, not the pointer**, inside the section, then work on your copy.
 - **Reference-count the object, or hand ownership over explicitly**, so the other thread
   cannot free something you still hold.

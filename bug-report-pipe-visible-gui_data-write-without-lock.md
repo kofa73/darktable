@@ -256,13 +256,18 @@ clears.
 they are the memory-safety bugs in this report.
 
 Only `colorreconstruction.c` needs design thought. Widening the section to cover the
-thaw *would* be correct, since every path that frees the grid takes the same lock
-(lines 658-662, 1061-1065, 1182-1186) — but `_bilateral_thaw()` allocates and copies
-the whole grid, and the OpenCL variant adds device allocations and a blocking host-to-
-device transfer (lines 338-362, 841-918). Holding `gui_lock` across that would stall
-preview publication and the GTK thread. So it is a latency argument, not a correctness
-one: a refcount or an explicit ownership handoff is the better design, not the only
-correct one.
+thaw would close the race against the paths that matter here, since preview publication
+(lines 658-662, 1061-1065) and `gui_update()` (lines 1182-1186) all take the same lock.
+The argument against it is latency rather than correctness: `_bilateral_thaw()`
+allocates and copies the whole grid, and the OpenCL variant adds device allocations and
+a blocking host-to-device transfer (lines 338-362, 841-918); holding `gui_lock` across
+that stalls both the preview worker and — through `gui_update()` — the GTK thread.
+
+One path is *not* closed by any amount of widening: `gui_cleanup()` frees `g->can` with
+no lock at all (line 1258). That belongs to the teardown problem noted at the end of
+this report rather than to this bug, but it is the reason a refcount or an explicit
+ownership handoff is the better answer here — a wider section fixes the live-GUI race
+and leaves the teardown one untouched.
 
 The rest are ordinary snapshot fixes. `zonesystem.c` need only read the dimensions once,
 before its existing unlock. `colormapping.c` need only move its null test inside the
