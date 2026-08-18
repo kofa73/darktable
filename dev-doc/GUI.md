@@ -624,7 +624,7 @@ if(g != NULL && self->dev->gui_attached
 
 ### The Callback Must Not Outlive the Module
 
-> **TODO — revisit once the GUI-teardown race is fixed.**
+> **TODO — revisit once the GUI-teardown race (#21891) is fixed.**
 >
 > Deleting a module instance, and undoing/redoing a module add or delete, tear the
 > module GUI down without first stopping the pixelpipes. A worker can therefore be
