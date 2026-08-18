@@ -308,9 +308,15 @@ writing values the pipe will read.
 | --- | --- |
 | `gui_init()`, `gui_cleanup()` | `commit_params()` |
 | `gui_update()`, `gui_changed()` | `process()`, `process_cl()` |
-| widget callbacks (sliders, buttons, combos) | |
-| draw / expose callbacks, `gui_post_expose()` | |
-| mouse and scroll handlers | |
+| widget callbacks (sliders, buttons, combos) | `process_tiling()`, `process_tiling_cl()` |
+| draw / expose callbacks, `gui_post_expose()` | `modify_roi_in()`, `modify_roi_out()`, `tiling_callback()` |
+| mouse and scroll handlers | `init_pipe()`, `cleanup_pipe()` |
+| | `input_format()`, `output_format()`, the colorspace callbacks |
+| | `distort_transform()`, `distort_backtransform()`, `distort_mask()` |
+
+The right column is every callback in `src/iop/iop_api.h` that the pipe drives. The
+distort callbacks are the exception in it: they are also called from GTK-thread code,
+so they can run on either thread and need the same care for a different reason.
 
 Each column covers the static helpers called from it too. A `process()` that hands
 `gui_data` to a helper does not make the access GTK-thread-safe, and that is where
@@ -418,8 +424,14 @@ it and check which callback each one sits in, using the table above.
 field and then calls `dt_dev_reprocess_center()`, `dt_dev_reprocess_all()` or
 `dt_dev_add_history_item()` still needs the lock. Those calls set `pipe->changed`,
 invalidate buffers and queue a redraw; none of them waits for a running pipe or issues
-a barrier. A pipe already inside `process()` will not see the write, and a pipe
-starting afterwards is only ordered by luck.
+a barrier, so a pipe already inside `process()` is not ordered against your write at
+all — it may see the old value, the new one, or change its mind mid-frame if the
+compiler re-loads the field.
+
+The *next* pipe run is better off: it is submitted as a job from the GTK thread, and
+the job queue's mutex pairs release with acquire on the worker side, so it does get a
+happens-before edge. Do not build on that. It is internal framework detail rather than
+a module-facing contract, and it does nothing for the run that is already in flight.
 
 ### Publishing `gui_data` Through a Proxy
 
@@ -600,7 +612,12 @@ void gui_cleanup(dt_iop_module_t *self)
 }
 ```
 
-`exposure` is the in-tree example of Pattern A, cancellation included.
+`exposure` is the in-tree example of Pattern A, and it does cancel — but note that its
+`gui_cleanup()` calls `g_idle_remove_by_data(self)` once rather than draining in a
+loop. `process()` can queue a source on every qualifying preview run, so one call is
+not guaranteed to remove them all. Follow the loop shown above, not `exposure`'s
+version of the last line. `src/bauhaus/bauhaus.c` drains in a loop and is the better
+model for that one detail.
 
 **What the drain closes, and what it does not.** Darkroom exit takes all three pipe
 mutexes before it cleans up any module GUI, so no pipe can be running when the drain
@@ -667,9 +684,10 @@ static void _callback(GtkWidget *w, dt_iop_module_t *self) {
 // WRONG — Treating a reprocess request as a barrier
 static void _callback(GtkWidget *w, dt_iop_module_t *self) {
   g->show_mask = TRUE;                  // process() reads this on a pipe thread
-  dt_dev_reprocess_center(self->dev,    // only flags the pipe and queues a redraw;
-                          self->iop_order);   // it orders nothing, so the lock is
-}                                             // still required around the write
+  dt_dev_reprocess_center(self->dev,    // only flags the pipe and queues a redraw:
+                          self->iop_order);  // it does not wait for the pipe that is
+}                                            // already running, so the write still
+                                             // needs the lock
 
 // WRONG — Assuming commit_params() runs on the GTK thread
 void commit_params(...) {
