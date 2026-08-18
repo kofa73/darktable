@@ -327,6 +327,10 @@ both call them), and `blend_colorspace()` (the blend GUI calls it). `distort_mas
 does *not* have that property despite the similar name — it is invoked only from
 pipeline code.
 
+If you override `blend_colorspace()`, note that the GTK-side callers pass `NULL` for
+both `pipe` and `piece`. The default implementation ignores them, so nothing breaks
+today, but an override that dereferences either will crash from the blend GUI.
+
 Each column covers the static helpers called from it too. A `process()` that hands
 `gui_data` to a helper does not make the access GTK-thread-safe, and that is where
 in-tree mistakes hide: `denoiseprofile` writes its variance readout from
@@ -509,9 +513,16 @@ use_cache(c);   // another thread may have freed g->cache by now
 The lock has to cover the whole span in which the value must stay valid, not just the
 load. For a plain scalar that span ends at the load, and a snapshot is exactly right.
 For anything the other thread can free or resize — a heap pointer, a buffer plus the
-width and height that describe it — it ends when you stop using the value, and you need
-a different answer: reference-count the object, hand ownership over explicitly, or copy
-the data rather than the pointer.
+width and height that describe it — it ends when you stop using the value, and you have
+to pick one of:
+
+- **Hold the lock through the last use.** Correct, and the simplest thing that works.
+  Only viable when that use is short; it is the wrong answer if you would be holding the
+  mutex across an allocation, a device transfer or a full-buffer copy, since a pipe
+  thread blocking the GTK thread there is visible to the user.
+- **Copy the data, not the pointer**, inside the section, then work on your copy.
+- **Reference-count the object, or hand ownership over explicitly**, so the other thread
+  cannot free something you still hold.
 
 The same trap catches tuples. If a buffer and its dimensions are written together under
 the lock, read them together under the lock too. Reading the dimensions again after

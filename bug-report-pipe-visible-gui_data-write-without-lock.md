@@ -14,9 +14,10 @@ A second group *does* use the mutex, but not for the field at issue — often mi
 in `commit_params()`, which also runs on a pipe thread.
 
 A third group takes the lock but puts it in the wrong place, releasing it before the
-value it protects has been used. Two of those are memory-safety bugs, not display
-glitches: `colorreconstruction.c` dereferences a freed bilateral grid, and `ashift.c`
-hands a buffer pointer to unlocked GTK-thread readers.
+value it protects has been used. Three of those are memory-safety bugs rather than
+display glitches: `colorreconstruction.c` dereferences a freed bilateral grid,
+`zonesystem.c` paints a Cairo surface larger than its backing allocation, and
+`colormapping.c` can dereference NULL.
 
 ## Why it matters
 
@@ -48,13 +49,27 @@ formally data races, so the standard promises nothing; the bounds arguments desc
 what the generated code does today, not what the language owes you.
 
 **That mildness does not extend to the whole report.** Auditing the modules that
-already use the mutex turned up cases where the shared field is a heap pointer and the
-critical section is in the wrong place. `colorreconstruction.c` is a use-after-free:
-the full pipe copies `g->can` out under the lock and then dereferences it *after*
-releasing (lines 633-641), while the preview pipe frees the old grid at line 659 and
-`gui_update()` frees it on the GTK thread at line 1183. `ashift.c` hands a buffer
-pointer and its dimensions to GTK-thread readers that take no lock at all. Those are
-memory-safety bugs.
+already use the mutex turned up three cases where the critical section is in the wrong
+place and the consequence is memory-unsafe:
+
+- `colorreconstruction.c` — **use-after-free.** The full pipe copies `g->can` out under
+  the lock and dereferences it *after* releasing (lines 633-641), while the preview pipe
+  frees the old grid at line 659 and `gui_update()` frees it on the GTK thread at 1183.
+- `zonesystem.c` — **out-of-bounds read.** The draw callback allocates its image from
+  `preview_width`/`preview_height` read under the lock (line 730), unlocks at 739, then
+  re-reads both at 741 and hands *those* to Cairo (lines 743-744). If a preview run has
+  grown the buffer in between, Cairo paints an allocation smaller than the surface it
+  was told about (line 753).
+- `colormapping.c` — **null dereference.** The preview-finished handler null-tests
+  `g->buffer` at line 902, *before* taking the lock at 907, and the copy at 918 does not
+  re-test. The pipe's replacement allocation at line 456 can fail and leave the field
+  NULL.
+
+`ashift.c` is a near miss worth stating precisely, because it is easy to over-report:
+its GTK-side readers only truth-test `g->buf` and read the geometry scalars, never
+dereferencing the buffer, and the one place that copies pixels out of it does hold the
+lock (lines 1683-1698). So it is a coherence bug — mismatched geometry, a pointer test
+racing a free — not a memory-safety one.
 
 What is at stake, then, is a spectrum: a wrong first frame at the mild end, a
 use-after-free at the severe end, and throughout it the fact that the pattern is being
@@ -230,17 +245,29 @@ clears.
 | module | field | what is wrong |
 | --- | --- | --- |
 | `colorreconstruction.c` | `can` | the pointer is loaded under the lock (lines 633-635, 1034-1036) and dereferenced after releasing it (lines 641, 1042), while the preview pipe (lines 659-660, 1062-1063) and `gui_update()` (lines 1182-1185) free the pointee — **use-after-free** |
-| `ashift.c` | `buf`, `buf_width`, `buf_height`, `buf_x_off`, `buf_y_off` | the pipe writes the buffer and its geometry under the lock (lines 3480-3509, 3619-3646), but GTK-thread readers take no lock: `do_crop()` (lines 2650, 2682-2683) and `gui_post_expose()` (lines 4128-4135) |
+| `ashift.c` | `buf_width`, `buf_height`, `buf_x_off`, `buf_y_off`, and the `buf` pointer test | the pipe replaces the buffer and its geometry under the lock (lines 3480-3509, 3619-3646); GTK-thread readers take no lock: `do_crop()` (lines 2650, 2682-2683), `crop_adjust()` (lines 2831-2832, reached from `mouse_moved()`), `gui_changed()` (lines 5280-5282) and `gui_post_expose()` (lines 4128-4135). None dereferences the buffer, so this is incoherent geometry rather than a bad access |
 | `ashift.c` | `isflipped` | written under the lock by the pipe (lines 3481, 3620); `_event_draw()` reads it under the lock (lines 5805-5807), but three other GTK-side readers do not (lines 2299, 3854, 3900) |
-| `zonesystem.c` | `preview_width`, `preview_height` | the draw callback allocates its image under the lock, releases at line 739, then re-reads both fields at line 741 to build the Cairo surface over that allocation — a preview run landing in between pairs the old buffer size with the new dimensions |
-| `colormapping.c` | `buffer` | the preview-finished handler tests `g->buffer` at line 902 before taking the lock at line 907; the pipe frees and replaces the pointer under the lock (lines 454-456, 600-602) |
+| `zonesystem.c` | `preview_width`, `preview_height` | the draw callback allocates its image under the lock (line 730), releases at 739, then re-reads both fields at 741 to describe the Cairo surface over that same allocation (lines 743-744) — a preview run landing in between pairs the old buffer size with the new dimensions, and Cairo reads past the end at line 753 |
+| `colormapping.c` | `buffer` | the preview-finished handler null-tests `g->buffer` at line 902, before taking the lock at 907, and the copy at 918 does not re-test; the pipe frees and replaces the pointer under the lock (lines 454-456, 600-602) and leaves it NULL if the allocation fails |
 | `rgblevels.c` | `box_cood`, `call_auto_levels` | the pipe locks the handshake test (lines 1260-1265, 1413-1418), but `button_released()` writes both fields with no lock at all (lines 272-283), and `_get_selected_area()` reads `box_cood` (lines 1112-1113) after the pipe has released |
 | `rgblevels.c` | `channel` | GTK writes it (lines 740, 755), the pipe's auto-levels path reads it (lines 1272, 1444); neither side locks |
 
-`colorreconstruction.c` and `ashift.c` should be fixed first — they are the only
-memory-safety bugs in this report. The `colorreconstruction.c` fix is not just a wider
-critical section, because thawing the grid under the lock would hold it across real
-work; the pointee needs a refcount or an ownership handoff.
+`colorreconstruction.c`, `zonesystem.c` and `colormapping.c` should be fixed first —
+they are the memory-safety bugs in this report.
+
+Only `colorreconstruction.c` needs design thought. Widening the section to cover the
+thaw *would* be correct, since every path that frees the grid takes the same lock
+(lines 658-662, 1061-1065, 1182-1186) — but `_bilateral_thaw()` allocates and copies
+the whole grid, and the OpenCL variant adds device allocations and a blocking host-to-
+device transfer (lines 338-362, 841-918). Holding `gui_lock` across that would stall
+preview publication and the GTK thread. So it is a latency argument, not a correctness
+one: a refcount or an explicit ownership handoff is the better design, not the only
+correct one.
+
+The rest are ordinary snapshot fixes. `zonesystem.c` need only read the dimensions once,
+before its existing unlock. `colormapping.c` need only move its null test inside the
+section it already takes. `ashift.c` and `rgblevels.c` need coherent scalar snapshots on
+the GTK side.
 
 `zonesystem.c` and `colormapping.c` are the instructive ones: both *look* locked, and
 both leak a value across the boundary of the section that was supposed to protect it.
@@ -323,10 +350,11 @@ Fixing the modules one at a time is fine — they are independent, and each is a
 change. `atrous.c` needs the count and the array written under one section and read
 under one section, so that the pair stays consistent.
 
-The third table is not a mechanical fix and should be handled separately. There the
-lock already exists; what is wrong is its extent, and widening it naively would hold
-the mutex across bilateral thaws, Cairo work and image copies. Each of those needs its
-own decision about ownership — see the note on `colorreconstruction.c` above.
+The third table should be handled separately, because there the lock already exists and
+what is wrong is its extent. Most of those are still mechanical — snapshot the value
+inside the section that is already there. `colorreconstruction.c` is the exception: it
+is the one case where the right fix is a decision about who owns the pointee, not a
+wider section. See the notes under that table.
 
 ## Notes
 
