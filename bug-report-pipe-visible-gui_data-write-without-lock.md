@@ -19,6 +19,54 @@ display glitches: `colorreconstruction.c` dereferences a freed bilateral grid,
 `zonesystem.c` paints a Cairo surface larger than its backing allocation, and
 `colormapping.c` can dereference NULL.
 
+## Filing note
+
+This is a bulk filing. The findings below come from one audit and share a root cause, so
+they are recorded together rather than lost; they are **not** one unit of work and can be
+split freely. Every module is independent of every other, and the four sections are
+natural split boundaries.
+
+### Relationship to #21891
+
+#21891 is a different defect in different code: it is a *lifetime* bug in the framework
+(`gui_data` freed and `gui_lock` destroyed while a pipe runs, at
+`src/develop/imageop.c:572` and `src/libs/history.c:426`). This report is a
+*synchronisation* bug in module code (`src/iop/*.c`). Neither fix touches the other's
+files, and neither closes the other.
+
+They interact in one direction. The remedy recommended here is "take `gui_lock` on both
+sides"; #21891 says that lock may not exist. So:
+
+| group | depends on #21891 | note |
+| --- | --- | --- |
+| *No critical section at all* (10 modules) | soft | fix is to start taking `gui_lock` |
+| *Uses the mutex, not for this field* (6 modules) | soft | same |
+| *Wrong place* — `zonesystem.c`, `colormapping.c` | none | snapshot / null-test inside a section that already exists |
+| *Wrong place* — `ashift.c`, `rgblevels.c` | none | coherent scalar snapshots on the GTK side |
+| *Wrong place* — `colorreconstruction.c` | partial | the live-GUI use-after-free is fixable now; the unlocked `gui_cleanup()` free at line 1258 belongs to #21891 |
+| `overlay.c` | none | different fix entirely — marshal the GTK calls onto the GTK thread |
+
+"Soft" means: fixing those groups first is safe and beneficial, but on the #21891
+teardown path it adds a lock of a destroyed mutex to modules that currently never touch
+`gui_lock`. That path already commits a use-after-free write, so this makes an
+already-broken path more broken rather than breaking a working one. It is a reason to
+land #21891 first or alongside, not a blocker.
+
+### Suggested order, most critical first
+
+1. **#21891** — ordinary trigger (delete instance, undo/redo), use-after-free *write*,
+   silent heap corruption. Not in this report; listed for context.
+2. **`overlay.c`** — not a race: GTK calls from a pipe worker every time the overlay
+   cache misses, plus a leaked tooltip string.
+3. **`colorreconstruction.c`** — use-after-free read of a freed bilateral grid.
+4. **`zonesystem.c`** — out-of-bounds read while painting.
+5. **`colormapping.c`** — null dereference; needs an allocation failure as well as the race.
+6. **`ashift.c`, `rgblevels.c`** — incoherent geometry and handshake state.
+7. **Everything else** — wrong pixels on screen for a frame; the bulk of the report by
+   module count, and the least urgent.
+
+Items 2-5 are the memory-safety ones and are independent of each other.
+
 ## Why it matters
 
 Most cases found are display-mask toggles: a button that makes the module show its
