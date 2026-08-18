@@ -311,12 +311,19 @@ writing values the pipe will read.
 | widget callbacks (sliders, buttons, combos) | `process_tiling()`, `process_tiling_cl()` |
 | draw / expose callbacks, `gui_post_expose()` | `modify_roi_in()`, `modify_roi_out()`, `tiling_callback()` |
 | mouse and scroll handlers | `init_pipe()`, `cleanup_pipe()` |
-| | `input_format()`, `output_format()`, the colorspace callbacks |
+| | `output_format()`, the four colorspace callbacks |
 | | `distort_transform()`, `distort_backtransform()`, `distort_mask()` |
 
-The right column is every callback in `src/iop/iop_api.h` that the pipe drives. The
-distort callbacks are the exception in it: they are also called from GTK-thread code,
-so they can run on either thread and need the same care for a different reason.
+The right column is the per-instance `src/iop/iop_api.h` callbacks the pipe drives that
+can reach `gui_data`. It is not the whole API surface — the pipe also calls metadata
+callbacks such as `flags()` and `operation_tags()`, but their signatures give them no
+module instance, so they cannot touch `gui_data`. (`input_format()` is declared but has
+no caller in the tree, so it is not listed.)
+
+`distort_transform()` and `distort_backtransform()` are the exception in the column:
+GTK-thread code calls them directly — mask handling and darkroom zoom both do — so they
+run on either thread and need the same care for a different reason. `distort_mask()`
+does not have that property; it is invoked only from pipeline code.
 
 Each column covers the static helpers called from it too. A `process()` that hands
 `gui_data` to a helper does not make the access GTK-thread-safe, and that is where
@@ -428,10 +435,11 @@ a barrier, so a pipe already inside `process()` is not ordered against your writ
 all — it may see the old value, the new one, or change its mind mid-frame if the
 compiler re-loads the field.
 
-The *next* pipe run is better off: it is submitted as a job from the GTK thread, and
-the job queue's mutex pairs release with acquire on the worker side, so it does get a
-happens-before edge. Do not build on that. It is internal framework detail rather than
-a module-facing contract, and it does nothing for the run that is already in flight.
+The *next* pipe run is better off: it is submitted as a reserved job from the GTK
+thread, and `control->res_mutex` pairs the producer's release with the worker's
+acquire, so that run does get a happens-before edge. Do not build on it. That the
+framework routes pipe submission through a mutex at all is internal detail, not a
+module-facing contract, and the edge does nothing for the run already in flight.
 
 ### Publishing `gui_data` Through a Proxy
 

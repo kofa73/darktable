@@ -21,7 +21,8 @@ to a GUI label. The practical consequences are mild but real:
 
 - **Stale value in an already-running pipe.** Toggling the button while a recompute is
   in flight gives that pipe no ordering against the write, so the frame it is producing
-  can show the wrong thing. The *next* pipe run is not affected — see below.
+  can show the wrong thing. The run submitted *after* the write is ordered against it
+  by the job queue — see below — so this is the in-flight case, not every frame.
 - **Mid-frame inconsistency.** Several `process()` implementations read the field more
   than once, so a change landing mid-call can make one half of the frame disagree with
   the other. `colorbalancergb.c` re-reads `g->mask_type` *once per pixel*
@@ -53,17 +54,25 @@ barrier. A pipe already inside `process()` is therefore unaffected by the write,
 that is the window this bug lives in.
 
 The *next* pipe run is a different matter, and the report should not overstate this.
-The queued redraw is dispatched on the GTK thread, which then submits a new pipe job
-through `dt_control_add_job()`; publication and consumption of that job are paired
-across `control->res_mutex` (`src/control/jobs.c:216-241`). That release/acquire pair
-does give the worker a happens-before edge with the earlier GTK-thread write, so a
-newly started `process()` will observe it. `dt_dev_add_history_item()` gives a similar
-edge through `dev->history_mutex`.
+The queued redraw is dispatched on the GTK thread, which calls `dt_dev_process_image()`
+(and the preview equivalents), and those submit a reserved job with
+`dt_control_add_job_res()` (`src/develop/develop.c:283-307`). Publication of that job
+takes and releases `control->res_mutex` (`src/control/jobs.c:363-378`) and the reserved
+worker acquires the same mutex before executing it (`src/control/jobs.c:222-229`). That
+release/acquire pair does order the earlier GTK-thread write ahead of the newly started
+`process()`. `dt_dev_add_history_item()` gives a similar edge through
+`dev->history_mutex` (`src/develop/develop.c:1428-1453`, paired against
+`src/develop/pixelpipe_hb.c:826-863`).
 
-That incidental ordering is not a reason to skip the lock. It depends on internal
-framework locking that is not part of any module-facing contract, it does nothing for
-the already-running pipe, and it does not stop the compiler re-reading the field
-mid-`process()`.
+Two reasons that is still not a licence to skip the lock. Whether such a route exists
+at all is internal framework detail rather than a module-facing contract — the
+synchronisation effect of the mutex pair itself is real, but nothing obliges the
+framework to keep routing pipe submission that way. And the edge only covers the run
+submitted afterwards: it does nothing for the pipe already in flight, and it does not
+stop the compiler re-reading the field mid-`process()`. Once that in-flight race has
+happened the program has formally entered undefined behaviour, so "the next run sees
+the write" describes the intended ordering, not a guarantee the standard still owes
+you.
 
 ## Example 1 — `colorequal.c`
 
@@ -145,16 +154,24 @@ lock at all?" scan passes over them. The field at issue is still unprotected.
 
 | module | field | site |
 | --- | --- | --- |
-| `lens.cc` | `vig_masking` | `_visualize_callback()` (line 4445) and `gui_focus()` (lines 4699-4701) write it, `process()`/`process_cl()` read it (lines 3056, 3135); none of the six critical sections in the file covers it |
+| `lens.cc` | `vig_masking` | `_visualize_callback()` writes it (line 4445), `gui_focus()` reads then clears it (lines 4699, 4701), `process()`/`process_cl()` read it (lines 3056, 3135); none of the six critical sections in the file covers it |
 | `exposure.c` | `effective_exposure` | `commit_params()` writes it unlocked (line 641); the proxy accessor reads it unlocked (lines 824-828) |
 | `channelmixerrgb.c` | `run_profile` | `commit_params()` reads it unlocked (line 3131); `process()` also *tests* it before entering the section (line 2159), so only the clear at 2164 is protected |
 | `channelmixerrgb.c` | `run_validation` | `commit_params()` reads it unlocked (line 3132); the whole validation path in `process()` — the test, `_validate_color_checker()`, and the clear — is unlocked (lines 2284-2287) |
 | `channelmixerrgb.c` | `is_blending` | `commit_params()` writes it (line 3169); read from *both* threads (line 1186, see below) and never locked |
 | `channelmixerrgb.c` | `safety_margin` | see below — the write is locked, one of the two pipe-side reads is not |
+| `retouch.c` | `display_wavelet_scale`, `mask_display`, `suppress_mask` | GTK callbacks write them (lines 1682, 2060, 2082) and reset them in `gui_focus()` (lines 2403-2405); `process()`/`process_cl()` read them (lines 3916, 3933, 3951, 4017, 4735, 4777, 4854) |
+| `retouch.c` | `first_scale_visible` | reverse direction: `process()`/`process_cl()` write it (lines 3975, 4806), the `rt_wdbar_draw()` GTK callback reads it (line 1396) |
 
 `lens.cc` is a plain instance of the mask-toggle shape, identical to `colorequal` and
 `filmicrgb`. It is listed separately only because the module does use the mutex
 elsewhere.
+
+`retouch.c` is the clearest illustration of why "does this module lock?" is the wrong
+question. It has ten critical sections, and every one of them guards a single field:
+`preview_auto_levels`, the basicadj-style handshake flag (lines 3988-4006 and
+4820-4838). The four display fields above sit right beside it, unprotected, and
+`first_scale_visible` even runs in the opposite direction.
 
 `exposure.c` deserves attention out of proportion to its size, for two reasons. It is
 the in-tree reference for the reverse direction — `dev-doc/GUI.md` points at it — so a
@@ -173,10 +190,11 @@ itself, so the lock has to go inside the proxy accessor and inside `commit_param
   `reload_defaults()` and `gui_changed()` on the GTK thread — so both threads read it,
   and `commit_params()` writes it. `_set_trouble_messages()` (line 2027) adds a second
   GTK-thread read, from the preview-pipe-finished signal handler.
-- `safety_margin` is written under the lock in `_safety_changed_callback()` (line 2875)
+- `safety_margin` is written under the lock in `_safety_changed_callback()` (line 2876)
   and read on the pipe side in `_extract_patches()` (line 1437). That read is covered
   on the profiling path, because `process()` holds the section across
-  `_extract_color_checker()` (line 2161). It is **not** covered on the validation path:
+  `_extract_color_checker()` (the section opens at line 2161, the call is at 2162). It
+  is **not** covered on the validation path:
   `_validate_color_checker()` is called with no section held (line 2286) and reaches
   the same `_extract_patches()` (line 1948).
 
@@ -223,9 +241,9 @@ This is not a locking bug and no lock would fix it, but it was found by the same
 and is worse than anything above, so it should not be left unrecorded.
 
 `_setup_overlay()` (line 289) takes `self->gui_data` and calls GTK directly:
-`gtk_widget_queue_draw(GTK_WIDGET(g->area))` at line 324 and
-`gtk_widget_set_tooltip_text(GTK_WIDGET(g->area), ...)` at lines 327 and 335. It also
-writes `p->imgid` and calls `dt_dev_add_history_item()` at line 318.
+`gtk_widget_queue_draw(GTK_WIDGET(g->area))` at line 321 and
+`gtk_widget_set_tooltip_text(GTK_WIDGET(g->area), ...)` at lines 328 and 335. It also
+writes `p->imgid` (line 317) and calls `dt_dev_add_history_item()` (line 319).
 
 It is reached from the pipe: `process()` calls `_get_overlay_rgba_f()` (line 931) and
 `_get_overlay_argb()` (line 901), `process_cl()` calls both as well (lines 976, 1011),
@@ -278,9 +296,10 @@ under one section, so that the pair stays consistent.
 - What is also *not* covered: modules that already use the mutex were only checked for
   the specific gaps listed above, not audited field by field. `ashift.c`,
   `colormapping.c`, `colorreconstruction.c`, `globaltonemap.c`, `hazeremoval.c`,
-  `retouch.c`, `rgblevels.c` and `zonesystem.c` appear to lock their pipe-side
-  `gui_data` access, but were spot-checked only — `lens.cc` and `channelmixerrgb.c`
-  above show how easily one field slips out of an otherwise-locked module.
+  `rgblevels.c` and `zonesystem.c` appear to lock their pipe-side `gui_data` access,
+  but were spot-checked only. Do not read that as a clean bill of health: `lens.cc`,
+  `channelmixerrgb.c` and above all `retouch.c` were on that list until each was
+  actually read field by field.
 - Orthogonal, and deliberately out of scope here: `gui_cleanup()` can run while a pipe
   is still inside `process()` on the instance-delete and undo/redo paths, which
   destroys `gui_lock` under a worker. Adding the locking above is still correct — it
