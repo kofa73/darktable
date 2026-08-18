@@ -10,8 +10,13 @@ thread. The access is not synchronised in any way, so this is a data race.
 The affected modules never call `dt_iop_gui_enter_critical_section()` at all — the
 mutex that exists for exactly this purpose is simply unused there.
 
-A second, smaller group *does* use the mutex, but misses it in `commit_params()`,
-which also runs on a pipe thread.
+A second group *does* use the mutex, but not for the field at issue — often missing it
+in `commit_params()`, which also runs on a pipe thread.
+
+A third group takes the lock but puts it in the wrong place, releasing it before the
+value it protects has been used. Two of those are memory-safety bugs, not display
+glitches: `colorreconstruction.c` dereferences a freed bilateral grid, and `ashift.c`
+hands a buffer pointer to unlocked GTK-thread readers.
 
 ## Why it matters
 
@@ -33,15 +38,26 @@ to a GUI label. The practical consequences are mild but real:
   `denoiseprofile.c` hand a number from the pipe to a label; `atrous.c` hands over a
   count and the array it bounds, which can be read as a mismatched pair.
 
-Nothing here corrupts memory in the concrete sense: none of the fields is a pointer,
-and every indexed read stays in bounds even with a racing index (`opacities` is a
-`float[4]` and `MASK_NONE == 3`; `atrous`'s `num_samples` cannot exceed the
-`MAX_NUM_SCALES` size of `g->sample`). Nor is hardware tearing the concern — the fields
-are naturally aligned `int`, `gboolean`, enum and `float` on every platform darktable
-supports (`src/is_supported_platform.h`). But these are still formally data races, so
-the standard gives no guarantee at all; the bound arguments above describe what the
-generated code does today, not what the language promises. What is at stake in practice
-is correctness of what the user sees, and, more importantly, that the pattern is being
+For the mask-toggle and readout fields, nothing corrupts memory in the concrete sense:
+none of those fields is a pointer, and every indexed read stays in bounds even with a
+racing index (`opacities` is a `float[4]` and `MASK_NONE == 3`; `atrous`'s
+`num_samples` cannot exceed the `MAX_NUM_SCALES` size of `g->sample`). Nor is hardware
+tearing the concern — they are naturally aligned `int`, `gboolean`, enum and `float` on
+every platform darktable supports (`src/is_supported_platform.h`). They are still
+formally data races, so the standard promises nothing; the bounds arguments describe
+what the generated code does today, not what the language owes you.
+
+**That mildness does not extend to the whole report.** Auditing the modules that
+already use the mutex turned up cases where the shared field is a heap pointer and the
+critical section is in the wrong place. `colorreconstruction.c` is a use-after-free:
+the full pipe copies `g->can` out under the lock and then dereferences it *after*
+releasing (lines 633-641), while the preview pipe frees the old grid at line 659 and
+`gui_update()` frees it on the GTK thread at line 1183. `ashift.c` hands a buffer
+pointer and its dimensions to GTK-thread readers that take no lock at all. Those are
+memory-safety bugs.
+
+What is at stake, then, is a spectrum: a wrong first frame at the mild end, a
+use-after-free at the severe end, and throughout it the fact that the pattern is being
 copied into new modules.
 
 ### `dt_dev_reprocess_*()` does not synchronise the pipe that is already running
@@ -160,7 +176,7 @@ lock at all?" scan passes over them. The field at issue is still unprotected.
 | `channelmixerrgb.c` | `run_validation` | `commit_params()` reads it unlocked (line 3132); the whole validation path in `process()` — the test, `_validate_color_checker()`, and the clear — is unlocked (lines 2284-2287) |
 | `channelmixerrgb.c` | `is_blending` | `commit_params()` writes it (line 3169); read from *both* threads (line 1186, see below) and never locked |
 | `channelmixerrgb.c` | `safety_margin` | see below — the write is locked, one of the two pipe-side reads is not |
-| `retouch.c` | `display_wavelet_scale`, `mask_display`, `suppress_mask` | GTK callbacks write them (lines 1682, 2060, 2082) and reset them in `gui_focus()` (lines 2403-2405); `process()`/`process_cl()` read them (lines 3916, 3933, 3951, 4017, 4735, 4777, 4854) |
+| `retouch.c` | `display_wavelet_scale`, `mask_display`, `suppress_mask` | GTK gesture callbacks write them (lines 1682, 2060, 2082) and `change_image()` resets them (lines 2403-2405); `process()` reads them (lines 3916, 3934, 3951, 3958, 4019) and `process_cl()` reads them (lines 4735, 4757, 4777, 4854) |
 | `retouch.c` | `first_scale_visible` | reverse direction: `process()`/`process_cl()` write it (lines 3975, 4806), the `rt_wdbar_draw()` GTK callback reads it (line 1396) |
 
 `lens.cc` is a plain instance of the mask-toggle shape, identical to `colorequal` and
@@ -168,10 +184,13 @@ lock at all?" scan passes over them. The field at issue is still unprotected.
 elsewhere.
 
 `retouch.c` is the clearest illustration of why "does this module lock?" is the wrong
-question. It has ten critical sections, and every one of them guards a single field:
-`preview_auto_levels`, the basicadj-style handshake flag (lines 3988-4006 and
-4820-4838). The four display fields above sit right beside it, unprotected, and
-`first_scale_visible` even runs in the opposite direction.
+question. It has ten critical sections (lines 1196, 1689, 1715, 1727, 1759, 2131, 3988,
+4002, 4820, 4836). They guard the `preview_auto_levels` handshake and
+`displayed_wavelet_scale`; the one at 2131 just wraps `rt_shape_selection_changed()`.
+The four display fields above sit right beside all of that, unprotected — note that
+`displayed_wavelet_scale` is locked while the near-identically named
+`display_wavelet_scale` is not — and `first_scale_visible` even runs in the opposite
+direction.
 
 `exposure.c` deserves attention out of proportion to its size, for two reasons. It is
 the in-tree reference for the reverse direction — `dev-doc/GUI.md` points at it — so a
@@ -200,6 +219,34 @@ itself, so the lock has to go inside the proxy accessor and inside `commit_param
 
 So a fix for `channelmixerrgb` cannot be confined to `commit_params()`. It has to cover
 the unlocked `run_profile` test, the whole validation path, and `is_blending`.
+
+## Modules whose critical section is in the wrong place
+
+The three groups above are about a missing lock. This group is different and, in two
+cases, worse: the lock is taken, but not around everything it needs to cover. These
+were found by auditing field by field the modules that a "does this module lock?" scan
+clears.
+
+| module | field | what is wrong |
+| --- | --- | --- |
+| `colorreconstruction.c` | `can` | the pointer is loaded under the lock (lines 633-635, 1034-1036) and dereferenced after releasing it (lines 641, 1042), while the preview pipe (lines 659-660, 1062-1063) and `gui_update()` (lines 1182-1185) free the pointee — **use-after-free** |
+| `ashift.c` | `buf`, `buf_width`, `buf_height`, `buf_x_off`, `buf_y_off` | the pipe writes the buffer and its geometry under the lock (lines 3480-3509, 3619-3646), but GTK-thread readers take no lock: `do_crop()` (lines 2650, 2682-2683) and `gui_post_expose()` (lines 4128-4135) |
+| `ashift.c` | `isflipped` | written under the lock by the pipe (lines 3481, 3620); `_event_draw()` reads it under the lock (lines 5805-5807), but three other GTK-side readers do not (lines 2299, 3854, 3900) |
+| `zonesystem.c` | `preview_width`, `preview_height` | the draw callback allocates its image under the lock, releases at line 739, then re-reads both fields at line 741 to build the Cairo surface over that allocation — a preview run landing in between pairs the old buffer size with the new dimensions |
+| `colormapping.c` | `buffer` | the preview-finished handler tests `g->buffer` at line 902 before taking the lock at line 907; the pipe frees and replaces the pointer under the lock (lines 454-456, 600-602) |
+| `rgblevels.c` | `box_cood`, `call_auto_levels` | the pipe locks the handshake test (lines 1260-1265, 1413-1418), but `button_released()` writes both fields with no lock at all (lines 272-283), and `_get_selected_area()` reads `box_cood` (lines 1112-1113) after the pipe has released |
+| `rgblevels.c` | `channel` | GTK writes it (lines 740, 755), the pipe's auto-levels path reads it (lines 1272, 1444); neither side locks |
+
+`colorreconstruction.c` and `ashift.c` should be fixed first — they are the only
+memory-safety bugs in this report. The `colorreconstruction.c` fix is not just a wider
+critical section, because thawing the grid under the lock would hold it across real
+work; the pointee needs a refcount or an ownership handoff.
+
+`zonesystem.c` and `colormapping.c` are the instructive ones: both *look* locked, and
+both leak a value across the boundary of the section that was supposed to protect it.
+
+Two modules on the same audit came back clean: `globaltonemap.c` (`lwmax`, `hash`) and
+`hazeremoval.c` (`A0`, `distance_max`, `hash`) lock every access on both sides.
 
 ## What correct code looks like
 
@@ -257,7 +304,7 @@ callback for the tooltip), and move the history-item write off the pipe path.
 
 ## Suggested fix
 
-For each field in the tables above, wrap both the write and the read in
+For each field in the first two tables, wrap both the write and the read in
 `dt_iop_gui_enter_critical_section()` / `dt_iop_gui_leave_critical_section()`.
 
 Three cautions:
@@ -276,6 +323,11 @@ Fixing the modules one at a time is fine — they are independent, and each is a
 change. `atrous.c` needs the count and the array written under one section and read
 under one section, so that the pair stays consistent.
 
+The third table is not a mechanical fix and should be handled separately. There the
+lock already exists; what is wrong is its extent, and widening it naively would hold
+the mutex across bilateral thaws, Cairo work and image copies. Each of those needs its
+own decision about ownership — see the note on `colorreconstruction.c` above.
+
 ## Notes
 
 - Found while reviewing whether a widget callback may write `gui_data` at all. It may;
@@ -293,13 +345,14 @@ under one section, so that the pair stays consistent.
   (lines 307-312), all of which run pipe-side. A first pass over those found no
   `gui_data` access, but they have not been checked as carefully as the categories
   above, so treat the list as *confirmed cases*, not as an exhaustive audit.
-- What is also *not* covered: modules that already use the mutex were only checked for
-  the specific gaps listed above, not audited field by field. `ashift.c`,
-  `colormapping.c`, `colorreconstruction.c`, `globaltonemap.c`, `hazeremoval.c`,
-  `rgblevels.c` and `zonesystem.c` appear to lock their pipe-side `gui_data` access,
-  but were spot-checked only. Do not read that as a clean bill of health: `lens.cc`,
-  `channelmixerrgb.c` and above all `retouch.c` were on that list until each was
-  actually read field by field.
+- The modules that already use the mutex have now been audited field by field rather
+  than assumed clean. That audit is what produced the third table: of the nine such
+  modules, only `globaltonemap.c` and `hazeremoval.c` came back with no finding. The
+  earlier drafts of this report described several of the other seven as "appearing to
+  lock their pipe-side access" on the strength of a `dt_iop_gui_enter_critical_section`
+  grep. That was wrong every time it mattered, `retouch.c` and `colorreconstruction.c`
+  most of all, and it is worth recording as a lesson about the scan rather than
+  quietly deleting.
 - Orthogonal, and deliberately out of scope here: `gui_cleanup()` can run while a pipe
   is still inside `process()` on the instance-delete and undo/redo paths, which
   destroys `gui_lock` under a worker. Adding the locking above is still correct — it

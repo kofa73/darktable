@@ -320,10 +320,12 @@ callbacks such as `flags()` and `operation_tags()`, but their signatures give th
 module instance, so they cannot touch `gui_data`. (`input_format()` is declared but has
 no caller in the tree, so it is not listed.)
 
-`distort_transform()` and `distort_backtransform()` are the exception in the column:
-GTK-thread code calls them directly — mask handling and darkroom zoom both do — so they
-run on either thread and need the same care for a different reason. `distort_mask()`
-does not have that property; it is invoked only from pipeline code.
+Three entries in the column are also called directly from GTK-thread code, so they run
+on either thread and need the same care for a different reason:
+`distort_transform()` and `distort_backtransform()` (mask handling and darkroom zoom
+both call them), and `blend_colorspace()` (the blend GUI calls it). `distort_mask()`
+does *not* have that property despite the similar name — it is invoked only from
+pipeline code.
 
 Each column covers the static helpers called from it too. A `process()` that hands
 `gui_data` to a helper does not make the access GTK-thread-safe, and that is where
@@ -489,6 +491,31 @@ _rebuild_cache(self);   // takes the lock itself
 So before calling anything from inside a critical section, check whether the callee
 locks. Keep critical sections short and free of function calls where you can — that
 avoids the problem instead of reasoning about it.
+
+### Short Is Not The Same As Correct
+
+Shortening a critical section past the point where the value is still needed is its own
+bug, and a nastier one, because the module now looks locked.
+
+```c
+// WRONG — the pointer load is protected, the pointee is not
+dt_iop_gui_enter_critical_section(self);
+my_cache_t *c = g->cache;
+dt_iop_gui_leave_critical_section(self);
+
+use_cache(c);   // another thread may have freed g->cache by now
+```
+
+The lock has to cover the whole span in which the value must stay valid, not just the
+load. For a plain scalar that span ends at the load, and a snapshot is exactly right.
+For anything the other thread can free or resize — a heap pointer, a buffer plus the
+width and height that describe it — it ends when you stop using the value, and you need
+a different answer: reference-count the object, hand ownership over explicitly, or copy
+the data rather than the pointer.
+
+The same trap catches tuples. If a buffer and its dimensions are written together under
+the lock, read them together under the lock too. Reading the dimensions again after
+releasing can pair a new size with an old allocation.
 
 ### Guards Before Sending GUI Updates
 
