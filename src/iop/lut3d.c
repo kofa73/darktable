@@ -64,9 +64,12 @@ static gboolean _filepath_is_safe(const char *const filepath)
 }
 
 #ifdef HAVE_GMIC
-static gboolean _lutname_is_safe(const char *const lutname)
+// G'MIC substitutes {expression} and $variable inside a command argument, and
+// treats \ and " as syntax, so a path built from stored params must contain
+// none of them before it is interpolated into a pipeline string
+static gboolean _gmic_arg_is_safe(const char *const arg)
 {
-  return lutname[0] && !strpbrk(lutname, "/\\\"") && !strstr(lutname, "..");
+  return !strpbrk(arg, "\"\\{}$");
 }
 #endif
 
@@ -480,15 +483,21 @@ static void _correct_pixel_pyramid(const float *const in,
 }
 
 #ifdef HAVE_GMIC
+// the cache file name is a digest of the LUT name, never the name itself: it
+// is interpolated into a G'MIC pipeline in src/iop/lut3dgmic.cpp:75 and :110,
+// and the name arrives from a stored params blob, so it is untrusted. a
+// fixed-length hex digest cannot carry G'MIC syntax
 static void _get_cache_filename(const char *const lutname,
                                 char *const cache_filename)
 {
-  char *cache_dir = g_build_filename(g_get_user_cache_dir(), "gmic", NULL);
-  char *cache_file = g_build_filename(cache_dir, lutname, NULL);
+  gchar *digest = g_compute_checksum_for_string(G_CHECKSUM_SHA1, lutname, -1);
+  gchar *basename = g_strconcat(digest, ".cimgz", NULL);
+  gchar *cache_file = g_build_filename(g_get_user_cache_dir(), "gmic",
+                                       basename, NULL);
   g_strlcpy(cache_filename, cache_file, DT_IOP_LUT3D_MAX_PATHNAME);
-  g_strlcpy(&cache_filename[strlen(cache_filename)], ".cimgz", DT_IOP_LUT3D_MAX_PATHNAME-strlen(cache_file));
-  g_free(cache_dir);
   g_free(cache_file);
+  g_free(basename);
+  g_free(digest);
 }
 
 static uint8_t _calculate_clut_compressed(dt_iop_lut3d_params_t *const p,
@@ -1236,9 +1245,8 @@ static int _calculate_clut(dt_iop_lut3d_params_t *const p, float **clut)
   uint16_t level = 0;
   const char *const filepath = _bounded_str(p->filepath, sizeof(p->filepath));
 #ifdef HAVE_GMIC
-  const char *const lutname = _bounded_str(p->lutname, sizeof(p->lutname));
   if(p->nb_keypoints > 0 && p->nb_keypoints <= DT_IOP_LUT3D_MAX_KEYPOINTS && filepath[0]
-     && _filepath_is_safe(filepath) && _lutname_is_safe(lutname))
+     && _filepath_is_safe(filepath))
   {
     // compressed in params. no need to read the file
     level = _calculate_clut_compressed(p, filepath, clut);
@@ -1384,12 +1392,18 @@ static void _get_compressed_clut(dt_iop_module_t *self, gboolean newlutname)
   const char *const filepath = _bounded_str(p->filepath, sizeof(p->filepath));
   const char *const lutname = _bounded_str(p->lutname, sizeof(p->lutname));
   char *lutfolder = dt_conf_get_string("plugins/darkroom/lut3d/def_path");
-  if(filepath[0] && lutfolder[0] && _filepath_is_safe(filepath)
-     && (!lutname[0] || _lutname_is_safe(lutname)))
+  if(filepath[0] && lutfolder[0] && _filepath_is_safe(filepath))
   {
     if(g_str_has_suffix(filepath, ".gmz") || g_str_has_suffix(filepath, ".GMZ"))
     {
       char *fullpath = g_build_filename(lutfolder, filepath, NULL);
+      if(!_gmic_arg_is_safe(fullpath))
+      {
+        dt_print(DT_DEBUG_ALWAYS, "[lut3d] refusing G'MIC LUT path containing command syntax");
+        g_free(fullpath);
+        g_free(lutfolder);
+        return;
+      }
       gboolean lut_found = lut3d_read_gmz(&p->nb_keypoints, (unsigned char *const)p->c_clut, fullpath,
               &nb_lut, (void *)g, lutname, newlutname);
       // to be able to fix evolution issue, keep the gmic version with the compressed lut
@@ -1757,7 +1771,7 @@ void gui_update(dt_iop_module_t *self)
 
 #ifdef HAVE_GMIC
   const char *const lutname = _bounded_str(p->lutname, sizeof(p->lutname));
-  if(lutname[0] && _lutname_is_safe(lutname))
+  if(lutname[0])
   {
     _get_compressed_clut(self, FALSE);
   }

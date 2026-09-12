@@ -80,16 +80,42 @@ static void test_lut3d_path_components(void **state)
   assert_false(_filepath_is_safe("plain\"cube"));
 
 #ifdef HAVE_GMIC
-  assert_true(_lutname_is_safe("plain.cimgz"));
-  assert_false(_lutname_is_safe(""));
-  assert_false(_lutname_is_safe("../plain.cimgz"));
-  assert_false(_lutname_is_safe("plain/name.cimgz"));
-  assert_false(_lutname_is_safe("plain\\name.cimgz"));
-  assert_false(_lutname_is_safe("plain\"name.cimgz"));
+  assert_true(_gmic_arg_is_safe("/lut/root/collection.gmz"));
+  assert_true(_gmic_arg_is_safe("/lut/root/collection \xc3\xa9.gmz"));
+  assert_false(_gmic_arg_is_safe("/lut/root/collection\".gmz"));
+  assert_false(_gmic_arg_is_safe("/lut/root/collection\\.gmz"));
+  assert_false(_gmic_arg_is_safe("/lut/root/collection{.gmz"));
+  assert_false(_gmic_arg_is_safe("/lut/root/collection}.gmz"));
+  assert_false(_gmic_arg_is_safe("/lut/root/collection$.gmz"));
 #endif
 }
 
 #ifdef HAVE_GMIC
+static void test_lut3d_cache_filename(void **state)
+{
+  char cache_filename[DT_IOP_LUT3D_MAX_PATHNAME];
+  char same_filename[DT_IOP_LUT3D_MAX_PATHNAME];
+  char other_filename[DT_IOP_LUT3D_MAX_PATHNAME];
+
+  _get_cache_filename("a\" -exec \"sh -c id", cache_filename);
+  assert_null(strpbrk(cache_filename, "\"\\{}$"));
+
+  _get_cache_filename("x{run('exec id')}y", cache_filename);
+  assert_null(strpbrk(cache_filename, "\"\\{}$"));
+
+  _get_cache_filename("same name", cache_filename);
+  _get_cache_filename("same name", same_filename);
+  _get_cache_filename("other name", other_filename);
+  assert_string_equal(cache_filename, same_filename);
+  assert_string_not_equal(cache_filename, other_filename);
+
+  char maximal_name[DT_IOP_LUT3D_MAX_LUTNAME] = { 0 };
+  memset(maximal_name, 'x', sizeof(maximal_name) - 1);
+  _get_cache_filename(maximal_name, cache_filename);
+  assert_non_null(memchr(cache_filename, '\0', sizeof(cache_filename)));
+  assert_true(strlen(cache_filename) < sizeof(cache_filename));
+}
+
 static void test_lut3d_compressed_branch(void **state)
 {
   const int counts[] = { -1, 0, DT_IOP_LUT3D_MAX_KEYPOINTS + 1 };
@@ -119,10 +145,10 @@ static void test_lut3d_compressed_branch(void **state)
   dt_free_align(clut);
 
   clut = NULL;
-  g_strlcpy(params.lutname, "plain\"name.cimgz", sizeof(params.lutname));
+  g_strlcpy(params.lutname, "legal/../LUT\"name", sizeof(params.lutname));
   decompress_calls = 0;
   (void)_calculate_clut(&params, &clut);
-  assert_int_equal(decompress_calls, 0);
+  assert_int_equal(decompress_calls, 1);
   dt_free_align(clut);
 }
 
@@ -136,8 +162,9 @@ static void test_lut3d_unterminated_lutname(void **state)
   decompress_calls = 0;
 
   (void)_calculate_clut(&params, &clut);
-  assert_int_equal(decompress_calls, 0);
-  assert_null(clut);
+  assert_int_equal(decompress_calls, 1);
+  assert_non_null(clut);
+  dt_free_align(clut);
 }
 #endif
 
@@ -146,6 +173,7 @@ int main(int argc, char *argv[])
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_lut3d_path_components),
 #ifdef HAVE_GMIC
+    cmocka_unit_test(test_lut3d_cache_filename),
     cmocka_unit_test(test_lut3d_compressed_branch),
     cmocka_unit_test(test_lut3d_unterminated_lutname),
 #endif
