@@ -307,6 +307,8 @@ changes (where available).
 
 - Fixed metadata tag Xmp.xmpMM.PreservedFileName not written on camera
   import.
+  
+- Improved robustness of parameter validation.
 
 ## Lua
 
