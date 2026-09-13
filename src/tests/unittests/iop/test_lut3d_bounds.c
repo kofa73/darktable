@@ -24,6 +24,9 @@
 
 #ifdef HAVE_GMIC
 static unsigned int decompress_calls;
+static unsigned int read_gmz_calls;
+static const char *lut_root = "";
+static const char *expected_gmz_path;
 
 #define lut3d_decompress_clut test_lut3d_decompress_clut
 #define lut3d_get_cached_clut test_lut3d_get_cached_clut
@@ -63,13 +66,19 @@ gboolean test_lut3d_read_gmz(int *const nb_keypoints,
                              const char *const lutname,
                              const gboolean newlutname)
 {
+  read_gmz_calls++;
+  assert_string_equal(filename, expected_gmz_path);
   return FALSE;
 }
 #endif
 
 char *test_lut3d_conf_get_string(const char *const key)
 {
+#ifdef HAVE_GMIC
+  return g_strdup(lut_root);
+#else
   return g_strdup("");
+#endif
 }
 
 static void test_lut3d_path_components(void **state)
@@ -91,6 +100,49 @@ static void test_lut3d_path_components(void **state)
 }
 
 #ifdef HAVE_GMIC
+static void test_lut3d_gmz_fullpath(void **state)
+{
+  dt_iop_lut3d_params_t params = { 0 };
+  dt_iop_module_t module = { .params = &params };
+  g_strlcpy(params.filepath, "nested/collection.gmz", sizeof(params.filepath));
+
+  const char *roots[] = {
+    "C:\\Users\\test\\luts",
+    "C:/Users/test/luts",
+    "\\\\server\\share\\luts",
+    "/lut/root",
+  };
+  const char *paths[] = {
+    "C:/Users/test/luts/nested/collection.gmz",
+    "C:/Users/test/luts/nested/collection.gmz",
+    "//server/share/luts/nested/collection.gmz",
+    "/lut/root/nested/collection.gmz",
+  };
+  for(size_t i = 0; i < G_N_ELEMENTS(roots); i++)
+  {
+    lut_root = roots[i];
+    expected_gmz_path = paths[i];
+    read_gmz_calls = 0;
+    _get_compressed_clut(&module, FALSE);
+    assert_int_equal(read_gmz_calls, 1);
+  }
+
+  const char *unsafe_roots[] = {
+    "C:\\Users\\test\"\\luts",
+    "C:\\Users\\test{\\luts",
+    "C:\\Users\\test}\\luts",
+    "C:\\Users\\test$\\luts",
+  };
+  for(size_t i = 0; i < G_N_ELEMENTS(unsafe_roots); i++)
+  {
+    lut_root = unsafe_roots[i];
+    read_gmz_calls = 0;
+    _get_compressed_clut(&module, FALSE);
+    assert_int_equal(read_gmz_calls, 0);
+  }
+  lut_root = "";
+}
+
 static void test_lut3d_cache_filename(void **state)
 {
   char cache_filename[DT_IOP_LUT3D_MAX_PATHNAME];
@@ -173,6 +225,7 @@ int main(int argc, char *argv[])
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_lut3d_path_components),
 #ifdef HAVE_GMIC
+    cmocka_unit_test(test_lut3d_gmz_fullpath),
     cmocka_unit_test(test_lut3d_cache_filename),
     cmocka_unit_test(test_lut3d_compressed_branch),
     cmocka_unit_test(test_lut3d_unterminated_lutname),

@@ -64,9 +64,8 @@ static gboolean _filepath_is_safe(const char *const filepath)
 }
 
 #ifdef HAVE_GMIC
-// G'MIC substitutes {expression} and $variable inside a command argument, and
-// treats \ and " as syntax, so a path built from stored params must contain
-// none of them before it is interpolated into a pipeline string
+// reject quoting and escape syntax before inserting a path into a G'MIC command;
+// exclude substitution markers too as a precaution
 static gboolean _gmic_arg_is_safe(const char *const arg)
 {
   return !strpbrk(arg, "\"\\{}$");
@@ -1397,6 +1396,8 @@ static void _get_compressed_clut(dt_iop_module_t *self, gboolean newlutname)
     if(g_str_has_suffix(filepath, ".gmz") || g_str_has_suffix(filepath, ".GMZ"))
     {
       char *fullpath = g_build_filename(lutfolder, filepath, NULL);
+      // native Windows separators would otherwise be rejected as G'MIC escape syntax
+      filepath_set_unix_separator(fullpath);
       if(!_gmic_arg_is_safe(fullpath))
       {
         dt_print(DT_DEBUG_ALWAYS, "[lut3d] refusing G'MIC LUT path containing command syntax");
