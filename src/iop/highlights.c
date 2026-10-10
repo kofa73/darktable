@@ -66,6 +66,24 @@ typedef enum dt_iop_highlights_mode_t
   DT_IOP_HIGHLIGHTS_INPAINT = 2,   // $DESCRIPTION: "reconstruct color"
 } dt_iop_highlights_mode_t;
 
+// experimental variants of the gradient domain method, see hlreconstruct/gradient.c
+typedef enum dt_iop_highlights_writeback_t
+{
+  DT_HIGHLIGHTS_WRITEBACK_BASIC = 0,      // $DESCRIPTION: "basic"
+  DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL = 1, // $DESCRIPTION: "joint, fully clipped"
+  DT_HIGHLIGHTS_WRITEBACK_JOINT_ALL = 2,  // $DESCRIPTION: "joint, all clipped"
+} dt_iop_highlights_writeback_t;
+
+typedef enum dt_iop_highlights_experiment_t
+{
+  DT_HIGHLIGHTS_EXPERIMENT_BASIC = 0,        // $DESCRIPTION: "basic"
+  DT_HIGHLIGHTS_EXPERIMENT_NEUTRAL_HUE = 1,  // $DESCRIPTION: "neutral hue"
+  DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL = 2,     // $DESCRIPTION: "hue estimate in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_SOLVED_REFS = 3,  // $DESCRIPTION: "solved channels as references"
+  DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL = 4,  // $DESCRIPTION: "smooth fill (paper 3.4)"
+  DT_HIGHLIGHTS_EXPERIMENT_XTRANS_FLAG = 5,  // $DESCRIPTION: "block-wide own-color flag (X-Trans)"
+} dt_iop_highlights_experiment_t;
+
 typedef enum dt_atrous_wavelets_scales_t
 {
   WAVELETS_1_SCALE = 0,   // $DESCRIPTION: "2 px"
@@ -116,6 +134,8 @@ typedef struct dt_iop_highlights_params_t
   dt_recovery_mode_t recovery;        // $DEFAULT: DT_RECOVERY_MODE_OFF $DESCRIPTION: "rebuild"
   float solid_color;                  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "inpaint a flat color"
   gboolean full_resolution;           // $DEFAULT: FALSE $DESCRIPTION: "full resolution"
+  dt_iop_highlights_writeback_t writeback;   // $DEFAULT: DT_HIGHLIGHTS_WRITEBACK_BASIC $DESCRIPTION: "write-back"
+  dt_iop_highlights_experiment_t experiment; // $DEFAULT: DT_HIGHLIGHTS_EXPERIMENT_BASIC $DESCRIPTION: "experiment"
 } dt_iop_highlights_params_t;
 
 typedef struct dt_iop_highlights_gui_data_t
@@ -131,6 +151,8 @@ typedef struct dt_iop_highlights_gui_data_t
   GtkWidget *recovery;
   GtkWidget *strength;
   GtkWidget *full_resolution;
+  GtkWidget *writeback;
+  GtkWidget *experiment;
   dt_highlights_mask_t hlr_mask_mode;
   dt_aligned_pixel_t oppchroma;
   gboolean oppclipped;
@@ -358,6 +380,8 @@ int legacy_params(dt_iop_module_t *self,
       dt_recovery_mode_t recovery;
       float solid_color;
       gboolean full_resolution;
+      dt_iop_highlights_writeback_t writeback;
+      dt_iop_highlights_experiment_t experiment;
     } dt_iop_highlights_params_v6_t;
 
     const dt_iop_highlights_params_v5_t *o = (dt_iop_highlights_params_v5_t *)old_params;
@@ -365,6 +389,8 @@ int legacy_params(dt_iop_module_t *self,
     memcpy(n, o, sizeof(dt_iop_highlights_params_v5_t));
 
     n->full_resolution = FALSE;
+    n->writeback = DT_HIGHLIGHTS_WRITEBACK_BASIC;
+    n->experiment = DT_HIGHLIGHTS_EXPERIMENT_BASIC;
 
     *new_params = n;
     *new_params_size = sizeof(dt_iop_highlights_params_v6_t);
@@ -512,10 +538,16 @@ void tiling_callback(dt_iop_module_t *self,
   if(d->mode == DT_IOP_HIGHLIGHTS_GRADIENT)
   {
     // the method can't tile either. Its buffers take 34 bytes per RGB pixel plus up to
-    // 32 per clipped one, counted here as if all were clipped.
+    // 32 per clipped one, counted here as if all were clipped. Keeping the input for
+    // the experiments adds 12 bytes per clipped pixel, the smooth fill 18 per pixel.
     const int step = _gd_grid_step(filters, d->full_resolution);
     const float bpp = filters ? sizeof(float) : 4 * sizeof(float);
-    tiling->factor += 66.0f / (step * step * bpp);
+    float bytes = 66.0f;
+    if(d->writeback != DT_HIGHLIGHTS_WRITEBACK_BASIC
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL)
+      bytes += 12.0f;
+    if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL) bytes += 18.0f;
+    tiling->factor += bytes / (step * step * bpp);
     // linear raws are processed in a temp buffer of the input size, then scaled
     if(!filters) tiling->factor += 1.0f;
     return;
@@ -1295,6 +1327,8 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 
   // linear raws are always solved at full resolution
   gtk_widget_set_visible(g->full_resolution, p->mode == DT_IOP_HIGHLIGHTS_GRADIENT && filters != 0);
+  gtk_widget_set_visible(g->writeback, p->mode == DT_IOP_HIGHLIGHTS_GRADIENT);
+  gtk_widget_set_visible(g->experiment, p->mode == DT_IOP_HIGHLIGHTS_GRADIENT);
 
   gtk_widget_set_visible(g->candidating, use_segmentation);
   gtk_widget_set_visible(g->combine, use_segmentation);
@@ -1443,6 +1477,23 @@ void gui_init(dt_iop_module_t *self)
   g->full_resolution = dt_bauhaus_toggle_from_params(self, "full_resolution");
   gtk_widget_set_tooltip_text(g->full_resolution, _("reconstruct at full sensor resolution instead of a reduced one.\n"
                                                     "this is several times slower"));
+
+  g->writeback = dt_bauhaus_combobox_from_params(self, "writeback");
+  gtk_widget_set_tooltip_text(g->writeback, _("experimental: how the solution replaces clipped values.\n"
+                                              "basic: each clipped channel takes the larger of its value and its solution.\n"
+                                              "joint: the clipped channels of a pixel are scaled together until none is\n"
+                                              "below its value, in fully clipped pixels or in all pixels with a clipped channel."));
+
+  g->experiment = dt_bauhaus_combobox_from_params(self, "experiment");
+  gtk_widget_set_tooltip_text(g->experiment, _("experimental variants of the method.\n"
+                                               "neutral hue: white instead of the hue estimated from the border.\n"
+                                               "hue estimate in fully clipped: fully clipped pixels take the estimated hue.\n"
+                                               "solved channels as references: channels guide the ones solved after them,\n"
+                                               "largest clipped region first.\n"
+                                               "smooth fill: one channel gets a smooth bump in fully clipped regions,\n"
+                                               "which then guides the others (paper section 3.4).\n"
+                                               "block-wide own-color flag: X-Trans at reduced resolution flags the center\n"
+                                               "color from its whole 3x3 block."));
 
   g->combine = dt_bauhaus_slider_from_params(self, "combine");
   dt_bauhaus_slider_set_digits(g->combine, 0);

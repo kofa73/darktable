@@ -36,8 +36,11 @@
    5. clipped photosites take the larger of their value and the solution,
       interpolated from the grid
 
-   The gradient fill-in for regions with all channels clipped (paper 3.4)
-   is not implemented: such regions come out flat, with the hue of B.
+   Regions with all channels clipped get no guidance, so they come out flat,
+   filled from the solutions around them. Two parameters select experimental
+   variants of this proof of concept: the write-back can scale the clipped
+   channels of a pixel together, see _gd_joint_scale(), and the experiment
+   changes one step of the method, see dt_iop_highlights_experiment_t.
 */
 
 // border smoothing of paper 3.2: spatial sigma in full-resolution pixels,
@@ -52,6 +55,12 @@
 #define GD_CG_TOL 1e-5
 #define GD_CG_MAXITER 5000
 #define GD_MAX_LEVELS 32
+// smooth fill of paper 3.4: share of a channel's clipped region that may have
+// another channel unflagged, floor of the values before the log and cap of the
+// filled values, both relative to the clipping level
+#define GD_FILL_TOL 0.05f
+#define GD_LOG_FLOOR 1e-3f
+#define GD_FILL_MAX 64.0f
 // X-Trans plane fit: 6x6 pattern phases, 3 colors, 5x5 window positions
 #define GD_FIT_SIZE (6 * 6 * 3 * 25)
 
@@ -98,17 +107,19 @@ static inline void _gd_neighbors(const int i,
   nb[3] = row < height - 1 ? i + width : -1;
 }
 
-// numbers the pixels with any of the given state bits, in pixel order
+// numbers the pixels with any of the given state bits, in pixel order,
+// leaving out those with these bits set in skip (if not NULL)
 static size_t _gd_index_pixels(int *const map,
                                int *const pos,
                                const uint8_t *const state,
                                const uint8_t bits,
+                               const uint8_t *const skip,
                                const size_t npix)
 {
   size_t n = 0;
   for(size_t i = 0; i < npix; i++)
   {
-    if(state[i] & bits)
+    if((state[i] & bits) && !(skip && (skip[i] & bits)))
     {
       map[i] = n;
       pos[n++] = i;
@@ -393,26 +404,41 @@ static void _gd_smooth_border(float *const rho[3],
   }
 }
 
+/* Channels that can serve as references at pixel i: the unflagged ones, and
+   flagged ones whose values are already restored, by an earlier solve
+   (solved) or by the smooth fill (filled, may be NULL).
+*/
+static inline uint8_t _gd_usable(const uint8_t *const state,
+                                 const uint8_t *const filled,
+                                 const uint8_t solved,
+                                 const size_t i)
+{
+  return (~state[i] | solved | (filled ? filled[i] : 0)) & 7;
+}
+
 /* Target value of u_j(q) - u_j(p) on the edge p-q, from the other channels,
    paper eq. 7, with the weights min-filtered over the edge as in paper 3.5.
-   A channel flagged clipped at either end is left out: a block mean or a
-   window value that includes a clipped photosite can sit far below the
-   clipping level, where eq. 8 would give it full confidence.
+   A channel flagged clipped at either end is left out unless it is restored
+   there, see _gd_usable(): a block mean or a window value that includes a
+   clipped photosite can sit far below the clipping level, where eq. 8 would
+   give it full confidence.
 */
 static inline float _gd_edge_guidance(const float *const in,
                                       const uint8_t *const state,
+                                      const uint8_t *const filled,
+                                      const uint8_t solved,
                                       const float *const rho[3],
                                       const dt_aligned_pixel_t inv_clip,
                                       const size_t p,
                                       const size_t q,
                                       const int j)
 {
-  const uint8_t flagged = state[p] | state[q];
+  const uint8_t usable = _gd_usable(state, filled, solved, p) & _gd_usable(state, filled, solved, q);
   float num = 0.0f;
   float den = 0.0f;
   for(int k = 0; k < 3; k++)
   {
-    if(k == j || (flagged & (1 << k))) continue;
+    if(k == j || !(usable & (1 << k))) continue;
     const float w = fminf(_gd_weight(in[4 * p + k] * inv_clip[k]),
                           _gd_weight(in[4 * q + k] * inv_clip[k]));
     const float r = 0.5f * (_gd_ratio(rho, p, j, k) + _gd_ratio(rho, q, j, k));
@@ -485,6 +511,9 @@ static gboolean _gd_xtrans_fit(float *const fit,
    At the image edges the window moves inward until it lies inside the image.
    The photosite is then off the window's center, where a plane fit
    extrapolates and can leave the range of its values, so the mean replaces it.
+   With block_flag, the own color is flagged if any photosite of that color in
+   the 3x3 block around the photosite is clipped (X-Trans reduced resolution
+   experiment), like the other colors are over their window.
 */
 static inline void _gd_window_pixel(float *const restrict o,
                                     uint8_t *const restrict flags,
@@ -497,7 +526,8 @@ static inline void _gd_window_pixel(float *const restrict o,
                                     const int iheight,
                                     const int row,
                                     const int col,
-                                    const int rad)
+                                    const int rad,
+                                    const gboolean block_flag)
 {
   const int cy = CLAMP(row, rad, iheight - 1 - rad);
   const int cx = CLAMP(col, rad, iwidth - 1 - rad);
@@ -506,6 +536,7 @@ static inline void _gd_window_pixel(float *const restrict o,
   dt_aligned_pixel_t sum = { 0.0f, 0.0f, 0.0f, 0.0f };
   dt_aligned_pixel_t cnt = { 0.0f, 0.0f, 0.0f, 0.0f };
   int clipped = 0;
+  int block_clipped = 0;
   int k = 0;
   for(int y = cy - rad; y <= cy + rad; y++)
   {
@@ -515,7 +546,13 @@ static inline void _gd_window_pixel(float *const restrict o,
       const float v = in[(size_t)y * iwidth + x];
       sum[c] += w ? w[25 * c + k] * v : v;
       cnt[c] += 1.0f;
-      if(v >= clips[c]) clipped |= 1 << c;
+      if(v >= clips[c])
+      {
+        clipped |= 1 << c;
+        // the moved window still holds the whole block: the photosite is at
+        // most one off its center
+        if(block_flag && abs(y - row) <= 1 && abs(x - col) <= 1) block_clipped |= 1 << c;
+      }
     }
   }
 
@@ -525,7 +562,7 @@ static inline void _gd_window_pixel(float *const restrict o,
   const int own = fcol(row, col, filters, xtrans);
   o[own] = in[(size_t)row * iwidth + col];
   clipped &= ~(1 << own);
-  if(o[own] >= clips[own]) clipped |= 1 << own;
+  if(o[own] >= clips[own] || (block_clipped & (1 << own))) clipped |= 1 << own;
   *flags = clipped;
 }
 
@@ -539,7 +576,8 @@ static inline void _gd_window_pixel(float *const restrict o,
      edges join the last block of their row or column
    - Bayer at full resolution: a 3x3 window at every photosite
    - X-Trans: a 5x5 plane fit at every photosite, or at the center photosite
-     of each 3x3 block at reduced resolution
+     of each 3x3 block at reduced resolution; block_flag, see
+     _gd_window_pixel()
 */
 static void _gd_to_rgb(float *const restrict rgb,
                        uint8_t *const restrict state,
@@ -552,7 +590,8 @@ static void _gd_to_rgb(float *const restrict rgb,
                        const int iheight,
                        const int step,
                        const int width,
-                       const int height)
+                       const int height,
+                       const gboolean block_flag)
 {
   if(!filters)
   {
@@ -607,16 +646,241 @@ static void _gd_to_rgb(float *const restrict rgb,
       {
         const size_t i = (size_t)row * width + col;
         _gd_window_pixel(rgb + 4 * i, state + i, in, filters, xtrans, fit, clips,
-                         iwidth, iheight, step * row + off, step * col + off, rad);
+                         iwidth, iheight, step * row + off, step * col + off, rad, block_flag);
       }
     }
   }
 }
 
+/* Experiment: a fully clipped pixel takes the hue estimate, scaled just enough
+   that no channel falls below its solution or its input value v.
+*/
+static inline void _gd_hue_fill(float *const u,
+                                const float *const v,
+                                const float *const rho[3],
+                                const size_t i)
+{
+  dt_aligned_pixel_t r = { 1.0f, 1.0f, 1.0f, 1.0f };
+  float scale = 0.0f;
+  for(int c = 0; c < 3; c++)
+  {
+    r[c] = fmaxf(rho[c][i], GD_RHO_MIN);
+    scale = fmaxf(scale, fmaxf(u[c], v[c]) / r[c]);
+  }
+  for(int c = 0; c < 3; c++) u[c] = scale * r[c];
+}
+
+/* Write-back experiment: scales the flagged channels of a pixel together, by
+   the smallest factor that lifts each of them to at least its input value v.
+   The basic write-back lifts each channel on its own, which changes the hue
+   wherever a solution falls below its input.
+*/
+static inline void _gd_joint_scale(float *const u,
+                                   const float *const v,
+                                   const uint8_t flags)
+{
+  float scale = 1.0f;
+  for(int c = 0; c < 3; c++)
+    if((flags & (1 << c)) && u[c] > 0.0f) scale = fmaxf(scale, v[c] / u[c]);
+  for(int c = 0; c < 3; c++)
+    if(flags & (1 << c)) u[c] *= scale;
+}
+
+// sorts the channels by count, ascending or descending
+static void _gd_channel_order(int order[3],
+                              const size_t count[3],
+                              const gboolean descending)
+{
+  for(int c = 0; c < 3; c++) order[c] = c;
+  for(int a = 0; a < 2; a++)
+    for(int b = a + 1; b < 3; b++)
+      if(descending ? count[order[b]] > count[order[a]] : count[order[b]] < count[order[a]])
+      {
+        const int t = order[a];
+        order[a] = order[b];
+        order[b] = t;
+      }
+}
+
+// log slope at pixel i between its neighbors lo and hi (-1 outside the image),
+// from differences between pixels where the channel (bit) is unflagged only:
+// a difference with a clipped value says nothing about the slope
+static inline float _gd_log_slope(const float *const lg,
+                                  const uint8_t *const state,
+                                  const uint8_t bit,
+                                  const int i,
+                                  const int lo,
+                                  const int hi)
+{
+  const gboolean l = lo >= 0 && !(state[lo] & bit);
+  const gboolean h = hi >= 0 && !(state[hi] & bit);
+  if(l && h) return 0.5f * (lg[hi] - lg[lo]);
+  if(h) return lg[hi] - lg[i];
+  if(l) return lg[i] - lg[lo];
+  return 0.0f;
+}
+
+/* Experiment, paper 3.4: inside the fully clipped region, all channels are
+   flat, so no channel guides another there. This gives one channel k a smooth
+   bump instead: a Laplace solve spreads the log gradients of k on the border
+   of its clipped region over the region (eq. 9), and a Poisson solve with the
+   log values on the border integrates them (eq. 10). In 1D that fits a
+   Gaussian to the slopes at the border. The filled values then serve as
+   references for the other channels.
+   The paper requires one channel to be clipped exactly where all are. Here
+   each connected clipped region of a channel qualifies by itself, if at most
+   GD_FILL_TOL of its pixels have another channel unflagged. Channels are tried
+   from the smallest clipped area up, so the one that clips last goes first,
+   and a region that overlaps one filled before is skipped. The neighbors of a
+   whole connected region are unflagged in k, so the border data are measured.
+   Sets bit k of filled for the filled pixels, nfill, iter and peak (largest
+   filled value relative to the clipping level) per channel. map, pos, x and
+   div are scratch arrays of the solver, sized for all pixels with a flagged
+   channel. Returns FALSE if out of memory.
+*/
+static gboolean _gd_fill_fully_clipped(float *const rgb,
+                                       const uint8_t *const state,
+                                       uint8_t *const filled,
+                                       int *const map,
+                                       int *const pos,
+                                       float *const x,
+                                       float *const div,
+                                       const dt_aligned_pixel_t inv_clip,
+                                       const int width,
+                                       const int height,
+                                       size_t nfill[3],
+                                       int iter[3],
+                                       float peak[3])
+{
+  const size_t npix = (size_t)width * height;
+  int *const queue = dt_alloc_align_int(npix);
+  uint8_t *const seen = dt_alloc_align_uint8(npix);
+  float *const lg = dt_alloc_align_float(npix);
+  float *const gx = dt_alloc_align_float(npix);
+  float *const gy = dt_alloc_align_float(npix);
+  gboolean ok = FALSE;
+  if(!queue || !seen || !lg || !gx || !gy) goto cleanup;
+
+  size_t count[3] = { 0, 0, 0 };
+  for(size_t i = 0; i < npix; i++)
+    for(int c = 0; c < 3; c++) count[c] += (state[i] >> c) & 1;
+  int order[3];
+  _gd_channel_order(order, count, FALSE);
+
+  for(int o = 0; o < 3; o++)
+  {
+    const int k = order[o];
+    const uint8_t bit = 1 << k;
+
+    // connected clipped regions of k, 4-neighborhood, by flood fill
+    memset(seen, 0, npix);
+    for(size_t s = 0; s < npix; s++)
+    {
+      if(!(state[s] & bit) || seen[s]) continue;
+      size_t head = 0, tail = 0;
+      queue[tail++] = (int)s;
+      seen[s] = 1;
+      size_t partial = 0;
+      gboolean overlap = FALSE;
+      while(head < tail)
+      {
+        const int p = queue[head++];
+        partial += state[p] != 7;
+        overlap |= filled[p] != 0;
+        int nb[4];
+        _gd_neighbors(p, width, height, nb);
+        for(int m = 0; m < 4; m++)
+        {
+          if(nb[m] < 0 || !(state[nb[m]] & bit) || seen[nb[m]]) continue;
+          seen[nb[m]] = 1;
+          queue[tail++] = nb[m];
+        }
+      }
+      if(overlap || partial > GD_FILL_TOL * tail) continue;
+      for(size_t m = 0; m < tail; m++) filled[queue[m]] |= bit;
+      nfill[k] += tail;
+    }
+    if(!nfill[k]) continue;
+
+    const size_t n = _gd_index_pixels(map, pos, filled, bit, NULL, npix);
+    const float floor = GD_LOG_FLOOR / inv_clip[k];
+    DT_OMP_FOR()
+    for(size_t i = 0; i < npix; i++)
+      lg[i] = logf(fmaxf(rgb[4 * i + k], floor));
+
+    // boundary values of eq. 9: the log gradients on the border
+    DT_OMP_FOR()
+    for(int i = 0; i < (int)npix; i++)
+    {
+      if(map[i] >= 0) continue;
+      int nb[4];
+      _gd_neighbors(i, width, height, nb);
+      gboolean border = FALSE;
+      for(int m = 0; m < 4; m++) border |= nb[m] >= 0 && map[nb[m]] >= 0;
+      if(!border) continue;
+      gx[i] = _gd_log_slope(lg, state, bit, i, nb[0], nb[1]);
+      gy[i] = _gd_log_slope(lg, state, bit, i, nb[2], nb[3]);
+    }
+
+    float *const g[2] = { gx, gy };
+    for(int d = 0; d < 2; d++)
+    {
+      memset(x, 0, sizeof(float) * n);
+      const int it = _gd_solve_poisson(x, NULL, g[d], 1, map, pos, n, width, height);
+      if(it < 0) goto cleanup;
+      iter[k] += it;
+      for(size_t m = 0; m < n; m++) g[d][pos[m]] = x[m];
+    }
+
+    // eq. 10: the target of u_q - u_p on each edge is the mean gradient of
+    // its ends, positive towards the right and the bottom
+    DT_OMP_FOR()
+    for(size_t m = 0; m < n; m++)
+    {
+      const int p = pos[m];
+      int nb[4];
+      _gd_neighbors(p, width, height, nb);
+      float sum = 0.0f;
+      if(nb[0] >= 0) sum += 0.5f * (gx[p] + gx[nb[0]]);
+      if(nb[1] >= 0) sum -= 0.5f * (gx[p] + gx[nb[1]]);
+      if(nb[2] >= 0) sum += 0.5f * (gy[p] + gy[nb[2]]);
+      if(nb[3] >= 0) sum -= 0.5f * (gy[p] + gy[nb[3]]);
+      div[m] = sum;
+      x[m] = lg[p];
+    }
+    const int it = _gd_solve_poisson(x, div, lg, 1, map, pos, n, width, height);
+    if(it < 0) goto cleanup;
+    iter[k] += it;
+
+    // steep border slopes over a wide region would integrate to huge values
+    const float lmax = logf(GD_FILL_MAX / inv_clip[k]);
+    float xmax = -INFINITY;
+    DT_OMP_FOR(reduction(max : xmax))
+    for(size_t m = 0; m < n; m++)
+    {
+      rgb[4 * pos[m] + k] = expf(fminf(x[m], lmax));
+      xmax = fmaxf(xmax, x[m]);
+    }
+    peak[k] = expf(fminf(xmax, lmax)) * inv_clip[k];
+  }
+  ok = TRUE;
+
+cleanup:
+  dt_free_align(queue);
+  dt_free_align(seen);
+  dt_free_align(lg);
+  dt_free_align(gx);
+  dt_free_align(gy);
+  return ok;
+}
+
 /* Restores the flagged channels of the RGB pixels in place, steps 1 to 4 of
    the header. The flags stay as the conversion set them, and no solve reads
-   a flagged value of another channel, so each solve can write its result
-   straight into the RGB pixels.
+   a flagged value of another channel unless it is restored already (see
+   _gd_usable()), so each solve can write its result straight into the RGB
+   pixels. The write-back and experiment parameters select the variants of
+   _gd_joint_scale(), _gd_hue_fill() and _gd_fill_fully_clipped(), the neutral
+   hue and the solved channels as references.
    Returns the number of pixels with a flagged channel, 0 if there is none or
    no unflagged border, -1 if out of memory.
 */
@@ -627,7 +891,9 @@ static int _gd_solve(dt_iop_module_t *self,
                      const dt_aligned_pixel_t inv_clip,
                      const int width,
                      const int height,
-                     const float sigma_s)
+                     const float sigma_s,
+                     const dt_iop_highlights_writeback_t writeback,
+                     const dt_iop_highlights_experiment_t experiment)
 {
   const size_t npix = (size_t)width * height;
 
@@ -637,14 +903,24 @@ static int _gd_solve(dt_iop_module_t *self,
     nclipped += state[i] ? 1 : 0;
   if(!nclipped) return 0;
 
+  const gboolean hue_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL;
+  const gboolean smooth_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL;
+  const gboolean solved_refs = experiment == DT_HIGHLIGHTS_EXPERIMENT_SOLVED_REFS;
+  const gboolean keep_input = hue_fill || writeback != DT_HIGHLIGHTS_WRITEBACK_BASIC;
+
   uint8_t *const border = dt_alloc_align_uint8(npix);
   float *const rhobuf = dt_alloc_align_float(3 * npix);
   int *const map = dt_alloc_align_int(npix);
   int *const pos = dt_alloc_align_int(nclipped);
   float *const x = dt_alloc_align_float(nclipped);
   float *const div = dt_alloc_align_float(nclipped);
+  // the converted input of the pixels in U, which the solves overwrite
+  float *const uin = keep_input ? dt_alloc_align_float(3 * nclipped) : NULL;
+  uint8_t *const filled = smooth_fill ? dt_alloc_align_uint8(npix) : NULL;
   int result = -1;
-  if(!border || !rhobuf || !map || !pos || !x || !div) goto cleanup;
+  if(!border || !rhobuf || !map || !pos || !x || !div
+     || (keep_input && !uin) || (smooth_fill && !filled))
+    goto cleanup;
 
   size_t nborder = 0;
   DT_OMP_FOR(reduction(+ : nborder))
@@ -668,69 +944,133 @@ static int _gd_solve(dt_iop_module_t *self,
   float *const rho[3] = { rhobuf, rhobuf + npix, rhobuf + 2 * npix };
   const float *const crho[3] = { rho[0], rho[1], rho[2] };
 
-  // hue estimate over U, paper 3.2
-  _gd_smooth_border(rho, rgb, border, width, height, inv_clip, sigma_s);
-  if(!_gd_pullpush_fill(rho, border, state, width, height)) goto cleanup;
-
   int hue_iter[3] = { 0, 0, 0 };
-  const size_t nu = _gd_index_pixels(map, pos, state, 7, npix);
-  for(int c = 0; c < 3; c++)
+  const size_t nu = _gd_index_pixels(map, pos, state, 7, NULL, npix);
+  if(experiment == DT_HIGHLIGHTS_EXPERIMENT_NEUTRAL_HUE)
   {
+    // the same value in all channels is white under the white balance
+    DT_OMP_FOR()
+    for(size_t i = 0; i < 3 * npix; i++)
+      rhobuf[i] = 1.0f;
+  }
+  else
+  {
+    // hue estimate over U, paper 3.2
+    _gd_smooth_border(rho, rgb, border, width, height, inv_clip, sigma_s);
+    if(!_gd_pullpush_fill(rho, border, state, width, height)) goto cleanup;
+
+    for(int c = 0; c < 3; c++)
+    {
+      for(size_t k = 0; k < nu; k++)
+        x[k] = rho[c][pos[k]];
+      hue_iter[c] = _gd_solve_poisson(x, NULL, rho[c], 1, map, pos, nu, width, height);
+      if(hue_iter[c] < 0) goto cleanup;
+      for(size_t k = 0; k < nu; k++)
+        rho[c][pos[k]] = x[k];
+    }
+  }
+
+  if(keep_input)
+  {
+    DT_OMP_FOR()
     for(size_t k = 0; k < nu; k++)
-      x[k] = rho[c][pos[k]];
-    hue_iter[c] = _gd_solve_poisson(x, NULL, rho[c], 1, map, pos, nu, width, height);
-    if(hue_iter[c] < 0) goto cleanup;
-    for(size_t k = 0; k < nu; k++)
-      rho[c][pos[k]] = x[k];
+      for(int c = 0; c < 3; c++) uin[3 * k + c] = rgb[4 * pos[k] + c];
+  }
+
+  size_t nfill[3] = { 0, 0, 0 };
+  int fill_iter[3] = { 0, 0, 0 };
+  float peak[3] = { 0.0f, 0.0f, 0.0f };
+  if(smooth_fill)
+  {
+    memset(filled, 0, npix);
+    if(!_gd_fill_fully_clipped(rgb, state, filled, map, pos, x, div, inv_clip,
+                               width, height, nfill, fill_iter, peak))
+      goto cleanup;
+  }
+
+  // red, green, blue; with solved channels as references, the channel with the
+  // largest clipped region goes first: it has the widest band of partly
+  // clipped pixels, where unflagged references guide it
+  int order[3] = { 0, 1, 2 };
+  if(solved_refs)
+  {
+    size_t count[3] = { 0, 0, 0 };
+    for(size_t i = 0; i < npix; i++)
+      for(int c = 0; c < 3; c++) count[c] += (state[i] >> c) & 1;
+    _gd_channel_order(order, count, TRUE);
   }
 
   // per channel: guidance field and Poisson solve over its clipped region
+  uint8_t solved = 0;
   int chan_iter[3] = { 0, 0, 0 };
-  for(int j = 0; j < 3; j++)
+  for(int o = 0; o < 3; o++)
   {
-    const size_t n = _gd_index_pixels(map, pos, state, 1 << j, npix);
-    if(!n) continue;
+    const int j = order[o];
+    const size_t n = _gd_index_pixels(map, pos, state, 1 << j, filled, npix);
+    if(n)
+    {
+      DT_OMP_FOR()
+      for(size_t k = 0; k < n; k++)
+      {
+        const int p = pos[k];
+        int nb[4];
+        _gd_neighbors(p, width, height, nb);
+        float sum = 0.0f;
+        for(int m = 0; m < 4; m++)
+          if(nb[m] >= 0) sum -= _gd_edge_guidance(rgb, state, filled, solved, crho, inv_clip, p, nb[m], j);
+        div[k] = sum;
 
+        // start from the spatial estimate of paper eq. 4, extended to
+        // several reference channels like eq. 7; flagged references are
+        // left out as in _gd_edge_guidance()
+        const uint8_t usable = _gd_usable(state, filled, solved, p);
+        float num = 0.0f;
+        float den = 0.0f;
+        for(int c = 0; c < 3; c++)
+        {
+          if(c == j || !(usable & (1 << c))) continue;
+          const float w = _gd_weight(rgb[4 * p + c] * inv_clip[c]);
+          num += w * _gd_ratio(crho, p, j, c) * rgb[4 * p + c];
+          den += w;
+        }
+        x[k] = den > 0.0f ? fmaxf(rgb[4 * p + j], num / den) : rgb[4 * p + j];
+      }
+
+      chan_iter[j] = _gd_solve_poisson(x, div, rgb + j, 4, map, pos, n, width, height);
+      if(chan_iter[j] < 0) goto cleanup;
+
+      DT_OMP_FOR()
+      for(size_t k = 0; k < n; k++)
+        rgb[4 * pos[k] + j] = x[k];
+    }
+    if(solved_refs) solved |= 1 << j;
+  }
+
+  if(keep_input)
+  {
+    const gboolean joint_all = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_ALL;
+    const gboolean joint_full = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL;
+    _gd_index_pixels(map, pos, state, 7, NULL, npix);
     DT_OMP_FOR()
-    for(size_t k = 0; k < n; k++)
+    for(size_t k = 0; k < nu; k++)
     {
       const int p = pos[k];
-      int nb[4];
-      _gd_neighbors(p, width, height, nb);
-      float sum = 0.0f;
-      for(int m = 0; m < 4; m++)
-        if(nb[m] >= 0) sum -= _gd_edge_guidance(rgb, state, crho, inv_clip, p, nb[m], j);
-      div[k] = sum;
-
-      // start from the spatial estimate of paper eq. 4, extended to
-      // several reference channels like eq. 7; flagged references are
-      // left out as in _gd_edge_guidance()
-      float num = 0.0f;
-      float den = 0.0f;
-      for(int c = 0; c < 3; c++)
-      {
-        if(c == j || (state[p] & (1 << c))) continue;
-        const float w = _gd_weight(rgb[4 * p + c] * inv_clip[c]);
-        num += w * _gd_ratio(crho, p, j, c) * rgb[4 * p + c];
-        den += w;
-      }
-      x[k] = den > 0.0f ? fmaxf(rgb[4 * p + j], num / den) : rgb[4 * p + j];
+      float *const u = rgb + 4 * p;
+      const float *const v = uin + 3 * k;
+      if(hue_fill && state[p] == 7) _gd_hue_fill(u, v, crho, p);
+      if(joint_all || (joint_full && state[p] == 7)) _gd_joint_scale(u, v, state[p]);
     }
-
-    chan_iter[j] = _gd_solve_poisson(x, div, rgb + j, 4, map, pos, n, width, height);
-    if(chan_iter[j] < 0) goto cleanup;
-
-    DT_OMP_FOR()
-    for(size_t k = 0; k < n; k++)
-      rgb[4 * pos[k] + j] = x[k];
   }
 
   result = nclipped;
   dt_print_pipe(DT_DEBUG_PERF,
                 "gradient domain", piece->pipe, self, DT_DEVICE_CPU, NULL, NULL,
-                "%dx%d grid: %zu clipped, %zu border pixels; CG iterations hue %d/%d/%d, channels %d/%d/%d",
+                "%dx%d grid: %zu clipped, %zu border pixels; CG iterations hue %d/%d/%d, channels %d/%d/%d; "
+                "write-back %d, experiment %d; filled %zu/%zu/%zu in %d/%d/%d iterations, peak %.1f/%.1f/%.1f x clip",
                 width, height, nclipped, nborder,
-                hue_iter[0], hue_iter[1], hue_iter[2], chan_iter[0], chan_iter[1], chan_iter[2]);
+                hue_iter[0], hue_iter[1], hue_iter[2], chan_iter[0], chan_iter[1], chan_iter[2],
+                writeback, experiment, nfill[0], nfill[1], nfill[2],
+                fill_iter[0], fill_iter[1], fill_iter[2], peak[0], peak[1], peak[2]);
 
 cleanup:
   dt_free_align(border);
@@ -739,6 +1079,8 @@ cleanup:
   dt_free_align(pos);
   dt_free_align(x);
   dt_free_align(div);
+  dt_free_align(uin);
+  dt_free_align(filled);
   return result;
 }
 
@@ -863,12 +1205,14 @@ static void _process_gradient(dt_iop_module_t *self,
   int solved = -1;
   if(rgb && state)
   {
+    const gboolean block_flag = d->experiment == DT_HIGHLIGHTS_EXPERIMENT_XTRANS_FLAG && step == 3;
     _gd_to_rgb(rgb, state, input, filters, xtrans, filters == 9u ? fit : NULL, clips,
-               iwidth, iheight, step, width, height);
+               iwidth, iheight, step, width, height, block_flag);
 
     // the preview pipe gets a downscaled image, so iscale is not 1 there
     const float sigma_s = fmaxf(0.5f, GD_BORDER_SIGMA_S * roi_in->scale / piece->iscale / step);
-    solved = _gd_solve(self, piece, rgb, state, inv_clip, width, height, sigma_s);
+    solved = _gd_solve(self, piece, rgb, state, inv_clip, width, height, sigma_s,
+                       d->writeback, d->experiment);
   }
 
   if(solved > 0)
