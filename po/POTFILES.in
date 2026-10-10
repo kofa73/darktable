@@ -56,6 +56,7 @@ build/lib/darktable/plugins/introspection_grain.c
 build/lib/darktable/plugins/introspection_hazeremoval.c
 build/lib/darktable/plugins/introspection_highlights.c
 build/lib/darktable/plugins/introspection_highpass.c
+build/lib/darktable/plugins/introspection_hlcolor.c
 build/lib/darktable/plugins/introspection_hotpixels.c
 build/lib/darktable/plugins/introspection_invert.c
 build/lib/darktable/plugins/introspection_lens.cc
@@ -317,6 +318,7 @@ src/iop/grain.c
 src/iop/hazeremoval.c
 src/iop/highlights.c
 src/iop/highpass.c
+src/iop/hlcolor.c
 src/iop/hotpixels.c
 src/iop/invert.c
 src/iop/lens.cc

@@ -89,6 +89,7 @@ const dt_iop_order_entry_t legacy_order[] = {
   { { 7.0f }, "rawdenoise", 0},
   { { 8.0f }, "demosaic", 0},
   { { 8.5f }, "demosaicscale", 0},
+  { { 8.7f }, "hlcolor", 0},
   { { 9.0f }, "mask_manager", 0},
   { {10.0f }, "denoiseprofile", 0},
   { {11.0f }, "tonemap", 0},
@@ -191,6 +192,7 @@ const dt_iop_order_entry_t v30_order[] = {
   { { 7.0f }, "rawdenoise", 0},
   { { 8.0f }, "demosaic", 0},
   { { 8.5f }, "demosaicscale", 0},
+  { { 8.7f }, "hlcolor", 0},
   { { 9.0f }, "denoiseprofile", 0},
   { {10.0f }, "bilateral", 0},
   { {11.0f }, "rotatepixels", 0},
@@ -314,6 +316,7 @@ const dt_iop_order_entry_t v50_order[] = {
   { { 7.0f }, "rawdenoise", 0},
   { { 8.0f }, "demosaic", 0},
   { { 8.5f }, "demosaicscale", 0},
+  { { 8.7f }, "hlcolor", 0},
   { { 9.0f }, "denoiseprofile", 0},
   { {10.0f }, "bilateral", 0},
   { {11.0f }, "rotatepixels", 0},
@@ -442,6 +445,7 @@ const dt_iop_order_entry_t v30_jpg_order[] = {
   // all the modules between [8.5; 28] expect linear RGB, so they need to be moved after colorin
   { { 28.0f }, "colorin", 0 },
   // moved modules : (copy-pasted in the same order)
+  { { 28.0f }, "hlcolor", 0},
   { { 28.0f }, "denoiseprofile", 0},
   { { 28.0f }, "bilateral", 0},
   { { 28.0f }, "rotatepixels", 0},
@@ -568,6 +572,7 @@ const dt_iop_order_entry_t v50_jpg_order[] = {
   // all the modules between [8.5; 28] expect linear RGB, so they need to be moved after colorin
   { { 28.0f }, "colorin", 0 },
   // moved modules : (copy-pasted in the same order)
+  { { 28.0f }, "hlcolor", 0},
   { { 28.0f }, "denoiseprofile", 0},
   { { 28.0f }, "bilateral", 0},
   { { 28.0f }, "rotatepixels", 0},
@@ -766,6 +771,7 @@ void dt_ioppr_migrate_legacy_iop_order_list(GList *iop_order_list)
   _insert_before_after(iop_order_list, "colorbalancergb", "colorequal", TRUE);
   _insert_before_after(iop_order_list, "highlights", "rasterfile", TRUE);
   _insert_before_after(iop_order_list, "demosaic", "demosaicscale", FALSE);
+  _insert_before_after(iop_order_list, "demosaicscale", "hlcolor", FALSE);
   _insert_before_after(iop_order_list, "colorbalance", "colorharmonizer", TRUE);
 }
 

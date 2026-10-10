@@ -47,17 +47,18 @@
 #define DS_FACTOR 4
 #define MAX_NUM_SCALES 12
 
-DT_MODULE_INTROSPECTION(5, dt_iop_highlights_params_t)
+DT_MODULE_INTROSPECTION(6, dt_iop_highlights_params_t)
 
 /* As some of the internal algorithms use a smaller value for clipping than given by the UI
    the visualizing is wrong for those algos. It seems to be a a minor issue but sometimes significant.
    Please note, every mode defined in dt_iop_highlights_mode_t requires a value.
 */
-static float highlights_clip_magics[6] = { 1.0f, 1.0f, 0.987f, 0.995f, 0.987f, 0.987f };
+static float highlights_clip_magics[7] = { 1.0f, 1.0f, 0.987f, 0.995f, 0.987f, 0.987f, 0.98f };
 
 typedef enum dt_iop_highlights_mode_t
 {
   DT_IOP_HIGHLIGHTS_OPPOSED = 5,   // $DESCRIPTION: "inpaint opposed"
+  DT_IOP_HIGHLIGHTS_GRADIENT = 6,  // $DESCRIPTION: "gradient domain"
   DT_IOP_HIGHLIGHTS_LCH = 1,       // $DESCRIPTION: "reconstruct in LCh"
   DT_IOP_HIGHLIGHTS_CLIP = 0,      // $DESCRIPTION: "clip highlights"
   DT_IOP_HIGHLIGHTS_SEGMENTS = 4,  // $DESCRIPTION: "segmentation based"
@@ -114,6 +115,7 @@ typedef struct dt_iop_highlights_params_t
   float combine;                      // $MIN: 0.0 $MAX: 8.0 $DEFAULT: 2.0 $DESCRIPTION: "combine"
   dt_recovery_mode_t recovery;        // $DEFAULT: DT_RECOVERY_MODE_OFF $DESCRIPTION: "rebuild"
   float solid_color;                  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "inpaint a flat color"
+  gboolean full_resolution;           // $DEFAULT: FALSE $DESCRIPTION: "full resolution"
 } dt_iop_highlights_params_t;
 
 typedef struct dt_iop_highlights_gui_data_t
@@ -128,6 +130,7 @@ typedef struct dt_iop_highlights_gui_data_t
   GtkWidget *combine;
   GtkWidget *recovery;
   GtkWidget *strength;
+  GtkWidget *full_resolution;
   dt_highlights_mask_t hlr_mask_mode;
   dt_aligned_pixel_t oppchroma;
   gboolean oppclipped;
@@ -340,6 +343,34 @@ int legacy_params(dt_iop_module_t *self,
     *new_version = 5;
     return 0;
   }
+  if(old_version == 5)
+  {
+    typedef struct dt_iop_highlights_params_v6_t
+    {
+      dt_iop_highlights_mode_t mode;
+      float strength;
+      float clip;
+      float noise_level;
+      int iterations;
+      dt_atrous_wavelets_scales_t scales;
+      float candidating;
+      float combine;
+      dt_recovery_mode_t recovery;
+      float solid_color;
+      gboolean full_resolution;
+    } dt_iop_highlights_params_v6_t;
+
+    const dt_iop_highlights_params_v5_t *o = (dt_iop_highlights_params_v5_t *)old_params;
+    dt_iop_highlights_params_v6_t *n = calloc(1, sizeof(dt_iop_highlights_params_v6_t));
+    memcpy(n, o, sizeof(dt_iop_highlights_params_v5_t));
+
+    n->full_resolution = FALSE;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_highlights_params_v6_t);
+    *new_version = 6;
+    return 0;
+  }
 
   return 1;
 }
@@ -350,6 +381,7 @@ int legacy_params(dt_iop_module_t *self,
 #include "hlreconstruct/laplacian.c"
 #include "hlreconstruct/inpaint.c"
 #include "hlreconstruct/lch.c"
+#include "hlreconstruct/gradient.c"
 
 void distort_mask(dt_iop_module_t *self,
                   dt_dev_pixelpipe_iop_t *piece,
@@ -379,7 +411,8 @@ void modify_roi_out(dt_iop_module_t *self,
 }
 
 /* inpaint opposed and segmentation based algorithms want the whole image for proper calculation
-   of chrominance correction and best candidates.
+   of chrominance correction and best candidates. The gradient domain method solves over whole
+   clipped regions and their borders, so it needs the whole image for linear raws too.
 */
 void modify_roi_in(dt_iop_module_t *self,
                    dt_dev_pixelpipe_iop_t *piece,
@@ -390,13 +423,14 @@ void modify_roi_in(dt_iop_module_t *self,
 
   dt_iop_highlights_data_t *d = piece->data;
   const gboolean use_opposing = (d->mode == DT_IOP_HIGHLIGHTS_OPPOSED) || (d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS);
+  const gboolean use_gradient = d->mode == DT_IOP_HIGHLIGHTS_GRADIENT;
 
   // Whenever we use opposed we have to setup the desired roi_in area
-  if(!use_opposing)
+  if(!use_opposing && !use_gradient)
     return;
 
   roi_in->scale = 1.0f;
-  if(piece->pipe->dsc.filters == 0)
+  if(piece->pipe->dsc.filters == 0 && !use_gradient)
   {
     // For linear raws we will use an internal downscaler as we normally do in demosaic
     roi_in->x /= roi_out->scale;
@@ -472,6 +506,18 @@ void tiling_callback(dt_iop_module_t *self,
     const int segments = roi_out->width * roi_out->height / 4000; // segments per mpix
     tiling->overhead = segments * 5 * 5 * sizeof(int); // segmentation stuff
     tiling->factor += 1.0f;
+    return;
+  }
+
+  if(d->mode == DT_IOP_HIGHLIGHTS_GRADIENT)
+  {
+    // the method can't tile either. Its buffers take 34 bytes per RGB pixel plus up to
+    // 32 per clipped one, counted here as if all were clipped.
+    const int step = _gd_grid_step(filters, d->full_resolution);
+    const float bpp = filters ? sizeof(float) : 4 * sizeof(float);
+    tiling->factor += 66.0f / (step * step * bpp);
+    // linear raws are processed in a temp buffer of the input size, then scaled
+    if(!filters) tiling->factor += 1.0f;
     return;
   }
 
@@ -923,7 +969,10 @@ void process(dt_iop_module_t *self,
     }
     else
     {
-      _process_linear_opposed(self, piece, ivoid, out, roi_in);
+      if(dmode == DT_IOP_HIGHLIGHTS_GRADIENT)
+        _process_gradient(self, piece, ivoid, out, roi_in, roi_in, clipper);
+      else
+        _process_linear_opposed(self, piece, ivoid, out, roi_in);
       dt_iop_clip_and_zoom_roi((float *)ovoid, out, roi_out, roi_in);
       dt_free_align(out);
     }
@@ -1014,6 +1063,12 @@ void process(dt_iop_module_t *self,
       break;
     }
 
+    case DT_IOP_HIGHLIGHTS_GRADIENT:
+    {
+      _process_gradient(self, piece, ivoid, ovoid, roi_in, roi_out, clipper);
+      break;
+    }
+
     default:
     {
       _process_opposed(self, piece, ivoid, ovoid, roi_in, roi_out, FALSE, clipper);
@@ -1026,9 +1081,10 @@ void process(dt_iop_module_t *self,
   else      dt_iop_piece_clear_raster(piece, NULL);
 
   // update processed maximum
-  if((dmode != DT_IOP_HIGHLIGHTS_LAPLACIAN) && (dmode != DT_IOP_HIGHLIGHTS_SEGMENTS) && (dmode != DT_IOP_HIGHLIGHTS_OPPOSED))
+  if((dmode != DT_IOP_HIGHLIGHTS_LAPLACIAN) && (dmode != DT_IOP_HIGHLIGHTS_SEGMENTS) && (dmode != DT_IOP_HIGHLIGHTS_OPPOSED)
+     && (dmode != DT_IOP_HIGHLIGHTS_GRADIENT))
   {
-    // The guided laplacian, inpaint opposed and segmentation modes keep signal scene-referred and don't clip highlights to 1
+    // The guided laplacian, inpaint opposed, segmentation and gradient domain modes keep signal scene-referred and don't clip highlights to 1
     // For the other modes, we need to notify the pipeline that white point has changed
     const float m = dt_iop_get_processed_maximum(piece);
     for_three_channels(k) pipe->dsc.processed_maximum[k] = m;
@@ -1053,20 +1109,22 @@ void commit_params(dt_iop_module_t *self,
 
   // for non-raws always use clip; an unknown stored mode would index
   // highlights_clip_magics[] out of bounds, and processing treats it as clip anyway
-  if(!rawprep || is_4bayer || (unsigned)d->mode > DT_IOP_HIGHLIGHTS_OPPOSED)
+  if(!rawprep || is_4bayer || (unsigned)d->mode > DT_IOP_HIGHLIGHTS_GRADIENT)
     d->mode = DT_IOP_HIGHLIGHTS_CLIP;
 
   /* no OpenCLfor
-     1. DT_IOP_HIGHLIGHTS_INPAINT and DT_IOP_HIGHLIGHTS_SEGMENTS
+     1. DT_IOP_HIGHLIGHTS_INPAINT, DT_IOP_HIGHLIGHTS_SEGMENTS and DT_IOP_HIGHLIGHTS_GRADIENT
      2. DT_IOP_HIGHLIGHTS_OPPOSED on linear raws
      FIXME the opposed preprocessing might be added as OpenCL too
   */
   const gboolean use_opposed = d->mode == DT_IOP_HIGHLIGHTS_OPPOSED;
+  const gboolean use_gradient = d->mode == DT_IOP_HIGHLIGHTS_GRADIENT;
   const gboolean opplinear = use_opposed && linear;
 
-  piece->process_cl_ready = ((d->mode == DT_IOP_HIGHLIGHTS_INPAINT) || (d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || opplinear) ? FALSE : TRUE;
+  piece->process_cl_ready = ((d->mode == DT_IOP_HIGHLIGHTS_INPAINT) || (d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS)
+                             || use_gradient || opplinear) ? FALSE : TRUE;
 
-  if((d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || use_opposed)
+  if((d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || use_opposed || use_gradient)
     piece->process_tiling_ready = FALSE;
 
   dt_iop_highlights_gui_data_t *g = self->gui_data;
@@ -1235,6 +1293,9 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   gtk_widget_set_visible(g->scales, use_laplacian);
   gtk_widget_set_visible(g->solid_color, use_laplacian);
 
+  // linear raws are always solved at full resolution
+  gtk_widget_set_visible(g->full_resolution, p->mode == DT_IOP_HIGHLIGHTS_GRADIENT && filters != 0);
+
   gtk_widget_set_visible(g->candidating, use_segmentation);
   gtk_widget_set_visible(g->combine, use_segmentation);
   gtk_widget_set_visible(g->recovery, use_segmentation);
@@ -1308,6 +1369,8 @@ void reload_defaults(dt_iop_module_t *self)
     {
       dt_bauhaus_combobox_add_introspection(g->mode, NULL, values, DT_IOP_HIGHLIGHTS_OPPOSED,
                                                                    DT_IOP_HIGHLIGHTS_OPPOSED);
+      dt_bauhaus_combobox_add_introspection(g->mode, NULL, values, DT_IOP_HIGHLIGHTS_GRADIENT,
+                                                                   DT_IOP_HIGHLIGHTS_GRADIENT);
       dt_bauhaus_combobox_add_introspection(g->mode, NULL, values, DT_IOP_HIGHLIGHTS_CLIP,
                                                                    DT_IOP_HIGHLIGHTS_CLIP);
     }
@@ -1376,6 +1439,10 @@ void gui_init(dt_iop_module_t *self)
   dt_bauhaus_widget_set_quad(g->clip, self, dtgtk_cairo_paint_showmask, TRUE, _quad_callback,
     _("visualize clipped highlights in a false color representation.\n"
       "the effective clipping level also depends on the reconstruction method."));
+
+  g->full_resolution = dt_bauhaus_toggle_from_params(self, "full_resolution");
+  gtk_widget_set_tooltip_text(g->full_resolution, _("reconstruct at full sensor resolution instead of a reduced one.\n"
+                                                    "this is several times slower"));
 
   g->combine = dt_bauhaus_slider_from_params(self, "combine");
   dt_bauhaus_slider_set_digits(g->combine, 0);
