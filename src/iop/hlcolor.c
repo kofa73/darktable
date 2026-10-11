@@ -29,8 +29,9 @@
    2. hue estimate rho: the colors on B, smoothed along B, interpolated
       over U by a Laplace solve (paper 3.2)
    3. guidance field for each channel inside its own clipped region: the
-      gradients of the other channels scaled by the hue ratio, weighted by
-      how reliable each value is (paper eq. 7, 8)
+      gradients of the other channels times the hue ratio, weighted by how
+      reliable each value is (paper eq. 7, 8, see _edge_guidance() for where
+      it differs from eq. 7)
    4. one Poisson solve per channel over its clipped region, with the
       unclipped neighbors as boundary values (paper eq. 6)
 
@@ -56,8 +57,10 @@ DT_MODULE_INTROSPECTION(1, dt_iop_hlcolor_params_t)
 typedef enum dt_iop_hlcolor_writeback_t
 {
   DT_HLCOLOR_WRITEBACK_BASIC = 0,      // $DESCRIPTION: "basic"
-  DT_HLCOLOR_WRITEBACK_JOINT_FULL = 1, // $DESCRIPTION: "joint, fully clipped"
-  DT_HLCOLOR_WRITEBACK_JOINT_ALL = 2,  // $DESCRIPTION: "joint, all clipped"
+  DT_HLCOLOR_WRITEBACK_JOINT_FULL = 1, // $DESCRIPTION: "joint, all channels clipped"
+  DT_HLCOLOR_WRITEBACK_JOINT_ANY = 2,  // $DESCRIPTION: "joint, any channel clipped"
+  DT_HLCOLOR_WRITEBACK_JOINT_FULL_CAPPED = 3, // $DESCRIPTION: "joint, all channels clipped, capped"
+  DT_HLCOLOR_WRITEBACK_JOINT_ANY_CAPPED = 4,  // $DESCRIPTION: "joint, any channel clipped, capped"
 } dt_iop_hlcolor_writeback_t;
 
 // numbered like dt_iop_highlights_experiment_t, without the X-Trans one
@@ -102,6 +105,8 @@ typedef struct dt_iop_hlcolor_gui_data_t
 #define HLC_FILL_TOL 0.05f
 #define HLC_LOG_FLOOR 1e-3f
 #define HLC_FILL_MAX 64.0f
+// largest factor of the capped joint write-back, see _joint_scale()
+#define HLC_JOINT_MAX 2.0f
 
 const char *name()
 {
@@ -505,7 +510,9 @@ static inline uint8_t _usable(const uint8_t *const state,
 
 // target value of u_j(q) - u_j(p) on the edge p-q, from the other channels,
 // paper eq. 7, with the weights min-filtered over the edge as in paper 3.5;
-// only the channels in usable serve as references
+// only the channels in usable serve as references. Each reference k
+// contributes the change of r u_k, not r times the change of u_k as in eq. 7,
+// for the reason given at _gd_edge_guidance() in src/iop/hlreconstruct/gradient.c
 static inline float _edge_guidance(const float *const in,
                                    const float *const rho[3],
                                    const dt_aligned_pixel_t inv_clip,
@@ -521,8 +528,7 @@ static inline float _edge_guidance(const float *const in,
     if(k == j || !(usable & (1 << k))) continue;
     const float w = fminf(_weight(in[4 * p + k] * inv_clip[k]),
                           _weight(in[4 * q + k] * inv_clip[k]));
-    const float r = 0.5f * (_ratio(rho, p, j, k) + _ratio(rho, q, j, k));
-    num += w * r * (in[4 * q + k] - in[4 * p + k]);
+    num += w * (_ratio(rho, q, j, k) * in[4 * q + k] - _ratio(rho, p, j, k) * in[4 * p + k]);
     den += w;
   }
   return den > 0.0f ? num / den : 0.0f;
@@ -547,14 +553,24 @@ static inline void _hue_fill(float *const u,
 
 // write-back experiment: scales the clipped channels of a pixel together, by
 // the smallest factor that lifts each of them to at least its input value v;
-// the basic write-back lifts each channel on its own, which changes the hue
+// the basic write-back lifts each channel on its own, which changes the hue.
+// capped: the factor stops at HLC_JOINT_MAX, as _gd_joint_scale() in
+// src/iop/hlreconstruct/gradient.c explains
 static inline void _joint_scale(float *const u,
                                 const float *const v,
-                                const uint8_t flags)
+                                const uint8_t flags,
+                                const gboolean capped)
 {
   float scale = 1.0f;
   for(int c = 0; c < 3; c++)
-    if((flags & (1 << c)) && u[c] > 0.0f) scale = fmaxf(scale, v[c] / u[c]);
+  {
+    if(!(flags & (1 << c))) continue;
+    if(u[c] > 0.0f)
+      scale = fmaxf(scale, v[c] / u[c]);
+    else if(capped)
+      scale = HLC_JOINT_MAX;
+  }
+  if(capped) scale = fminf(scale, HLC_JOINT_MAX);
   for(int c = 0; c < 3; c++)
     if(flags & (1 << c)) u[c] *= scale;
 }
@@ -929,8 +945,12 @@ void process(dt_iop_module_t *self,
 
   if(hue_fill || d->writeback != DT_HLCOLOR_WRITEBACK_BASIC)
   {
-    const gboolean joint_all = d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_ALL;
-    const gboolean joint_full = d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_FULL;
+    const gboolean joint_any = d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_ANY
+                               || d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_ANY_CAPPED;
+    const gboolean joint_full = d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_FULL
+                                || d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_FULL_CAPPED;
+    const gboolean capped = d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_FULL_CAPPED
+                            || d->writeback == DT_HLCOLOR_WRITEBACK_JOINT_ANY_CAPPED;
     _index_pixels(map, pos, state, 7, NULL, npix);
     DT_OMP_FOR()
     for(size_t k = 0; k < nu; k++)
@@ -939,7 +959,7 @@ void process(dt_iop_module_t *self,
       float *const u = cur + 4 * p;
       const float *const v = in + 4 * p;
       if(hue_fill && state[p] == 7) _hue_fill(u, v, crho, p);
-      if(joint_all || (joint_full && state[p] == 7)) _joint_scale(u, v, state[p]);
+      if(joint_any || (joint_full && state[p] == 7)) _joint_scale(u, v, state[p], capped);
     }
   }
 
@@ -995,7 +1015,9 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->writeback, _("experimental: how the solution replaces clipped values.\n"
                                               "basic: each clipped channel takes the larger of its value and its solution.\n"
                                               "joint: the clipped channels of a pixel are scaled together until none is\n"
-                                              "below its value, in fully clipped pixels or in all pixels with a clipped channel."));
+                                              "below its value, in pixels with all channels clipped or with any channel clipped.\n"
+                                              "capped: the joint scaling stops at a factor of 2, and each channel still\n"
+                                              "below its value is then raised on its own."));
 
   g->experiment = dt_bauhaus_combobox_from_params(self, "experiment");
   gtk_widget_set_tooltip_text(g->experiment, _("experimental variants of the method.\n"

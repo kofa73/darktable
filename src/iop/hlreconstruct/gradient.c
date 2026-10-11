@@ -29,8 +29,9 @@
    2. hue estimate rho: the colors on B, smoothed along B, interpolated
       over U by a Laplace solve (paper 3.2)
    3. guidance field for each channel inside its own clipped region: the
-      gradients of the unflagged other channels scaled by the hue ratio,
-      weighted by how reliable each value is (paper eq. 7, 8)
+      gradients of the unflagged other channels times the hue ratio,
+      weighted by how reliable each value is (paper eq. 7, 8, see
+      _gd_edge_guidance() for where it differs from eq. 7)
    4. one Poisson solve per channel over its clipped region, with the
       unclipped neighbors as boundary values (paper eq. 6)
    5. clipped photosites take the larger of their value and the solution,
@@ -61,6 +62,8 @@
 #define GD_FILL_TOL 0.05f
 #define GD_LOG_FLOOR 1e-3f
 #define GD_FILL_MAX 64.0f
+// largest factor of the capped joint write-back, see _gd_joint_scale()
+#define GD_JOINT_MAX 2.0f
 // X-Trans plane fit: 6x6 pattern phases, 3 colors, 5x5 window positions
 #define GD_FIT_SIZE (6 * 6 * 3 * 25)
 
@@ -422,6 +425,11 @@ static inline uint8_t _gd_usable(const uint8_t *const state,
    there, see _gd_usable(): a block mean or a window value that includes a
    clipped photosite can sit far below the clipping level, where eq. 8 would
    give it full confidence.
+   Each reference k contributes the change of r u_k along the edge, r being the
+   hue ratio rho_j / rho_k. Eq. 7 scales the change of u_k by r instead, which
+   drops u_k times the change of r: that field is not a gradient where r varies.
+   The error grows with u_k: with a smooth fill far above clipping as the
+   reference, it pushes the solution below zero on one side of the filled region.
 */
 static inline float _gd_edge_guidance(const float *const in,
                                       const uint8_t *const state,
@@ -441,8 +449,7 @@ static inline float _gd_edge_guidance(const float *const in,
     if(k == j || !(usable & (1 << k))) continue;
     const float w = fminf(_gd_weight(in[4 * p + k] * inv_clip[k]),
                           _gd_weight(in[4 * q + k] * inv_clip[k]));
-    const float r = 0.5f * (_gd_ratio(rho, p, j, k) + _gd_ratio(rho, q, j, k));
-    num += w * r * (in[4 * q + k] - in[4 * p + k]);
+    num += w * (_gd_ratio(rho, q, j, k) * in[4 * q + k] - _gd_ratio(rho, p, j, k) * in[4 * p + k]);
     den += w;
   }
   // without a reference, the edge gets no guidance, as in regions with all
@@ -674,14 +681,27 @@ static inline void _gd_hue_fill(float *const u,
    the smallest factor that lifts each of them to at least its input value v.
    The basic write-back lifts each channel on its own, which changes the hue
    wherever a solution falls below its input.
+   A solution near zero asks for an unbounded factor, which then multiplies
+   the other channels too. Uncapped, a channel at or below zero is left out,
+   so the factor jumps along its zero crossing. Capped, the factor stops at
+   GD_JOINT_MAX, and the write-back lifts the channels still below their input
+   on their own.
 */
 static inline void _gd_joint_scale(float *const u,
                                    const float *const v,
-                                   const uint8_t flags)
+                                   const uint8_t flags,
+                                   const gboolean capped)
 {
   float scale = 1.0f;
   for(int c = 0; c < 3; c++)
-    if((flags & (1 << c)) && u[c] > 0.0f) scale = fmaxf(scale, v[c] / u[c]);
+  {
+    if(!(flags & (1 << c))) continue;
+    if(u[c] > 0.0f)
+      scale = fmaxf(scale, v[c] / u[c]);
+    else if(capped)
+      scale = GD_JOINT_MAX;
+  }
+  if(capped) scale = fminf(scale, GD_JOINT_MAX);
   for(int c = 0; c < 3; c++)
     if(flags & (1 << c)) u[c] *= scale;
 }
@@ -1048,8 +1068,12 @@ static int _gd_solve(dt_iop_module_t *self,
 
   if(keep_input)
   {
-    const gboolean joint_all = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_ALL;
-    const gboolean joint_full = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL;
+    const gboolean joint_any = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_ANY
+                               || writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_ANY_CAPPED;
+    const gboolean joint_full = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL
+                                || writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL_CAPPED;
+    const gboolean capped = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL_CAPPED
+                            || writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_ANY_CAPPED;
     _gd_index_pixels(map, pos, state, 7, NULL, npix);
     DT_OMP_FOR()
     for(size_t k = 0; k < nu; k++)
@@ -1058,7 +1082,7 @@ static int _gd_solve(dt_iop_module_t *self,
       float *const u = rgb + 4 * p;
       const float *const v = uin + 3 * k;
       if(hue_fill && state[p] == 7) _gd_hue_fill(u, v, crho, p);
-      if(joint_all || (joint_full && state[p] == 7)) _gd_joint_scale(u, v, state[p]);
+      if(joint_any || (joint_full && state[p] == 7)) _gd_joint_scale(u, v, state[p], capped);
     }
   }
 

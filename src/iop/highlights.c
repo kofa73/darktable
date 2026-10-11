@@ -70,8 +70,10 @@ typedef enum dt_iop_highlights_mode_t
 typedef enum dt_iop_highlights_writeback_t
 {
   DT_HIGHLIGHTS_WRITEBACK_BASIC = 0,      // $DESCRIPTION: "basic"
-  DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL = 1, // $DESCRIPTION: "joint, fully clipped"
-  DT_HIGHLIGHTS_WRITEBACK_JOINT_ALL = 2,  // $DESCRIPTION: "joint, all clipped"
+  DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL = 1, // $DESCRIPTION: "joint, all channels clipped"
+  DT_HIGHLIGHTS_WRITEBACK_JOINT_ANY = 2,  // $DESCRIPTION: "joint, any channel clipped"
+  DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL_CAPPED = 3, // $DESCRIPTION: "joint, all channels clipped, capped"
+  DT_HIGHLIGHTS_WRITEBACK_JOINT_ANY_CAPPED = 4,  // $DESCRIPTION: "joint, any channel clipped, capped"
 } dt_iop_highlights_writeback_t;
 
 typedef enum dt_iop_highlights_experiment_t
@@ -1482,7 +1484,9 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->writeback, _("experimental: how the solution replaces clipped values.\n"
                                               "basic: each clipped channel takes the larger of its value and its solution.\n"
                                               "joint: the clipped channels of a pixel are scaled together until none is\n"
-                                              "below its value, in fully clipped pixels or in all pixels with a clipped channel."));
+                                              "below its value, in pixels with all channels clipped or with any channel clipped.\n"
+                                              "capped: the joint scaling stops at a factor of 2, and each channel still\n"
+                                              "below its value is then raised on its own."));
 
   g->experiment = dt_bauhaus_combobox_from_params(self, "experiment");
   gtk_widget_set_tooltip_text(g->experiment, _("experimental variants of the method.\n"
