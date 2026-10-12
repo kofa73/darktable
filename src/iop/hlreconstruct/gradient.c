@@ -64,6 +64,12 @@
 #define GD_FILL_MAX 64.0f
 // largest factor of the capped joint write-back, see _gd_joint_scale()
 #define GD_JOINT_MAX 2.0f
+// model hue: smallest region with a model of its own, which also bounds the
+// region tables to 1/64 of the grid, and largest relative rms residual of the
+// fit on the border; on sky_g281 the fit of green leaves 0.043, a border of
+// two colors that one model cannot describe leaves 0.3
+#define GD_MODEL_MIN_REGION 64
+#define GD_MODEL_MAX_RESIDUAL 0.1
 // X-Trans plane fit: 6x6 pattern phases, 3 colors, 5x5 window positions
 #define GD_FIT_SIZE (6 * 6 * 3 * 25)
 
@@ -660,18 +666,20 @@ static void _gd_to_rgb(float *const restrict rgb,
 }
 
 /* Experiment: a fully clipped pixel takes the hue estimate, scaled just enough
-   that no channel falls below its solution or its input value v.
+   that no channel falls below its solution or its input value v. With neutral,
+   it takes white instead, the same value in all channels.
 */
 static inline void _gd_hue_fill(float *const u,
                                 const float *const v,
                                 const float *const rho[3],
-                                const size_t i)
+                                const size_t i,
+                                const gboolean neutral)
 {
   dt_aligned_pixel_t r = { 1.0f, 1.0f, 1.0f, 1.0f };
   float scale = 0.0f;
   for(int c = 0; c < 3; c++)
   {
-    r[c] = fmaxf(rho[c][i], GD_RHO_MIN);
+    if(!neutral) r[c] = fmaxf(rho[c][i], GD_RHO_MIN);
     scale = fmaxf(scale, fmaxf(u[c], v[c]) / r[c]);
   }
   for(int c = 0; c < 3; c++) u[c] = scale * r[c];
@@ -704,6 +712,297 @@ static inline void _gd_joint_scale(float *const u,
   if(capped) scale = fminf(scale, GD_JOINT_MAX);
   for(int c = 0; c < 3; c++)
     if(flags & (1 << c)) u[c] *= scale;
+}
+
+/* Experiment: a pixel with one flagged channel j takes its hue from its two
+   measured channels and a model of the third, c_j = a c_k1 + b c_k2, fitted on
+   the border of its connected region of U. The Laplace fill of the border
+   colors cannot follow a hue that changes inside the region, such as a sunlit
+   cloud warmer and brighter than its edge, while the measured channels show
+   that change. Pixels with two or three flagged channels keep the filled hue.
+   With rho[k] equal to the measured c_k, the guidance of _gd_edge_guidance()
+   becomes the difference of the modeled c_j between neighbors.
+   The fit is ridge regularized toward the mean of the two single-channel
+   ratios, since a border of one color cannot separate a from b, and its
+   coefficients are kept non-negative. Small regions, and regions whose border
+   the model does not describe, keep the filled hue.
+   Returns FALSE if out of memory.
+*/
+static gboolean _gd_model_hue(float *const rho[3],
+                              const float *const rgb,
+                              const uint8_t *const state,
+                              const uint8_t *const border,
+                              const dt_aligned_pixel_t inv_clip,
+                              const int width,
+                              const int height,
+                              size_t *const nmodel)
+{
+  const size_t npix = (size_t)width * height;
+  int *const label = dt_alloc_align_int(npix);
+  int *const queue = dt_alloc_align_int(npix);
+  double *acc = NULL;
+  float *coef = NULL;
+  gboolean ok = FALSE;
+  if(!label || !queue) goto cleanup;
+
+  // connected regions of U, 4-connected like the solves; -1 is not visited yet,
+  // -2 a region too small for a model
+  int nlabel = 0;
+  for(size_t i = 0; i < npix; i++) label[i] = -1;
+  for(size_t i = 0; i < npix; i++)
+  {
+    if(!state[i] || label[i] != -1) continue;
+    size_t head = 0, tail = 0;
+    queue[tail++] = i;
+    label[i] = -2;
+    while(head < tail)
+    {
+      int nb[4];
+      _gd_neighbors(queue[head++], width, height, nb);
+      for(int m = 0; m < 4; m++)
+        if(nb[m] >= 0 && state[nb[m]] && label[nb[m]] == -1)
+        {
+          label[nb[m]] = -2;
+          queue[tail++] = nb[m];
+        }
+    }
+    if(tail >= GD_MODEL_MIN_REGION)
+    {
+      for(size_t t = 0; t < tail; t++) label[queue[t]] = nlabel;
+      nlabel++;
+    }
+  }
+
+  // per region and flagged channel: the sums of the normal equations, of the
+  // channel values for the prior, and the count
+  enum { S11, S12, S22, T1, T2, SJJ, WJ, WK1, WK2, CNT, NSUM };
+  // no region is large enough; an allocation of 0 bytes may return NULL
+  if(!nlabel)
+  {
+    *nmodel = 0;
+    ok = TRUE;
+    goto cleanup;
+  }
+  acc = calloc((size_t)nlabel * 3 * NSUM, sizeof(double));
+  coef = dt_alloc_align_float((size_t)nlabel * 3 * 2);
+  if(!acc || !coef) goto cleanup;
+  for(size_t i = 0; i < npix; i++)
+  {
+    if(!border[i]) continue;
+    const float *const c = rgb + 4 * i;
+    // near black, noise would dominate the fit
+    if(c[0] * inv_clip[0] < 0.05f || c[1] * inv_clip[1] < 0.05f || c[2] * inv_clip[2] < 0.05f)
+      continue;
+    int nb[4];
+    _gd_neighbors(i, width, height, nb);
+    int seen[4];
+    int nseen = 0;
+    for(int m = 0; m < 4; m++)
+    {
+      if(nb[m] < 0 || !state[nb[m]] || label[nb[m]] < 0) continue;
+      // a border pixel next to several regions counts once for each
+      const int l = label[nb[m]];
+      gboolean dup = FALSE;
+      for(int t = 0; t < nseen; t++) dup |= seen[t] == l;
+      if(dup) continue;
+      seen[nseen++] = l;
+      for(int j = 0; j < 3; j++)
+      {
+        const int k1 = (j + 1) % 3;
+        const int k2 = (j + 2) % 3;
+        double *const a = acc + ((size_t)l * 3 + j) * NSUM;
+        a[S11] += (double)c[k1] * c[k1];
+        a[S12] += (double)c[k1] * c[k2];
+        a[S22] += (double)c[k2] * c[k2];
+        a[T1] += (double)c[k1] * c[j];
+        a[T2] += (double)c[k2] * c[j];
+        a[SJJ] += (double)c[j] * c[j];
+        a[WJ] += c[j];
+        a[WK1] += c[k1];
+        a[WK2] += c[k2];
+        a[CNT] += 1.0;
+      }
+    }
+  }
+
+  for(int l = 0; l < nlabel; l++)
+    for(int j = 0; j < 3; j++)
+    {
+      const double *const a = acc + ((size_t)l * 3 + j) * NSUM;
+      float *const ab = coef + ((size_t)l * 3 + j) * 2;
+      // too few border pixels for two coefficients: the filled hue stays
+      if(a[CNT] < 16.0)
+      {
+        ab[0] = ab[1] = NAN;
+        continue;
+      }
+      const double a0 = 0.5 * a[WJ] / a[WK1];
+      const double b0 = 0.5 * a[WJ] / a[WK2];
+      const double lambda = 0.01 * 0.5 * (a[S11] + a[S22]);
+      const double m11 = a[S11] + lambda, m12 = a[S12], m22 = a[S22] + lambda;
+      const double r1 = a[T1] + lambda * a0, r2 = a[T2] + lambda * b0;
+      const double det = m11 * m22 - m12 * m12;
+      double ca = (r1 * m22 - r2 * m12) / det;
+      double cb = (m11 * r2 - m12 * r1) / det;
+      // a border of two colors can give a negative coefficient, which extrapolates
+      // badly inside: then the other channel alone is the model
+      if(ca < 0.0)
+      {
+        ca = 0.0;
+        cb = r2 / m22;
+      }
+      else if(cb < 0.0)
+      {
+        cb = 0.0;
+        ca = r1 / m11;
+      }
+      // relative rms residual of the fit on the border
+      const double sse = a[SJJ] - 2.0 * (ca * a[T1] + cb * a[T2])
+                         + ca * ca * a[S11] + 2.0 * ca * cb * a[S12] + cb * cb * a[S22];
+      if(sse > GD_MODEL_MAX_RESIDUAL * GD_MODEL_MAX_RESIDUAL * a[SJJ])
+      {
+        ab[0] = ab[1] = NAN;
+        continue;
+      }
+      ab[0] = ca;
+      ab[1] = cb;
+    }
+
+  size_t n = 0;
+  DT_OMP_FOR(reduction(+ : n))
+  for(size_t i = 0; i < npix; i++)
+  {
+    const uint8_t s = state[i];
+    if((s != 1 && s != 2 && s != 4) || label[i] < 0) continue;
+    const int j = s == 1 ? 0 : (s == 2 ? 1 : 2);
+    const int k1 = (j + 1) % 3;
+    const int k2 = (j + 2) % 3;
+    const float *const ab = coef + ((size_t)label[i] * 3 + j) * 2;
+    if(isnan(ab[0])) continue;
+    const float *const c = rgb + 4 * i;
+    rho[k1][i] = fmaxf(c[k1], 0.0f);
+    rho[k2][i] = fmaxf(c[k2], 0.0f);
+    // the clipped channel is at least its input value
+    rho[j][i] = fmaxf(ab[0] * c[k1] + ab[1] * c[k2], c[j]);
+    n++;
+  }
+  *nmodel = n;
+  ok = TRUE;
+
+cleanup:
+  dt_free_align(label);
+  dt_free_align(queue);
+  free(acc);
+  dt_free_align(coef);
+  return ok;
+}
+
+// opposed's estimate of channel j from the other two channels of pixel c,
+// before its offset: the cube of the mean of their cube roots, after the
+// white balance correction corr
+static inline float _gd_opposed_ref(const float *const c,
+                                    const float *const corr,
+                                    const int j)
+{
+  const int k1 = (j + 1) % 3;
+  const int k2 = (j + 2) % 3;
+  const float r = 0.5f * (cbrtf(fmaxf(corr[k1] * c[k1], 0.0f)) + cbrtf(fmaxf(corr[k2] * c[k2], 0.0f)));
+  return r * r * r;
+}
+
+/* Experiment: partly clipped pixels take their hue from the estimate of the
+   opposed method. A flagged channel j becomes _gd_opposed_ref() plus one
+   offset for the whole image, the mean difference between j and that
+   reference over the unflagged values of j between 0.2 and 1 times its
+   clipping level, within 2 sigma_s of a pixel flagged in j (opposed.c:366).
+   Opposed learns the offset from bright pixels near clipping, not from the
+   whole border, and so leaves out dark objects in front of a highlight. The
+   measured channels keep their values, so that the guidance follows the
+   estimate, as with _gd_model_hue(). corr is opposed's white balance
+   correction (opposed.c:257): with the "as shot to reference" white balance,
+   the references are taken at the D65 balance. It is not a gain on j, so it
+   changes the estimate; on SI-HDR 058 it raises green by 11%.
+   Returns FALSE if out of memory.
+*/
+static gboolean _gd_opposed_hue(float *const rho[3],
+                                const float *const rgb,
+                                const uint8_t *const state,
+                                const dt_aligned_pixel_t inv_clip,
+                                const dt_aligned_pixel_t corr,
+                                const int width,
+                                const int height,
+                                const float sigma_s,
+                                size_t *const nmodel)
+{
+  const size_t npix = (size_t)width * height;
+  const int rad = MAX(1, (int)ceilf(2.0f * sigma_s));
+  uint8_t *const near = dt_alloc_align_uint8(npix);
+  uint8_t *const tmp = dt_alloc_align_uint8(npix);
+  if(!near || !tmp)
+  {
+    dt_free_align(near);
+    dt_free_align(tmp);
+    return FALSE;
+  }
+
+  dt_aligned_pixel_t offset = { 0.0f, 0.0f, 0.0f, 0.0f };
+  for(int j = 0; j < 3; j++)
+  {
+    // pixels within rad of a pixel flagged in j, by a separable box maximum
+    DT_OMP_FOR()
+    for(int row = 0; row < height; row++)
+    {
+      for(int col = 0; col < width; col++)
+      {
+        uint8_t v = 0;
+        for(int x = MAX(0, col - rad); x <= MIN(width - 1, col + rad); x++)
+          v |= state[(size_t)row * width + x];
+        tmp[(size_t)row * width + col] = (v >> j) & 1;
+      }
+    }
+    DT_OMP_FOR()
+    for(int row = 0; row < height; row++)
+    {
+      for(int col = 0; col < width; col++)
+      {
+        uint8_t v = 0;
+        for(int y = MAX(0, row - rad); y <= MIN(height - 1, row + rad); y++)
+          v |= tmp[(size_t)y * width + col];
+        near[(size_t)row * width + col] = v;
+      }
+    }
+
+    double sum = 0.0, cnt = 0.0;
+    DT_OMP_FOR(reduction(+ : sum, cnt))
+    for(size_t i = 0; i < npix; i++)
+    {
+      const float v = rgb[4 * i + j] * inv_clip[j];
+      if(!near[i] || ((state[i] >> j) & 1) || v <= 0.2f || v >= 1.0f) continue;
+      sum += rgb[4 * i + j] - _gd_opposed_ref(rgb + 4 * i, corr, j);
+      cnt += 1.0;
+    }
+    // opposed's own minimum count
+    offset[j] = cnt > 100.0 ? sum / cnt : 0.0f;
+  }
+
+  size_t n = 0;
+  DT_OMP_FOR(reduction(+ : n))
+  for(size_t i = 0; i < npix; i++)
+  {
+    const uint8_t s = state[i];
+    if(!s || s == 7) continue;
+    for(int c = 0; c < 3; c++)
+    {
+      const float v = fmaxf(rgb[4 * i + c], 0.0f);
+      rho[c][i] = (s >> c) & 1 ? fmaxf(v, _gd_opposed_ref(rgb + 4 * i, corr, c) + offset[c]) : v;
+    }
+    n++;
+  }
+  *nmodel = n;
+
+  dt_free_align(near);
+  dt_free_align(tmp);
+  return TRUE;
 }
 
 // sorts the channels by count, ascending or descending
@@ -923,7 +1222,14 @@ static int _gd_solve(dt_iop_module_t *self,
     nclipped += state[i] ? 1 : 0;
   if(!nclipped) return 0;
 
-  const gboolean hue_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL;
+  const gboolean neutral_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL;
+  const gboolean model_hue = experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE
+                             || experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
+                             || neutral_fill;
+  const gboolean opposed_hue = experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL;
+  const gboolean hue_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL
+                            || experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
+                            || neutral_fill || opposed_hue;
   const gboolean smooth_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL;
   const gboolean solved_refs = experiment == DT_HIGHLIGHTS_EXPERIMENT_SOLVED_REFS;
   const gboolean keep_input = hue_fill || writeback != DT_HIGHLIGHTS_WRITEBACK_BASIC;
@@ -988,6 +1294,21 @@ static int _gd_solve(dt_iop_module_t *self,
       for(size_t k = 0; k < nu; k++)
         rho[c][pos[k]] = x[k];
     }
+  }
+
+  size_t nmodel = 0;
+  if(model_hue && !_gd_model_hue(rho, rgb, state, border, inv_clip, width, height, &nmodel))
+    goto cleanup;
+  if(opposed_hue)
+  {
+    const dt_dev_chroma_t *chr = &self->dev->chroma;
+    const gboolean late = chr->late_correction;
+    const dt_aligned_pixel_t corr = { late ? (float)(chr->D65coeffs[0] / chr->as_shot[0]) : 1.0f,
+                                      late ? (float)(chr->D65coeffs[1] / chr->as_shot[1]) : 1.0f,
+                                      late ? (float)(chr->D65coeffs[2] / chr->as_shot[2]) : 1.0f,
+                                      1.0f };
+    if(!_gd_opposed_hue(rho, rgb, state, inv_clip, corr, width, height, sigma_s, &nmodel))
+      goto cleanup;
   }
 
   if(keep_input)
@@ -1081,7 +1402,7 @@ static int _gd_solve(dt_iop_module_t *self,
       const int p = pos[k];
       float *const u = rgb + 4 * p;
       const float *const v = uin + 3 * k;
-      if(hue_fill && state[p] == 7) _gd_hue_fill(u, v, crho, p);
+      if(hue_fill && state[p] == 7) _gd_hue_fill(u, v, crho, p, neutral_fill);
       if(joint_any || (joint_full && state[p] == 7)) _gd_joint_scale(u, v, state[p], capped);
     }
   }
@@ -1090,11 +1411,12 @@ static int _gd_solve(dt_iop_module_t *self,
   dt_print_pipe(DT_DEBUG_PERF,
                 "gradient domain", piece->pipe, self, DT_DEVICE_CPU, NULL, NULL,
                 "%dx%d grid: %zu clipped, %zu border pixels; CG iterations hue %d/%d/%d, channels %d/%d/%d; "
-                "write-back %d, experiment %d; filled %zu/%zu/%zu in %d/%d/%d iterations, peak %.1f/%.1f/%.1f x clip",
+                "write-back %d, experiment %d; filled %zu/%zu/%zu in %d/%d/%d iterations, peak %.1f/%.1f/%.1f x clip; "
+                "%zu pixels with modeled hue",
                 width, height, nclipped, nborder,
                 hue_iter[0], hue_iter[1], hue_iter[2], chan_iter[0], chan_iter[1], chan_iter[2],
                 writeback, experiment, nfill[0], nfill[1], nfill[2],
-                fill_iter[0], fill_iter[1], fill_iter[2], peak[0], peak[1], peak[2]);
+                fill_iter[0], fill_iter[1], fill_iter[2], peak[0], peak[1], peak[2], nmodel);
 
 cleanup:
   dt_free_align(border);
@@ -1227,6 +1549,7 @@ static void _process_gradient(dt_iop_module_t *self,
   float *const rgb = dt_alloc_align_float(4 * npix);
   uint8_t *const state = dt_alloc_align_uint8(npix);
   int solved = -1;
+
   if(rgb && state)
   {
     const gboolean block_flag = d->experiment == DT_HIGHLIGHTS_EXPERIMENT_XTRANS_FLAG && step == 3;

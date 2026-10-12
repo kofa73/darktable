@@ -84,6 +84,10 @@ typedef enum dt_iop_highlights_experiment_t
   DT_HIGHLIGHTS_EXPERIMENT_SOLVED_REFS = 3,  // $DESCRIPTION: "solved channels as references"
   DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL = 4,  // $DESCRIPTION: "smooth fill (paper 3.4)"
   DT_HIGHLIGHTS_EXPERIMENT_XTRANS_FLAG = 5,  // $DESCRIPTION: "block-wide own-color flag (X-Trans)"
+  DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE = 6,    // $DESCRIPTION: "hue from measured channels"
+  DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL = 7, // $DESCRIPTION: "hue from measured channels, hue estimate in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL = 8, // $DESCRIPTION: "hue from measured channels, white in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL = 9, // $DESCRIPTION: "opposed's estimate as hue, hue estimate in fully clipped"
 } dt_iop_highlights_experiment_t;
 
 typedef enum dt_atrous_wavelets_scales_t
@@ -546,9 +550,20 @@ void tiling_callback(dt_iop_module_t *self,
     const float bpp = filters ? sizeof(float) : 4 * sizeof(float);
     float bytes = 66.0f;
     if(d->writeback != DT_HIGHLIGHTS_WRITEBACK_BASIC
-       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL)
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL)
       bytes += 12.0f;
+    // region labels and the breadth-first queue of the model hue, and its region
+    // tables of 288 bytes for at most one region per 64 pixels
+    if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL)
+      bytes += 13.0f;
     if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL) bytes += 18.0f;
+    // two masks of the opposed hue
+    if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL) bytes += 2.0f;
     tiling->factor += bytes / (step * step * bpp);
     // linear raws are processed in a temp buffer of the input size, then scaled
     if(!filters) tiling->factor += 1.0f;
@@ -1497,7 +1512,12 @@ void gui_init(dt_iop_module_t *self)
                                                "smooth fill: one channel gets a smooth bump in fully clipped regions,\n"
                                                "which then guides the others (paper section 3.4).\n"
                                                "block-wide own-color flag: X-Trans at reduced resolution flags the center\n"
-                                               "color from its whole 3x3 block."));
+                                               "color from its whole 3x3 block.\n"
+                                               "hue from measured channels: pixels with one clipped channel take their hue\n"
+                                               "from the other two and a model of the third fitted on the region's border;\n"
+                                               "fully clipped pixels take the estimated hue, or white.\n"
+                                               "opposed's estimate as hue: partly clipped pixels take their hue from\n"
+                                               "the estimate of the opposed method."));
 
   g->combine = dt_bauhaus_slider_from_params(self, "combine");
   dt_bauhaus_slider_set_digits(g->combine, 0);
