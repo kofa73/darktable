@@ -70,6 +70,16 @@
 // two colors that one model cannot describe leaves 0.3
 #define GD_MODEL_MIN_REGION 64
 #define GD_MODEL_MAX_RESIDUAL 0.1
+// continuous border: a border pixel is trusted for the hue only if it continues
+// its clipped neighbors without a jump, see _gd_continuous(). Brightness alone
+// does not separate sunlit trees from the sky next to them. Channels measured
+// in the neighbor may differ by this factor, flagged ones must reach the
+// clipping level divided by it; channels below the dark level always match
+#define GD_DONOR_RATIO 1.15f
+#define GD_DONOR_DARK 0.05f
+// edge fill: share of fully clipped pixels in the neighborhood from which a
+// fully clipped pixel starts to turn white, see _gd_edge_fill()
+#define GD_EDGE_WHITE_FROM 0.8f
 // X-Trans plane fit: 6x6 pattern phases, 3 colors, 5x5 window positions
 #define GD_FIT_SIZE (6 * 6 * 3 * 25)
 
@@ -139,11 +149,13 @@ static size_t _gd_index_pixels(int *const map,
   return n;
 }
 
-// out = A v, A being the Laplacian restricted to the unknowns
+// out = A v, A being the Laplacian restricted to the unknowns; with known,
+// neighbors that are neither unknowns nor known are left out like the image edge
 static void _gd_laplacian(float *const restrict out,
                           const float *const restrict v,
                           const int *const restrict map,
                           const int *const restrict pos,
+                          const uint8_t *const restrict known,
                           const size_t n,
                           const int width,
                           const int height)
@@ -157,7 +169,7 @@ static void _gd_laplacian(float *const restrict out,
     int cnt = 0;
     for(int m = 0; m < 4; m++)
     {
-      if(nb[m] < 0) continue;
+      if(nb[m] < 0 || (known && map[nb[m]] < 0 && !known[nb[m]])) continue;
       cnt++;
       const int j = map[nb[m]];
       if(j >= 0) sum += v[j];
@@ -169,7 +181,8 @@ static void _gd_laplacian(float *const restrict out,
 /* Solves  sum over the 4-neighbors q of p of (u_p - u_q) = div_p  for the n
    unknown pixels, by conjugate gradients with a Jacobi preconditioner.
    Neighbors that are not unknowns supply boundary values from bval
-   (Dirichlet); neighbors outside the image are left out (Neumann).
+   (Dirichlet); neighbors outside the image are left out (Neumann), and so
+   are those not marked in known, if given.
    x holds the initial guess on entry and the solution on return.
    Returns the number of iterations, -1 if out of memory.
 */
@@ -179,6 +192,7 @@ static int _gd_solve_poisson(float *const restrict x,
                              const size_t stride,
                              const int *const restrict map,
                              const int *const restrict pos,
+                             const uint8_t *const restrict known,
                              const size_t n,
                              const int width,
                              const int height)
@@ -200,7 +214,7 @@ static int _gd_solve_poisson(float *const restrict x,
     int cnt = 0;
     for(int m = 0; m < 4; m++)
     {
-      if(nb[m] < 0) continue;
+      if(nb[m] < 0 || (known && map[nb[m]] < 0 && !known[nb[m]])) continue;
       cnt++;
       if(map[nb[m]] < 0) sum += bval[stride * nb[m]];
     }
@@ -208,7 +222,7 @@ static int _gd_solve_poisson(float *const restrict x,
     idiag[k] = cnt ? 1.0f / cnt : 0.0f;
   }
 
-  _gd_laplacian(ap, x, map, pos, n, width, height);
+  _gd_laplacian(ap, x, map, pos, known, n, width, height);
   double rz = 0.0, rr = 0.0, bb = 0.0;
   DT_OMP_FOR(reduction(+ : rz, rr, bb))
   for(size_t k = 0; k < n; k++)
@@ -224,7 +238,7 @@ static int _gd_solve_poisson(float *const restrict x,
   iter = 0;
   while(rr > stop && iter < GD_CG_MAXITER)
   {
-    _gd_laplacian(ap, p, map, pos, n, width, height);
+    _gd_laplacian(ap, p, map, pos, known, n, width, height);
     double pap = 0.0;
     DT_OMP_FOR(reduction(+ : pap))
     for(size_t k = 0; k < n; k++)
@@ -366,14 +380,57 @@ static gboolean _gd_pullpush_fill(float *const plane[3],
   return nlev > 0 || (width == 1 && height == 1);
 }
 
+/* Whether border pixel i continues its clipped 4-neighbors without a jump,
+   which marks the same object; a jump marks another one in front of or next
+   to the clipped area, whose color would mislead the hue estimate. The value
+   of a flagged channel is a window average that can lie far below clipping,
+   so only the clipping level serves as its reference.
+*/
+static inline gboolean _gd_continuous(const float *const rgb,
+                                      const uint8_t *const state,
+                                      const dt_aligned_pixel_t inv_clip,
+                                      const size_t i,
+                                      const int width,
+                                      const int height)
+{
+  const float *const q = rgb + 4 * i;
+  int nb[4];
+  _gd_neighbors(i, width, height, nb);
+  for(int m = 0; m < 4; m++)
+  {
+    if(nb[m] < 0 || !state[nb[m]]) continue;
+    const float *const p = rgb + 4 * nb[m];
+    for(int c = 0; c < 3; c++)
+    {
+      const float qn = q[c] * inv_clip[c];
+      if((state[nb[m]] >> c) & 1)
+      {
+        if(qn < 1.0f / GD_DONOR_RATIO) return FALSE;
+      }
+      else
+      {
+        const float pn = p[c] * inv_clip[c];
+        if(fmaxf(qn, pn) < GD_DONOR_DARK) continue;
+        if(qn > GD_DONOR_RATIO * pn || pn > GD_DONOR_RATIO * qn) return FALSE;
+      }
+    }
+  }
+  return TRUE;
+}
+
 /* Boundary cleanup of paper 3.2: noise on the border would turn into
    streaks of the interpolated hue. A bilateral filter that only collects
    border pixels smooths along the border line, like the 1D filter of the
    paper, without needing the border as an ordered curve.
+   With donor, a border pixel marked there collects only the other marked
+   ones, so that the pixels of another object next to it do not tint it. The
+   unmarked ones keep the plain filter, for the regions that end up without
+   any marked pixel, see _gd_hue_domain().
 */
 static void _gd_smooth_border(float *const rho[3],
                               const float *const in,
                               const uint8_t *const border,
+                              const uint8_t *const donor,
                               const int width,
                               const int height,
                               const dt_aligned_pixel_t inv_clip,
@@ -392,7 +449,10 @@ static void _gd_smooth_border(float *const rho[3],
       if(!border[i]) continue;
       const float *const c = in + 4 * i;
       dt_aligned_pixel_t sum = { 0.0f, 0.0f, 0.0f, 0.0f };
+      dt_aligned_pixel_t dsum = { 0.0f, 0.0f, 0.0f, 0.0f };
       float wsum = 0.0f;
+      float dwsum = 0.0f;
+      const gboolean only_donors = donor && donor[i];
       for(int y = MAX(0, row - rad); y <= MIN(height - 1, row + rad); y++)
       {
         for(int x = MAX(0, col - rad); x <= MIN(width - 1, col + rad); x++)
@@ -405,10 +465,15 @@ static void _gd_smooth_border(float *const rho[3],
           const float wt = expf(ws * (sqf(y - row) + sqf(x - col)) + wr * d2);
           for_three_channels(k) sum[k] += wt * q[k];
           wsum += wt;
+          if(only_donors && donor[j])
+          {
+            for_three_channels(k) dsum[k] += wt * q[k];
+            dwsum += wt;
+          }
         }
       }
-      // the center pixel itself guarantees wsum >= 1
-      for_three_channels(k) rho[k][i] = sum[k] / wsum;
+      // the center pixel itself guarantees wsum >= 1, and dwsum >= 1 for a donor
+      for_three_channels(k) rho[k][i] = only_donors ? dsum[k] / dwsum : sum[k] / wsum;
     }
   }
 }
@@ -680,6 +745,115 @@ static inline void _gd_hue_fill(float *const u,
   for(int c = 0; c < 3; c++)
   {
     if(!neutral) r[c] = fmaxf(rho[c][i], GD_RHO_MIN);
+    scale = fmaxf(scale, fmaxf(u[c], v[c]) / r[c]);
+  }
+  for(int c = 0; c < 3; c++) u[c] = scale * r[c];
+}
+
+// adds (sign 1) or removes (sign -1) pixel q to the running sums of _gd_edge_sums()
+static inline void _gd_edge_add(float run[5],
+                                const float sign,
+                                const size_t q,
+                                const float *const restrict rgb,
+                                const float *const restrict uin,
+                                const int *const restrict map,
+                                const uint8_t *const restrict state)
+{
+  if(state[q] == 7)
+    run[4] += sign;
+  else if(state[q])
+  {
+    const float *const u = rgb + 4 * q;
+    const float *const v = uin + 3 * map[q];
+    float c[3];
+    for(int k = 0; k < 3; k++) c[k] = fmaxf(fmaxf(u[k], v[k]), 0.0f);
+    const float top = fmaxf(c[0], fmaxf(c[1], c[2]));
+    if(top > 0.0f)
+    {
+      for(int k = 0; k < 3; k++) run[k] += sign * c[k] / top;
+      run[3] += sign;
+    }
+  }
+}
+
+/* Experiment edge fill: horizontal box sums for _gd_edge_fill(), 5 floats per
+   pixel: the hue of the partly clipped pixels (3), their count, and the count
+   of fully clipped pixels. A partly clipped pixel's color is its solution,
+   raised to its input as the write-back does, normalized to its largest
+   channel, so that bright pixels do not outweigh the others. map indexes U
+   into the kept input uin.
+*/
+static void _gd_edge_sums(float *const restrict edge,
+                          const float *const restrict rgb,
+                          const float *const restrict uin,
+                          const int *const restrict map,
+                          const uint8_t *const restrict state,
+                          const int width,
+                          const int height,
+                          const int rad)
+{
+  DT_OMP_FOR()
+  for(int row = 0; row < height; row++)
+  {
+    const size_t r0 = (size_t)row * width;
+    float run[5] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    for(int x = 0; x < MIN(rad, width); x++)
+      _gd_edge_add(run, 1.0f, r0 + x, rgb, uin, map, state);
+    for(int col = 0; col < width; col++)
+    {
+      if(col + rad < width) _gd_edge_add(run, 1.0f, r0 + col + rad, rgb, uin, map, state);
+      if(col - rad - 1 >= 0) _gd_edge_add(run, -1.0f, r0 + col - rad - 1, rgb, uin, map, state);
+      float *const o = edge + 5 * (r0 + col);
+      for(int k = 0; k < 5; k++) o[k] = run[k];
+    }
+  }
+}
+
+/* Experiment edge fill: a fully clipped pixel takes the mean hue of the partly
+   clipped pixels within rad, so that small fully clipped spots inside a partly
+   clipped area, which noise scatters along its edge, do not stand out as dots
+   of another color. Where fully clipped pixels make up more than
+   GD_EDGE_WHITE_FROM of the neighborhood, deep inside a large fully clipped
+   area, the hue turns smoothly to white. Without a partly clipped pixel in
+   reach, the hue estimate rho stands in. As in _gd_hue_fill(), the pixel is
+   scaled just enough that no channel falls below its solution or input.
+*/
+static inline void _gd_edge_fill(float *const u,
+                                 const float *const v,
+                                 const float *const restrict edge,
+                                 const float *const rho[3],
+                                 const size_t i,
+                                 const int width,
+                                 const int height,
+                                 const int rad)
+{
+  const int row = i / width;
+  const int col = i % width;
+  float s[5] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+  for(int y = MAX(0, row - rad); y <= MIN(height - 1, row + rad); y++)
+    for(int k = 0; k < 5; k++) s[k] += edge[5 * ((size_t)y * width + col) + k];
+  const float area = (float)(MIN(height - 1, row + rad) - MAX(0, row - rad) + 1)
+                     * (float)(MIN(width - 1, col + rad) - MAX(0, col - rad) + 1);
+
+  dt_aligned_pixel_t h = { 1.0f, 1.0f, 1.0f, 1.0f };
+  if(s[3] > 0.5f)
+  {
+    for(int c = 0; c < 3; c++) h[c] = s[c] / s[3];
+  }
+  else
+  {
+    const float top = fmaxf(rho[0][i], fmaxf(rho[1][i], rho[2][i]));
+    if(top > 0.0f)
+      for(int c = 0; c < 3; c++) h[c] = fmaxf(rho[c][i], 0.0f) / top;
+  }
+  const float t = CLAMPF((s[4] / area - GD_EDGE_WHITE_FROM) / (1.0f - GD_EDGE_WHITE_FROM), 0.0f, 1.0f);
+  const float w = t * t * (3.0f - 2.0f * t);
+
+  dt_aligned_pixel_t r = { 1.0f, 1.0f, 1.0f, 1.0f };
+  float scale = 0.0f;
+  for(int c = 0; c < 3; c++)
+  {
+    r[c] = fmaxf((1.0f - w) * h[c] + w, GD_RHO_MIN);
     scale = fmaxf(scale, fmaxf(u[c], v[c]) / r[c]);
   }
   for(int c = 0; c < 3; c++) u[c] = scale * r[c];
@@ -1145,7 +1319,7 @@ static gboolean _gd_fill_fully_clipped(float *const rgb,
     for(int d = 0; d < 2; d++)
     {
       memset(x, 0, sizeof(float) * n);
-      const int it = _gd_solve_poisson(x, NULL, g[d], 1, map, pos, n, width, height);
+      const int it = _gd_solve_poisson(x, NULL, g[d], 1, map, pos, NULL, n, width, height);
       if(it < 0) goto cleanup;
       iter[k] += it;
       for(size_t m = 0; m < n; m++) g[d][pos[m]] = x[m];
@@ -1167,7 +1341,7 @@ static gboolean _gd_fill_fully_clipped(float *const rgb,
       div[m] = sum;
       x[m] = lg[p];
     }
-    const int it = _gd_solve_poisson(x, div, lg, 1, map, pos, n, width, height);
+    const int it = _gd_solve_poisson(x, div, lg, 1, map, pos, NULL, n, width, height);
     if(it < 0) goto cleanup;
     iter[k] += it;
 
@@ -1203,6 +1377,45 @@ cleanup:
    Returns the number of pixels with a flagged channel, 0 if there is none or
    no unflagged border, -1 if out of memory.
 */
+/* Continuous border: the border pixels that continue U without a jump
+   (donor) fix the hue estimate; the others join U as unknowns of the hue
+   solve (bit 0 of hdom), so that their hue comes from the donors however far
+   away, while the solve leaves out the unclipped pixels behind them. A region
+   with no donor next to it, such as sky enclosed by a lamp post, takes the hue
+   of the nearest donors through the pull-push start of the solve. Only an
+   image without any donor keeps its whole border as known, which is the
+   estimate without this experiment. hknown marks the pixels that fix the hue.
+*/
+static void _gd_hue_domain(uint8_t *const donor,
+                               uint8_t *const hknown,
+                               uint8_t *const hdom,
+                               const float *const rgb,
+                               const uint8_t *const state,
+                               const uint8_t *const border,
+                               const dt_aligned_pixel_t inv_clip,
+                               const int width,
+                               const int height,
+                               size_t *const ndonor)
+{
+  const size_t npix = (size_t)width * height;
+  size_t nd = 0;
+  DT_OMP_FOR(reduction(+ : nd))
+  for(size_t i = 0; i < npix; i++)
+  {
+    donor[i] = border[i] && _gd_continuous(rgb, state, inv_clip, i, width, height);
+    nd += donor[i] ? 1 : 0;
+  }
+  *ndonor = nd;
+
+  DT_OMP_FOR()
+  for(size_t i = 0; i < npix; i++)
+  {
+    // without any donor, the pull-push start would have nothing to spread
+    hknown[i] = nd ? donor[i] : border[i];
+    hdom[i] = state[i] || (border[i] && !hknown[i]);
+  }
+}
+
 static int _gd_solve(dt_iop_module_t *self,
                      dt_dev_pixelpipe_iop_t *piece,
                      float *const rgb,
@@ -1222,14 +1435,25 @@ static int _gd_solve(dt_iop_module_t *self,
     nclipped += state[i] ? 1 : 0;
   if(!nclipped) return 0;
 
-  const gboolean neutral_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL;
+  const gboolean continuous_border = experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_FILL
+                                     || experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_NEUTRAL
+                                     || experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_EDGE;
+  const gboolean neutral_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL
+                                || experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_NEUTRAL
+                                || experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_NEUTRAL;
+  const gboolean edge_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_EDGE
+                             || experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_EDGE
+                             || experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_EDGE;
+  const gboolean opposed_hue = experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL
+                               || experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_NEUTRAL
+                               || experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_EDGE;
   const gboolean model_hue = experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE
                              || experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
-                             || neutral_fill;
-  const gboolean opposed_hue = experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL;
+                             || (neutral_fill && !opposed_hue) || continuous_border
+                             || experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_EDGE;
   const gboolean hue_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL
                             || experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
-                            || neutral_fill || opposed_hue;
+                            || neutral_fill || opposed_hue || continuous_border || edge_fill;
   const gboolean smooth_fill = experiment == DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL;
   const gboolean solved_refs = experiment == DT_HIGHLIGHTS_EXPERIMENT_SOLVED_REFS;
   const gboolean keep_input = hue_fill || writeback != DT_HIGHLIGHTS_WRITEBACK_BASIC;
@@ -1237,15 +1461,22 @@ static int _gd_solve(dt_iop_module_t *self,
   uint8_t *const border = dt_alloc_align_uint8(npix);
   float *const rhobuf = dt_alloc_align_float(3 * npix);
   int *const map = dt_alloc_align_int(npix);
-  int *const pos = dt_alloc_align_int(nclipped);
-  float *const x = dt_alloc_align_float(nclipped);
+  // the hue solve of the continuous border also has the untrusted border pixels
+  // as unknowns, at most all pixels
+  const size_t nunk = continuous_border ? npix : nclipped;
+  int *const pos = dt_alloc_align_int(nunk);
+  float *const x = dt_alloc_align_float(nunk);
   float *const div = dt_alloc_align_float(nclipped);
   // the converted input of the pixels in U, which the solves overwrite
   float *const uin = keep_input ? dt_alloc_align_float(3 * nclipped) : NULL;
   uint8_t *const filled = smooth_fill ? dt_alloc_align_uint8(npix) : NULL;
+  uint8_t *const donor = continuous_border ? dt_alloc_align_uint8(npix) : NULL;
+  uint8_t *const hknown = continuous_border ? dt_alloc_align_uint8(npix) : NULL;
+  uint8_t *const hdom = continuous_border ? dt_alloc_align_uint8(npix) : NULL;
   int result = -1;
   if(!border || !rhobuf || !map || !pos || !x || !div
-     || (keep_input && !uin) || (smooth_fill && !filled))
+     || (keep_input && !uin) || (smooth_fill && !filled)
+     || (continuous_border && (!donor || !hknown || !hdom)))
     goto cleanup;
 
   size_t nborder = 0;
@@ -1267,6 +1498,10 @@ static int _gd_solve(dt_iop_module_t *self,
     goto cleanup;
   }
 
+  size_t ndonor = 0;
+  if(continuous_border)
+    _gd_hue_domain(donor, hknown, hdom, rgb, state, border, inv_clip, width, height, &ndonor);
+
   float *const rho[3] = { rhobuf, rhobuf + npix, rhobuf + 2 * npix };
   const float *const crho[3] = { rho[0], rho[1], rho[2] };
 
@@ -1281,23 +1516,32 @@ static int _gd_solve(dt_iop_module_t *self,
   }
   else
   {
-    // hue estimate over U, paper 3.2
-    _gd_smooth_border(rho, rgb, border, width, height, inv_clip, sigma_s);
-    if(!_gd_pullpush_fill(rho, border, state, width, height)) goto cleanup;
+    // hue estimate over U, paper 3.2; with the continuous border over U and
+    // the untrusted border pixels, see _gd_hue_domain()
+    _gd_smooth_border(rho, rgb, border, donor, width, height, inv_clip, sigma_s);
+    const uint8_t *const known = continuous_border ? hknown : border;
+    const uint8_t *const hfill = continuous_border ? hdom : state;
+    if(!_gd_pullpush_fill(rho, known, hfill, width, height)) goto cleanup;
 
+    const size_t nh = continuous_border ? _gd_index_pixels(map, pos, hdom, 1, NULL, npix) : nu;
     for(int c = 0; c < 3; c++)
     {
-      for(size_t k = 0; k < nu; k++)
+      for(size_t k = 0; k < nh; k++)
         x[k] = rho[c][pos[k]];
-      hue_iter[c] = _gd_solve_poisson(x, NULL, rho[c], 1, map, pos, nu, width, height);
+      hue_iter[c] = _gd_solve_poisson(x, NULL, rho[c], 1, map, pos, continuous_border ? hknown : NULL,
+                                      nh, width, height);
       if(hue_iter[c] < 0) goto cleanup;
-      for(size_t k = 0; k < nu; k++)
+      for(size_t k = 0; k < nh; k++)
         rho[c][pos[k]] = x[k];
     }
+    // the steps below index U again
+    if(continuous_border) _gd_index_pixels(map, pos, state, 7, NULL, npix);
   }
 
   size_t nmodel = 0;
-  if(model_hue && !_gd_model_hue(rho, rgb, state, border, inv_clip, width, height, &nmodel))
+  // the model fits only the continuous border too, or the other object's color returns
+  if(model_hue && !_gd_model_hue(rho, rgb, state, continuous_border ? hknown : border, inv_clip,
+                                 width, height, &nmodel))
     goto cleanup;
   if(opposed_hue)
   {
@@ -1341,6 +1585,19 @@ static int _gd_solve(dt_iop_module_t *self,
     _gd_channel_order(order, count, TRUE);
   }
 
+  // with the continuous border, the channel solves also leave out the border
+  // pixels that do not continue U: a roof or lamp next to a clipped sky would
+  // otherwise pull the sky's clipped channels toward its own values. hdom is
+  // no longer needed and now marks the pixels that may fix a channel solve:
+  // the trusted border and everything clipped in some channel
+  const uint8_t *const cknown = continuous_border ? hdom : NULL;
+  if(continuous_border)
+  {
+    DT_OMP_FOR()
+    for(size_t i = 0; i < npix; i++)
+      hdom[i] = state[i] || hknown[i];
+  }
+
   // per channel: guidance field and Poisson solve over its clipped region
   uint8_t solved = 0;
   int chan_iter[3] = { 0, 0, 0 };
@@ -1358,7 +1615,8 @@ static int _gd_solve(dt_iop_module_t *self,
         _gd_neighbors(p, width, height, nb);
         float sum = 0.0f;
         for(int m = 0; m < 4; m++)
-          if(nb[m] >= 0) sum -= _gd_edge_guidance(rgb, state, filled, solved, crho, inv_clip, p, nb[m], j);
+          if(nb[m] >= 0 && (!cknown || map[nb[m]] >= 0 || cknown[nb[m]]))
+            sum -= _gd_edge_guidance(rgb, state, filled, solved, crho, inv_clip, p, nb[m], j);
         div[k] = sum;
 
         // start from the spatial estimate of paper eq. 4, extended to
@@ -1377,7 +1635,7 @@ static int _gd_solve(dt_iop_module_t *self,
         x[k] = den > 0.0f ? fmaxf(rgb[4 * p + j], num / den) : rgb[4 * p + j];
       }
 
-      chan_iter[j] = _gd_solve_poisson(x, div, rgb + j, 4, map, pos, n, width, height);
+      chan_iter[j] = _gd_solve_poisson(x, div, rgb + j, 4, map, pos, cknown, n, width, height);
       if(chan_iter[j] < 0) goto cleanup;
 
       DT_OMP_FOR()
@@ -1396,15 +1654,25 @@ static int _gd_solve(dt_iop_module_t *self,
     const gboolean capped = writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_FULL_CAPPED
                             || writeback == DT_HIGHLIGHTS_WRITEBACK_JOINT_ANY_CAPPED;
     _gd_index_pixels(map, pos, state, 7, NULL, npix);
+    // the edge fill reads the partly clipped pixels before the joint write-back
+    // below changes them
+    const int erad = MAX(1, (int)ceilf(2.0f * sigma_s));
+    float *const edge = edge_fill ? dt_alloc_align_float((size_t)5 * npix) : NULL;
+    if(edge_fill && !edge) goto cleanup;
+    if(edge) _gd_edge_sums(edge, rgb, uin, map, state, width, height, erad);
     DT_OMP_FOR()
     for(size_t k = 0; k < nu; k++)
     {
       const int p = pos[k];
       float *const u = rgb + 4 * p;
       const float *const v = uin + 3 * k;
-      if(hue_fill && state[p] == 7) _gd_hue_fill(u, v, crho, p, neutral_fill);
+      if(edge && state[p] == 7)
+        _gd_edge_fill(u, v, edge, crho, p, width, height, erad);
+      else if(hue_fill && state[p] == 7)
+        _gd_hue_fill(u, v, crho, p, neutral_fill);
       if(joint_any || (joint_full && state[p] == 7)) _gd_joint_scale(u, v, state[p], capped);
     }
+    dt_free_align(edge);
   }
 
   result = nclipped;
@@ -1412,11 +1680,11 @@ static int _gd_solve(dt_iop_module_t *self,
                 "gradient domain", piece->pipe, self, DT_DEVICE_CPU, NULL, NULL,
                 "%dx%d grid: %zu clipped, %zu border pixels; CG iterations hue %d/%d/%d, channels %d/%d/%d; "
                 "write-back %d, experiment %d; filled %zu/%zu/%zu in %d/%d/%d iterations, peak %.1f/%.1f/%.1f x clip; "
-                "%zu pixels with modeled hue",
+                "%zu pixels with modeled hue, %zu continuous border pixels",
                 width, height, nclipped, nborder,
                 hue_iter[0], hue_iter[1], hue_iter[2], chan_iter[0], chan_iter[1], chan_iter[2],
                 writeback, experiment, nfill[0], nfill[1], nfill[2],
-                fill_iter[0], fill_iter[1], fill_iter[2], peak[0], peak[1], peak[2], nmodel);
+                fill_iter[0], fill_iter[1], fill_iter[2], peak[0], peak[1], peak[2], nmodel, ndonor);
 
 cleanup:
   dt_free_align(border);
@@ -1427,6 +1695,9 @@ cleanup:
   dt_free_align(div);
   dt_free_align(uin);
   dt_free_align(filled);
+  dt_free_align(donor);
+  dt_free_align(hknown);
+  dt_free_align(hdom);
   return result;
 }
 

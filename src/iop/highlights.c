@@ -88,6 +88,12 @@ typedef enum dt_iop_highlights_experiment_t
   DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL = 7, // $DESCRIPTION: "hue from measured channels, hue estimate in fully clipped"
   DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL = 8, // $DESCRIPTION: "hue from measured channels, white in fully clipped"
   DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL = 9, // $DESCRIPTION: "opposed's estimate as hue, hue estimate in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_FILL = 10, // $DESCRIPTION: "continuous border, hue estimate in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_NEUTRAL = 11, // $DESCRIPTION: "continuous border, white in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_NEUTRAL = 12, // $DESCRIPTION: "opposed's estimate as hue, white in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_EDGE = 13, // $DESCRIPTION: "hue from measured channels, edge hue to white in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_EDGE = 14, // $DESCRIPTION: "continuous border, edge hue to white in fully clipped"
+  DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_EDGE = 15, // $DESCRIPTION: "opposed's estimate as hue, edge hue to white in fully clipped"
 } dt_iop_highlights_experiment_t;
 
 typedef enum dt_atrous_wavelets_scales_t
@@ -553,17 +559,37 @@ void tiling_callback(dt_iop_module_t *self,
        || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL
        || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
        || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL
-       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL)
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_NEUTRAL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_EDGE
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_EDGE
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_EDGE
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_FILL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_NEUTRAL)
       bytes += 12.0f;
     // region labels and the breadth-first queue of the model hue, and its region
     // tables of 288 bytes for at most one region per 64 pixels
     if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE
        || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL
-       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL)
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_NEUTRAL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_EDGE)
       bytes += 13.0f;
+    // the continuous border: the model hue and three masks
+    if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_FILL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_NEUTRAL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_EDGE)
+      bytes += 16.0f;
+    // the edge fill's box sums, 5 floats
+    if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_EDGE
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_CONTINUOUS_BORDER_EDGE
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_EDGE)
+      bytes += 20.0f;
     if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_SMOOTH_FILL) bytes += 18.0f;
     // two masks of the opposed hue
-    if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL) bytes += 2.0f;
+    if(d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_FILL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_NEUTRAL
+       || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_OPPOSED_HUE_EDGE)
+      bytes += 2.0f;
     tiling->factor += bytes / (step * step * bpp);
     // linear raws are processed in a temp buffer of the input size, then scaled
     if(!filters) tiling->factor += 1.0f;
@@ -1517,7 +1543,12 @@ void gui_init(dt_iop_module_t *self)
                                                "from the other two and a model of the third fitted on the region's border;\n"
                                                "fully clipped pixels take the estimated hue, or white.\n"
                                                "opposed's estimate as hue: partly clipped pixels take their hue from\n"
-                                               "the estimate of the opposed method."));
+                                               "the estimate of the opposed method; fully clipped ones the estimated hue, or white.\n"
+                                               "continuous border: as hue from measured channels, but only border pixels that\n"
+                                               "continue their clipped neighbors without a jump count; the others take the\n"
+                                               "hue of such pixels near them.\n"
+                                               "edge hue to white: fully clipped pixels take the hue of the partly clipped\n"
+                                               "pixels around them, and turn white only deep inside large fully clipped areas."));
 
   g->combine = dt_bauhaus_slider_from_params(self, "combine");
   dt_bauhaus_slider_set_digits(g->combine, 0);
