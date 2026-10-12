@@ -203,7 +203,7 @@ fully clipped pixels.
 | Value | UI name | What changes |
 |---|---|---|
 | 0 | basic | nothing |
-| 1 | neutral hue | the hue estimate is white (equal channels) in all of U, instead of the border hue |
+| 1 | neutral hue | the hue estimate is white (`_gd_white()`) in all of U, instead of the border hue |
 | 2 | hue estimate in fully clipped | fully clipped pixels take the hue estimate (`_gd_hue_fill()`) |
 | 3 | solved channels as references | channels solved earlier guide later ones, largest clipped region first |
 | 4 | smooth fill (paper 3.4) | one channel gets a smooth bump in fully clipped regions and guides the others (`_gd_fill_fully_clipped()`) |
@@ -220,9 +220,31 @@ fully clipped pixels.
 | 15 | opposed's estimate as hue, edge hue to white in fully clipped | as 9, with the edge fill |
 
 The hue fill of value 2 and the white fill (`_gd_hue_fill()`) give a fully clipped pixel a target
-color `r`. For the hue fill, `r` is the hue estimate. For the white fill, it has equal channels. The
-pixel becomes `r` times the smallest factor that keeps every channel at or above both its solution
-and its input.
+color `r`. For the hue fill, `r` is the hue estimate. For the white fill, it is white. The pixel
+becomes `r` times the smallest factor that keeps every channel at or above both its solution and its
+input.
+
+**White** (`_gd_white()`), for the white fill, the edge fill and neutral hue, is the color that
+renders neutral in the scene-referred workflow. There, colorin takes data balanced with the D65
+(reference) multipliers and adapts it from D65 to D50. Color calibration then derives the scene
+illuminant from the as-shot multipliers and adapts from it to D50:
+- with white balance "as shot to reference", it has equal channels. The module's input is balanced
+  with the as-shot multipliers, so equal channels are the scene illuminant. The late correction in
+  colorin returns the data to the D65 multipliers only after this module;
+- with "camera reference", channel `c` is `D65coeffs[c] / as_shot[c]`, from `dev->chroma`: the
+  scene illuminant under the D65 multipliers. Equal channels would be the D65 white, which the
+  adaptation from the scene illuminant shifts. On a fire photo with a warm as-shot white balance,
+  the white fill turned bright blue;
+- with any other white balance, it has equal channels, the white the user set. In the
+  display-referred workflow no color calibration follows.
+
+The white is divided by its largest channel. "camera reference" and "as shot to reference" are meant
+to be used with color calibration, which does the chromatic adaptation. Its default illuminant is
+"as shot in camera", or daylight or black body at the as-shot temperature when that is within 0.005
+in CIE 1960 uv of the as-shot white (`_check_if_close_to_daylight()` in `channelmixerrgb.c`). The
+fill is then neutral to within that distance. With any other illuminant, the fill is not neutral
+with either white balance. Without color calibration, which is not the intended use, "camera
+reference" gives the fill the color of the scene illuminant.
 
 **Hue from measured channels** (`_gd_model_hue()`) works per 4-connected region of U and per
 channel `j`. It fits `c_j = a * c_k1 + b * c_k2` by least squares on the region's border pixels with
@@ -280,10 +302,10 @@ With the continuous border, the model of value 6 is fitted on trusted pixels onl
 clipped pixel, cut at the image edges, where `rad` is 2 sigma_s, rounded up, and at least 1:
 1. Its target hue `h` is the mean over the partly clipped pixels in the square. Each contributes
    its solution raised to its input, divided by its largest channel. Without a partly clipped pixel
-   in the square, `h` is the hue estimate divided by its largest channel.
+   in the square, `h` is the hue estimate divided by its largest channel, or white where that is 0.
 2. Let `t` be the share of fully clipped pixels in the square, mapped from 0.8
    (`GD_EDGE_WHITE_FROM`) to 1 onto 0 to 1 and clamped. The white weight is `w = 3t^2 - 2t^3`.
-3. The target color is `(1 - w) * h + w`, which is white where `w` is 1.
+3. The target color is `(1 - w) * h + w * white`, which is white where `w` is 1.
 4. As with the other fills, the pixel is that color times the smallest factor that keeps every
    channel at or above its solution and its input.
 

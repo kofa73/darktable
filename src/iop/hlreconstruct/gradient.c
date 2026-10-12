@@ -730,21 +730,50 @@ static void _gd_to_rgb(float *const restrict rgb,
   }
 }
 
+/* The white of the white fill, the edge fill and neutral hue, divided by its
+   largest channel. Equal channels are the white of the white balance applied
+   upstream. "camera reference" is meant to be used with color calibration,
+   which derives the scene illuminant from the as-shot multipliers and adapts
+   from it to D50. There, equal channels are the D65 white, rendered blue
+   under warm light, so white is the scene illuminant, D65 / as-shot
+   multipliers. Any other white balance keeps equal channels: with "as shot
+   to reference" they are the scene illuminant, as colorin's late correction
+   to the D65 multipliers comes after this module, and in the
+   display-referred workflow they are the user's white.
+*/
+static void _gd_white(dt_aligned_pixel_t white,
+                      const dt_iop_module_t *self,
+                      const dt_dev_pixelpipe_iop_t *piece)
+{
+  const dt_dev_chroma_t *chr = &self->dev->chroma;
+  const gboolean d65 = piece->pipe->dsc.temperature.enabled && !chr->late_correction
+                       && chr->as_shot[0] > 0.0 && chr->as_shot[1] > 0.0 && chr->as_shot[2] > 0.0
+                       && dt_dev_equal_chroma(piece->pipe->dsc.temperature.coeffs, chr->D65coeffs);
+  float top = 0.0f;
+  for(int c = 0; c < 3; c++)
+  {
+    white[c] = d65 ? (float)(chr->D65coeffs[c] / chr->as_shot[c]) : 1.0f;
+    top = fmaxf(top, white[c]);
+  }
+  for(int c = 0; c < 3; c++) white[c] /= top;
+  white[3] = 1.0f;
+}
+
 /* Experiment: a fully clipped pixel takes the hue estimate, scaled just enough
-   that no channel falls below its solution or its input value v. With neutral,
-   it takes white instead, the same value in all channels.
+   that no channel falls below its solution or its input value v. With a
+   white, it takes that instead, see _gd_white().
 */
 static inline void _gd_hue_fill(float *const u,
                                 const float *const v,
                                 const float *const rho[3],
                                 const size_t i,
-                                const gboolean neutral)
+                                const float *const white)
 {
   dt_aligned_pixel_t r = { 1.0f, 1.0f, 1.0f, 1.0f };
   float scale = 0.0f;
   for(int c = 0; c < 3; c++)
   {
-    if(!neutral) r[c] = fmaxf(rho[c][i], GD_RHO_MIN);
+    r[c] = white ? white[c] : fmaxf(rho[c][i], GD_RHO_MIN);
     scale = fmaxf(scale, fmaxf(u[c], v[c]) / r[c]);
   }
   for(int c = 0; c < 3; c++) u[c] = scale * r[c];
@@ -814,14 +843,16 @@ static void _gd_edge_sums(float *const restrict edge,
    clipped area, which noise scatters along its edge, do not stand out as dots
    of another color. Where fully clipped pixels make up more than
    GD_EDGE_WHITE_FROM of the neighborhood, deep inside a large fully clipped
-   area, the hue turns smoothly to white. Without a partly clipped pixel in
-   reach, the hue estimate rho stands in. As in _gd_hue_fill(), the pixel is
-   scaled just enough that no channel falls below its solution or input.
+   area, the hue turns smoothly to white, see _gd_white(). Without a partly
+   clipped pixel in reach, the hue estimate rho stands in. As in
+   _gd_hue_fill(), the pixel is scaled just enough that no channel falls below
+   its solution or input.
 */
 static inline void _gd_edge_fill(float *const u,
                                  const float *const v,
                                  const float *const restrict edge,
                                  const float *const rho[3],
+                                 const float *const white,
                                  const size_t i,
                                  const int width,
                                  const int height,
@@ -835,7 +866,7 @@ static inline void _gd_edge_fill(float *const u,
   const float area = (float)(MIN(height - 1, row + rad) - MAX(0, row - rad) + 1)
                      * (float)(MIN(width - 1, col + rad) - MAX(0, col - rad) + 1);
 
-  dt_aligned_pixel_t h = { 1.0f, 1.0f, 1.0f, 1.0f };
+  dt_aligned_pixel_t h = { white[0], white[1], white[2], 1.0f };
   if(s[3] > 0.5f)
   {
     for(int c = 0; c < 3; c++) h[c] = s[c] / s[3];
@@ -853,7 +884,7 @@ static inline void _gd_edge_fill(float *const u,
   float scale = 0.0f;
   for(int c = 0; c < 3; c++)
   {
-    r[c] = fmaxf((1.0f - w) * h[c] + w, GD_RHO_MIN);
+    r[c] = fmaxf((1.0f - w) * h[c] + w * white[c], GD_RHO_MIN);
     scale = fmaxf(scale, fmaxf(u[c], v[c]) / r[c]);
   }
   for(int c = 0; c < 3; c++) u[c] = scale * r[c];
@@ -1505,14 +1536,21 @@ static int _gd_solve(dt_iop_module_t *self,
   float *const rho[3] = { rhobuf, rhobuf + npix, rhobuf + 2 * npix };
   const float *const crho[3] = { rho[0], rho[1], rho[2] };
 
+  dt_aligned_pixel_t white;
+  _gd_white(white, self, piece);
+
   int hue_iter[3] = { 0, 0, 0 };
   const size_t nu = _gd_index_pixels(map, pos, state, 7, NULL, npix);
   if(experiment == DT_HIGHLIGHTS_EXPERIMENT_NEUTRAL_HUE)
   {
-    // the same value in all channels is white under the white balance
-    DT_OMP_FOR()
-    for(size_t i = 0; i < 3 * npix; i++)
-      rhobuf[i] = 1.0f;
+    for(int c = 0; c < 3; c++)
+    {
+      float *const rc = rho[c];
+      const float wc = white[c];
+      DT_OMP_FOR()
+      for(size_t i = 0; i < npix; i++)
+        rc[i] = wc;
+    }
   }
   else
   {
@@ -1667,9 +1705,9 @@ static int _gd_solve(dt_iop_module_t *self,
       float *const u = rgb + 4 * p;
       const float *const v = uin + 3 * k;
       if(edge && state[p] == 7)
-        _gd_edge_fill(u, v, edge, crho, p, width, height, erad);
+        _gd_edge_fill(u, v, edge, crho, white, p, width, height, erad);
       else if(hue_fill && state[p] == 7)
-        _gd_hue_fill(u, v, crho, p, neutral_fill);
+        _gd_hue_fill(u, v, crho, p, neutral_fill ? white : NULL);
       if(joint_any || (joint_full && state[p] == 7)) _gd_joint_scale(u, v, state[p], capped);
     }
     dt_free_align(edge);
