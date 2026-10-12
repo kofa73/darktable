@@ -400,10 +400,6 @@ predate experiment values 10 to 15.
 
 ## Related code
 
-- **highlight color restoration** (`src/iop/hlcolor.c`) runs the same algorithm on demosaiced data,
-  with write-back values 0 to 4 and experiment values 0 to 4. It was the reference during
-  development. A merge request must remove it, together with its entries in `CMakeLists.txt`,
-  `POTFILES.in` and `iop_order.c`.
 - **inpaint opposed** (`src/iop/hlreconstruct/opposed.c`) and **segmentation based**
   (`src/iop/hlreconstruct/segbased.c`) are the defaults the method is compared with.
   `_gd_opposed_hue()` mirrors opposed's estimate.
