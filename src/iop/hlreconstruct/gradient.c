@@ -33,7 +33,9 @@
       weighted by how reliable each value is (paper eq. 7, 8, see
       _gd_edge_guidance() for where it differs from eq. 7)
    4. one Poisson solve per channel over its clipped region, with the
-      unclipped neighbors as boundary values (paper eq. 6)
+      unclipped neighbors as boundary values (paper eq. 6); pixels that it
+      leaves below their input are held at the input, and the channel is
+      solved again
    5. clipped photosites take the larger of their value and the solution,
       interpolated from the grid
 
@@ -1504,8 +1506,10 @@ static int _gd_solve(dt_iop_module_t *self,
   uint8_t *const donor = continuous_border ? dt_alloc_align_uint8(npix) : NULL;
   uint8_t *const hknown = continuous_border ? dt_alloc_align_uint8(npix) : NULL;
   uint8_t *const hdom = continuous_border ? dt_alloc_align_uint8(npix) : NULL;
+  uint8_t *const skip = dt_alloc_align_uint8(npix);
+  float *const cin = dt_alloc_align_float(nclipped);
   int result = -1;
-  if(!border || !rhobuf || !map || !pos || !x || !div
+  if(!border || !rhobuf || !map || !pos || !x || !div || !skip || !cin
      || (keep_input && !uin) || (smooth_fill && !filled)
      || (continuous_border && (!donor || !hknown || !hdom)))
     goto cleanup;
@@ -1636,13 +1640,21 @@ static int _gd_solve(dt_iop_module_t *self,
       hdom[i] = state[i] || hknown[i];
   }
 
+  // the pixels each channel solve leaves out: those of the smooth fill, and
+  // those held at their input below
+  if(filled)
+    memcpy(skip, filled, npix);
+  else
+    memset(skip, 0, npix);
+
   // per channel: guidance field and Poisson solve over its clipped region
   uint8_t solved = 0;
   int chan_iter[3] = { 0, 0, 0 };
+  size_t npinned[3] = { 0, 0, 0 };
   for(int o = 0; o < 3; o++)
   {
     const int j = order[o];
-    const size_t n = _gd_index_pixels(map, pos, state, 1 << j, filled, npix);
+    const size_t n = _gd_index_pixels(map, pos, state, 1 << j, skip, npix);
     if(n)
     {
       DT_OMP_FOR()
@@ -1656,6 +1668,7 @@ static int _gd_solve(dt_iop_module_t *self,
           if(nb[m] >= 0 && (!cknown || map[nb[m]] >= 0 || cknown[nb[m]]))
             sum -= _gd_edge_guidance(rgb, state, filled, solved, crho, inv_clip, p, nb[m], j);
         div[k] = sum;
+        cin[k] = rgb[4 * p + j];
 
         // start from the spatial estimate of paper eq. 4, extended to
         // several reference channels like eq. 7; flagged references are
@@ -1676,9 +1689,46 @@ static int _gd_solve(dt_iop_module_t *self,
       chan_iter[j] = _gd_solve_poisson(x, div, rgb + j, 4, map, pos, cknown, n, width, height);
       if(chan_iter[j] < 0) goto cleanup;
 
-      DT_OMP_FOR()
+      /* A flagged channel was at least at its clipping level, so a solution
+         below its input is wrong. Next to a steep edge without an anchor it
+         can fall near zero, and the joint write-back turns that into a
+         saturated color. Such pixels are held at their input, which the RGB
+         plane still holds, as boundary values of a second solve. Raising
+         boundary values only raises the solution, so one pass is enough; the
+         clamp below removes what the CG tolerance leaves.
+         This is not the minimum under the bound, where a held pixel may rise
+         above its input: that minimum lifts whole regions where the guidance
+         drops below the clipping level, and brought back green bands on 21
+         of 179 ground truth images.
+         The remaining unknowns keep their pixel order, so the second solve
+         takes the arrays compacted. Their guidance stays valid: it reads only
+         the other channels, and the held pixels remain neighbors (they are
+         flagged, so cknown has them). */
+      size_t m = 0;
       for(size_t k = 0; k < n; k++)
-        rgb[4 * pos[k] + j] = x[k];
+      {
+        if(x[k] < cin[k])
+          skip[pos[k]] |= 1 << j;
+        else
+        {
+          x[m] = x[k];
+          div[m] = div[k];
+          cin[m] = cin[k];
+          m++;
+        }
+      }
+      npinned[j] = n - m;
+      if(m && m < n)
+      {
+        _gd_index_pixels(map, pos, state, 1 << j, skip, npix);
+        const int iter = _gd_solve_poisson(x, div, rgb + j, 4, map, pos, cknown, m, width, height);
+        if(iter < 0) goto cleanup;
+        chan_iter[j] += iter;
+      }
+
+      DT_OMP_FOR()
+      for(size_t k = 0; k < m; k++)
+        rgb[4 * pos[k] + j] = fmaxf(x[k], cin[k]);
     }
     if(solved_refs) solved |= 1 << j;
   }
@@ -1717,10 +1767,12 @@ static int _gd_solve(dt_iop_module_t *self,
   dt_print_pipe(DT_DEBUG_PERF,
                 "gradient domain", piece->pipe, self, DT_DEVICE_CPU, NULL, NULL,
                 "%dx%d grid: %zu clipped, %zu border pixels; CG iterations hue %d/%d/%d, channels %d/%d/%d; "
+                "held at input %zu/%zu/%zu; "
                 "write-back %d, experiment %d; filled %zu/%zu/%zu in %d/%d/%d iterations, peak %.1f/%.1f/%.1f x clip; "
                 "%zu pixels with modeled hue, %zu continuous border pixels",
                 width, height, nclipped, nborder,
                 hue_iter[0], hue_iter[1], hue_iter[2], chan_iter[0], chan_iter[1], chan_iter[2],
+                npinned[0], npinned[1], npinned[2],
                 writeback, experiment, nfill[0], nfill[1], nfill[2],
                 fill_iter[0], fill_iter[1], fill_iter[2], peak[0], peak[1], peak[2], nmodel, ndonor);
 
@@ -1736,6 +1788,8 @@ cleanup:
   dt_free_align(donor);
   dt_free_align(hknown);
   dt_free_align(hdom);
+  dt_free_align(skip);
+  dt_free_align(cin);
   return result;
 }
 

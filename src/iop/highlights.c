@@ -549,12 +549,12 @@ void tiling_callback(dt_iop_module_t *self,
 
   if(d->mode == DT_IOP_HIGHLIGHTS_GRADIENT)
   {
-    // the method can't tile either. Its buffers take 34 bytes per RGB pixel plus up to
-    // 32 per clipped one, counted here as if all were clipped. Keeping the input for
+    // the method can't tile either. Its buffers take 35 bytes per RGB pixel plus up to
+    // 36 per clipped one, counted here as if all were clipped. Keeping the input for
     // the experiments adds 12 bytes per clipped pixel, the smooth fill 18 per pixel.
     const int step = _gd_grid_step(filters, d->full_resolution);
     const float bpp = filters ? sizeof(float) : 4 * sizeof(float);
-    float bytes = 66.0f;
+    float bytes = 71.0f;
     if(d->writeback != DT_HIGHLIGHTS_WRITEBACK_BASIC
        || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_HUE_FILL
        || d->experiment == DT_HIGHLIGHTS_EXPERIMENT_MODEL_HUE_FILL

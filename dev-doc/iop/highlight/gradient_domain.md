@@ -36,7 +36,8 @@ others usually still carry the structure of the scene. `_gd_solve()` runs steps 
    the other channels where they are measured and the hue ratio (paper eq. 7 and 8, with the
    changes listed below).
 4. One Poisson solve per channel over its clipped region turns the guidance into values, with the
-   unclipped neighbors as boundary values (paper eq. 6).
+   unclipped neighbors as boundary values (paper eq. 6). Pixels that the solve leaves below their
+   input are held at the input, and the channel is solved again.
 5. `_gd_write_back()` gives each clipped photosite the larger of its input and the solution.
 
 ### Photosites become RGB pixels with clipped flags
@@ -137,6 +138,42 @@ pixel's own value, or no reference is usable, the guess is the pixel's own value
 Each solve writes its result into the RGB buffer in place. That is safe because the flags never
 change, so no solve reads a flagged value of another channel unless an experiment asks for it.
 
+#### Solutions below the input are held at the input
+
+A flagged channel was at least at its clipping level, so a solution below its input is wrong. It
+happens where the solve has nothing to hold the channel up, for example a strip with only red
+clipped between a flame and dark hair, whose border on the hair side the continuous border leaves
+out: red follows the flame's hue down the steep edge to near zero. The joint write-back then turns
+the error into a saturated color: with red solved at 0.03 of its input, green was multiplied by
+about 41. The reduced grid has more such strips, because fewer border pixels pass the donor test of
+the continuous border when the neighbors compared are two photosites apart.
+
+So after the solve of channel `j`, every pixel whose solution is below its input is held at its
+input. It leaves the unknowns and becomes a boundary value, and the channel is solved again. Since
+the held pixels only rose and the guidance of `j` reads only the other channels, the second solve
+can only raise the other pixels (discrete maximum principle), so one pass is enough. The
+conjugate gradient tolerance leaves a few pixels slightly below their input; over 111 Bayer raws,
+at most 47 pixels per image and 0.6% of the clipping level. The result is clamped to the input,
+which removes them. `-d perf` prints the number of held pixels per channel.
+
+This is a heuristic, not the minimum of the Poisson energy under the bound "solution at least
+input". At that minimum, a held pixel can rise above its input when its neighbors pull it up. A
+prototype of the exact minimum, which releases such pixels and solves again until nothing changes,
+needed 3 to 30 solves per channel. Against ground truth at reduced resolution (139 bracketed pairs
+and 40 synthetically clipped frames, experiment 11, write-back 2), it had the lower mean ΔE
+(partly clipped: 5.54 against 5.84, current code 6.28), mostly by being brighter where every
+variant is too dark. But it put green bands back: more false green than the code without either
+change on 21 of 179 images; holding pixels gave more on none. The likely reason, not verified:
+where the guidance asks for a drop below the clipping level, the exact minimum lifts the whole
+region around it to honor the rest of the guidance.
+
+At full resolution, on the same images and settings, holding pixels lowered the mean ΔE on partly
+clipped pixels from 6.41 to 6.25 (33 images better by more than 0.5, 21 worse) and the false green
+pixels by 40%. The images that got worse lost the effect of the joint write-back, see
+[Write-back values](#write-back-values): on `fc_Cemetery-Tree-2`, a sky behind a tree turns pink
+(ΔE 9.7 to 13.6), which is also what the code without holding gives with the basic write-back
+(14.0).
+
 ### Fully clipped regions have no guidance
 
 Where all three channels are flagged, no channel guides another, so the Poisson solve reduces to a
@@ -193,6 +230,11 @@ channels too. With all channels flagged, input (1, 1, 1) and solution (0.00001, 
 factor is 100,000, and the pixel becomes (1, 100000, 100000). The cap limits the factor to 2. A
 solution at or below zero has no defined factor. Uncapped, such a channel is left out of the factor.
 Capped, it sets the factor to the cap. The evaluation used value 4.
+
+Since the channel solves hold every flagged channel at or above its input (see
+[Solutions below the input are held at the input](#solutions-below-the-input-are-held-at-the-input)),
+the joint factor is always 1, and all five values give the same result. On one test image, the
+exports with values 0 and 2 are identical.
 
 ### Experiment values
 
@@ -316,12 +358,13 @@ The edge fill reads the partly clipped pixels before the joint write-back change
 ## Memory and run time
 
 `tiling_callback()` reports the memory in `tiling->factor`, as a multiple of the input buffer, and
-leaves `tiling->overhead` at 0. The overhead field is an `unsigned`, and 66 bytes per pixel would
-exceed its range at about 65 MP.
+leaves `tiling->overhead` at 0. The overhead field is an `unsigned`, and 71 bytes per pixel would
+exceed its range at about 60 MP.
 
-The base cost is 66 bytes per RGB pixel. It covers the RGB pixels, the state, border, hue and index
-planes, and the solver arrays, with every pixel counted as clipped. That is about 1 GB for a 16 MP
-raw at full resolution. The experiments add these amounts per RGB pixel:
+The base cost is 71 bytes per RGB pixel. It covers the RGB pixels, the state, border, hue and index
+planes, the mask of pixels held at their input, and the solver arrays, with every pixel counted as
+clipped. That is about 1.1 GB for a 16 MP raw at full resolution. The experiments add these
+amounts per RGB pixel:
 
 | Experiment | extra bytes per RGB pixel |
 |---|---|
@@ -373,6 +416,12 @@ predate experiment values 10 to 15.
 
 ## Known problems
 
+- **Results depend on the solver tolerance.** The conjugate gradient solves stop at a relative
+  residual of `1e-5` (`GD_CG_TOL`), which leaves large clipped regions short of convergence. On the
+  bottles test image at reduced resolution (experiment 11, write-back 2), lowering it to `1e-8`
+  changed the export by 13 of 255 on average with the code that did not yet hold pixels at their
+  input. With holding, it raised the held pixels in green from about 42,000 to 154,000. Not
+  measured on other images.
 - **Colors of other objects in the hue estimate.** The continuous border helps where two channels
   are measured. Where the sky has only one measured channel, the test compares only that channel and
   the clipping level, so a bright object next to the sky can pass.
