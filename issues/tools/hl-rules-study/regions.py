@@ -1,0 +1,333 @@
+# regions.py <ev3 workdir>...: region table and features of the rules study (Phase 2).
+#
+# Per image (an ev3.py work directory with masks.npz, cam.npz from camdata.py,
+# scores.json and the float16 linear renders truth.npy and <method>.npy):
+#
+# Regions: the 8-connected components of G, the union of ev2's raw fully clipped mask
+# F.min(2) >= 0.5 (before the exclusion of pixels without truth, so that an exclusion
+# does not split a region) and of the pixels where a white or edge fill render differs
+# from the hue fill render of the same hue source. The second part is the method's own
+# fully clipped area: its grid flags a channel from any clipped photosite in a window,
+# ev2 from half of them, and a first version built on ev2's mask alone missed 16% of the
+# changed pixels on syn_g004. Every pixel within ZONE px of G belongs to the zone of the
+# nearest region; a selector composite takes a zone's pixels from one fill render.
+# The features measure distances to Gm instead, the render pixels where each channel has
+# a clipped photosite (raw flags only), close to the method's own state 7. A region of G
+# without Gm pixels has no features.
+# A region's error is the mean over its zone pixels in ev2's `all` mask: the pixels the
+# choice of fill changes and that ev2 scores. `leak` counts changed pixels outside the
+# zones (0 by construction).
+#
+# Errors: per pixel dE2000 exactly as ev2.py stats() computes it (tone(img, s), Lab),
+# and the CIE 1976 u'v' distance. Stored as sums per (mask, zone, method) in sums.npz, so
+# that a selector composite, which takes the pixels of one fill per zone, scores as
+# (sum outside the zones + sum over zones of the chosen fill's sum) / pixel count.
+#
+# Features per region, from the clipped frame only (cam.npz: camera values after the
+# as-shot white balance, neutral = (1, 1, 1), channel c clips at T[c]; F: per-channel
+# clip fractions, a channel counts as clipped at F >= 0.5, as in ev2.py). Distances are
+# exact Euclidean, in render pixels, to the nearest pixel of the region; every pixel
+# outside the regions belongs to its nearest region:
+#   A1  share of partly clipped ring pixels (D <= RING) whose clipped set is not a
+#       prefix of the channels sorted by T: a neutral pixel clips in ascending T order
+#   A2  median angle (degrees) between the measured channels of ring pixels with at
+#       least two measured channels and the neutral direction of the same channels
+#   B1  slope of log2(area) against the threshold step in EV: area of the component of
+#       {b >= 2^-0.5i} | full containing the region, i = 0..8, b = mean_c min(V/T, 1);
+#       steps after the component passes 50x its start or 25% of the frame are dropped
+#   B2  largest single step of log2(area) minus the median step: irregular growth
+#   B3  first step, log2(A1 / A0): growth by the blur width; NaN if that step is a merge
+#       (past the growth limit of B1)
+#   B6  B3 in equivalent radius, sqrt(A / pi) in px (not shrinking with region size)
+#   B7  mean radius growth per kept step, px
+#   B4  halo: log2 of mean b of unclipped pixels at D in (6, 12] over D in (24, 48]
+#   B5  saturation (sin of the angle to neutral) of the unclipped pixels at D in (6, 24]
+#   C1  mean saturation of ring pixels with all channels measured
+#   C2  circular variance of their hue, weighted by saturation (0 uniform, 1 mixed)
+#   C1r_<set>, C2r_<set>  the same on the hue fill render (linear Rec2020) of that hue
+#       source, for ring pixels at D in (2, RING] that no fill changed: the solved partly
+#       clipped and the unclipped pixels, which the method has before its fill
+#   D1  transition-band unmixing: in the band D <= BAND with >= 2 measured channels,
+#       for the most frequent measured pair (a, b), E_x = sum of V_x - B_x over the band
+#       pixels with both measured, B = median V of the unclipped pixels at D in (BAND,
+#       2 BAND]. d = ln(E_a / E_b). D1 = |d - ln(h_a / h_b)| - |d - ln((Y - B_a) / (Y - B_b))|
+#       with h = B (the border hue hypothesis: F - B along the border color) and Y =
+#       max(T) (the white hypothesis at the clipping level). Positive: closer to white.
+#   D2  d - ln(h_a / h_b) itself, signed
+#
+# Output: regions.json (one dict per region of >= MINREG scored pixels, plus the
+# per-image data needed for composites) and sums.npz.
+import sys, os, json
+import numpy as np, cv2, colour
+from scipy import ndimage
+sys.path.insert(0, '/tmp/claude-gd-artefacts/scripts')
+import ev2
+
+ZONE = 4
+FEATURE_NAMES = ['A1', 'A2', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'C1', 'C2', 'C1r_model', 'C2r_model',
+                 'C1r_cont', 'C2r_cont', 'D1', 'D2']
+RING = 6
+BAND = 8
+MINREG = 50
+SETS = {'model': ('gd-wb4x7', 'gd-wb4x8', 'gd-wb4x13'), 'cont': ('gd-wb4x10', 'gd-wb4x11', 'gd-wb4x14')}
+FILLS = ('hue', 'white', 'edge')
+MASKS = ('all', 'partial', 'full')
+
+
+def sat_hue(x):
+    """Saturation (sin of the angle to (1,1,1)) and hue angle of RGB rows."""
+    n = np.linalg.norm(x, axis=-1)
+    m = x.mean(-1, keepdims=True)
+    sat = np.linalg.norm(x - m, axis=-1) / np.maximum(n, 1e-12)
+    hue = np.arctan2(np.sqrt(3) * (x[:, 1] - x[:, 2]), 2 * x[:, 0] - x[:, 1] - x[:, 2])
+    return sat, hue
+
+
+def circvar(sat, hue):
+    w = sat.sum()
+    if w <= 1e-9:
+        return np.nan
+    return float(1 - abs((sat * np.exp(1j * hue)).sum()) / w)
+
+
+def main(wd):
+    sc = json.load(open(os.path.join(wd, 'scores.json')))
+    mk = np.load(os.path.join(wd, 'masks.npz'))
+    cam = np.load(os.path.join(wd, 'cam.npz'))
+    V = cam['V'].astype(np.float32)
+    T = cam['T'].astype(np.float32)
+    F = mk['F'].astype(np.float32)
+    H, W = F.shape[:2]
+    clipped = F >= 0.5
+    nclip = clipped.sum(2)
+    fullraw = clipped.all(2)
+    s = 2.0 ** (sc['k'] - ev2.E0)
+
+    # renders first: the regions follow the pixels the fills change
+    truth = np.load(os.path.join(wd, 'truth.npy')).astype(np.float32)
+    if sc['kind'] == 'pair':
+        # ev3.py saves the truth as rendered; ev2.main() shifts it onto the clipped frame
+        # (ev2.py:359) before scoring, by the shift it stores in pair_shift
+        sx, sy = sc['pair_shift'][:2]
+        A = np.float32([[1, 0, -sx], [0, 1, -sy]])
+        truth = cv2.warpAffine(truth, A, truth.shape[1::-1], flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    renders = {m: np.load(os.path.join(wd, m + '.npy')).astype(np.float32) for ms in SETS.values() for m in ms}
+    changed = np.zeros((H, W), bool)
+    for ms in SETS.values():
+        h = renders[ms[0]]
+        for m in ms[1:]:
+            changed |= (np.abs(renders[m] - h) > 1e-3 * np.maximum(np.abs(h), 1e-3)).any(2)
+    # the method's fully clipped grid pixels flag a channel from any clipped photosite in
+    # their window, ev2's mask from half of them: the region is the union
+    # the feature geometry uses the raw flags only: a render pixel counts as fully clipped
+    # for the features if each channel has a clipped photosite in its quads (Gm), close to
+    # the method's state 7, which flags a channel from any clipped photosite of a window;
+    # the changed pixels depend on the fill contrast and spread by the downscale, so they
+    # only widen the zones used for the composites
+    Gm = (F > 0).all(2) | fullraw
+    G = Gm | changed
+    nlab, lab = cv2.connectedComponents(G.astype(np.uint8), connectivity=8)
+    if nlab <= 1:
+        json.dump(dict(name=os.path.basename(wd), regions=[], nzones=0), open(os.path.join(wd, 'regions.json'), 'w'))
+        np.savez_compressed(os.path.join(wd, 'sums.npz'), empty=np.zeros(1))
+        return
+    # exact Euclidean distance to the nearest region pixel, and its region
+    dist, (iy, ix) = ndimage.distance_transform_edt(~G, return_indices=True)
+    owner = lab[iy, ix]
+    zone = np.where(dist <= ZONE, owner, 0)
+    # distances and owners of the features, to the flag-based mask; the owner of a Gm pixel
+    # is its region of G
+    dist_z = dist
+    dist, (iy, ix) = ndimage.distance_transform_edt(~Gm, return_indices=True)
+    owner = lab[iy, ix]
+
+    # errors
+    t_lab = ev2.lab(ev2.tone(truth, s))
+    t_uv = ev2.uv(truth)
+    sel = mk['all'] | (zone > 0)
+    idx = np.nonzero(sel)
+    dE, duv = {}, {}
+    for m, img in renders.items():
+        px = img[idx]
+        dE[m] = colour.delta_E(t_lab[idx], ev2.lab(ev2.tone(px, s)), method='CIE 2000')
+        duv[m] = np.linalg.norm(ev2.uv(px) - t_uv[idx], axis=-1)
+    # pixels a fill changed outside every zone: none by construction now, kept as a check
+    leak = dict(outside=int((changed & (zone == 0)).sum()), changed=int(changed.sum()),
+                changed_not_full=int((changed & ~fullraw).sum()), full_unchanged=int((fullraw & ~changed).sum()))
+
+    nz = nlab
+    zsel = zone[idx]
+    sums = {}
+    for mname in MASKS:
+        mm = mk[mname][idx]
+        for m in dE:
+            sums['dE|%s|%s' % (mname, m)] = np.bincount(zsel[mm], weights=dE[m][mm], minlength=nz)
+            sums['duv|%s|%s' % (mname, m)] = np.bincount(zsel[mm], weights=duv[m][mm], minlength=nz)
+        sums['n|%s' % mname] = np.bincount(zsel[mm], minlength=nz).astype(np.float64)
+    np.savez_compressed(os.path.join(wd, 'sums.npz'), **sums)
+
+    # features
+    b = np.minimum(V / T, 1.0).mean(2)
+    order = np.argsort(T)
+    pref = [{int(order[0])}, {int(order[0]), int(order[1])}]
+    bright = (V / T).max(2) >= 0.1
+    thr = [2.0 ** (-0.5 * i) for i in range(9)]
+    comps = [cv2.connectedComponents(((b >= t) | Gm).astype(np.uint8), connectivity=8)[1] for t in thr]
+    areas = [np.bincount(c.ravel()) for c in comps]
+    hue_r = {st: renders[ms[0]].reshape(-1, 3) for st, ms in SETS.items()}
+    # per-region pixel lists by owner, one sort instead of a mask per region
+    flat = owner.ravel()
+    srt = np.argsort(flat, kind='stable')
+    bounds = np.searchsorted(flat[srt], np.arange(nz + 1))
+    fullok = mk['full']
+    regs = []
+    Vf, Ff, Df, Bf, Nf, Gf = V.reshape(-1, 3), clipped.reshape(-1, 3), dist.ravel(), b.ravel(), nclip.ravel(), Gm.ravel()
+    chf = changed.ravel()
+    brf = bright.ravel()
+    okf = fullok.ravel()
+    for r in range(1, nz):
+        p = srt[bounds[r]:bounds[r + 1]]
+        inreg = p[Gf[p]]
+        zp = zsel == r
+        za = zp & mk['all'][idx]
+        nsc = int(za.sum())
+        if nsc < MINREG:
+            continue
+        e = dict(region=r, npix=int(len(inreg)), nscored=nsc, nfull=int(okf[inreg].sum()))
+        # zone pixels in G, for the composite bookkeeping
+        e['nzone'] = int(zp.sum())
+        # position: a flagged pixel, else any zone pixel of the region
+        e['y'], e['x'] = [int(v) for v in np.unravel_index(inreg[0] if len(inreg) else idx[0][zp][0] * W + idx[1][zp][0], (H, W))]
+        for st, ms in SETS.items():
+            for f, m in zip(FILLS, ms):
+                mm = za
+                e['dE_%s_%s' % (st, f)] = float(dE[m][mm].mean())
+                e['duv_%s_%s' % (st, f)] = float(duv[m][mm].mean())
+            errs = [e['dE_%s_%s' % (st, f)] for f in FILLS]
+            o = int(np.argmin(errs))
+            e['oracle_' + st] = FILLS[o]
+            e['margin_' + st] = float(sorted(errs)[1] - errs[o])
+        if not len(inreg):
+            # only changed pixels, no flagged ones: no geometry for the features
+            for fn in FEATURE_NAMES:
+                e[fn] = np.nan
+            regs.append(e)
+            continue
+        d = Df[p]
+        ring = p[(d > 0) & (d <= RING)]
+        # A
+        pc = ring[(Nf[ring] >= 1) & (Nf[ring] <= 2)]
+        e['nA1'] = int(len(pc))
+        if len(pc) >= 10:
+            sets = Ff[pc]
+            ok = np.zeros(len(pc), bool)
+            for ps in pref:
+                want = np.zeros(3, bool)
+                want[list(ps)] = True
+                ok |= (sets == want).all(1)
+            e['A1'] = float(1 - ok.mean())
+        else:
+            e['A1'] = np.nan
+        m2 = ring[(Nf[ring] <= 1) & brf[ring]]
+        e['nA2'] = int(len(m2))
+        if len(m2) >= 10:
+            x = Vf[m2] * ~Ff[m2]
+            nm = (~Ff[m2]).astype(np.float32)
+            cosv = (x * nm).sum(1) / np.maximum(np.linalg.norm(x, axis=1) * np.linalg.norm(nm, axis=1), 1e-12)
+            e['A2'] = float(np.median(np.degrees(np.arccos(np.clip(cosv, -1, 1)))))
+        else:
+            e['A2'] = np.nan
+        # B
+        seed = inreg[0]
+        a = [float(ar[c.ravel()[seed]]) for ar, c in zip(areas, comps)]
+        la = np.log2(a)
+        keep = [0]
+        for i in range(1, 9):
+            if a[i] > 50 * a[0] or a[i] > 0.25 * H * W:
+                break
+            keep.append(i)
+        e['B_areas'] = a
+        if len(keep) >= 3:
+            xs = -0.5 * np.array(keep)
+            ys = la[keep]
+            e['B1'] = float(-np.polyfit(xs, ys, 1)[0])
+            steps = np.diff(ys)
+            e['B2'] = float(steps.max() - np.median(steps))
+        else:
+            e['B1'] = e['B2'] = np.nan
+        # a first step past the growth limit is a merge with another component, not blur
+        e['B3'] = float(la[1] - la[0]) if len(keep) >= 2 else np.nan
+        # the same in equivalent radius (px), which does not shrink with the region's size
+        # as the log area does
+        rad = np.sqrt(np.array(a) / np.pi)
+        e['B6'] = float(rad[1] - rad[0]) if len(keep) >= 2 else np.nan
+        e['B7'] = float((rad[keep[-1]] - rad[0]) / (len(keep) - 1)) if len(keep) >= 2 else np.nan
+        unc = Nf[p] == 0
+        near_ = p[unc & (d > 6) & (d <= 12)]
+        far_ = p[unc & (d > 24) & (d <= 48)]
+        e['B4'] = float(np.log2(max(Bf[near_].mean(), 1e-6) / max(Bf[far_].mean(), 1e-6))) \
+            if len(near_) >= 10 and len(far_) >= 10 else np.nan
+        hal = p[unc & (d > 6) & (d <= 24) & brf[p]]
+        e['B5'] = float(sat_hue(Vf[hal])[0].mean()) if len(hal) >= 10 else np.nan
+        # C
+        r3 = ring[(Nf[ring] == 0) & brf[ring]]
+        e['nC'] = int(len(r3))
+        if len(r3) >= 10:
+            sa, hu = sat_hue(Vf[r3])
+            e['C1'], e['C2'] = float(sa.mean()), circvar(sa, hu)
+        else:
+            e['C1'] = e['C2'] = np.nan
+        for st, Rf in hue_r.items():
+            # beyond 2 px and outside the pixels a fill changed: the solved partly clipped
+            # and unclipped pixels, which the fill does not touch
+            rr = ring[(Nf[ring] <= 2) & (Df[ring] > 2) & ~chf[ring]]
+            rr = rr[np.isfinite(Rf[rr]).all(1) & (Rf[rr].max(1) > 0)]
+            if len(rr) >= 10:
+                sa, hu = sat_hue(np.maximum(Rf[rr], 0))
+                e['C1r_' + st], e['C2r_' + st] = float(sa.mean()), circvar(sa, hu)
+            else:
+                e['C1r_' + st] = e['C2r_' + st] = np.nan
+        # D
+        band = p[(d > 0) & (d <= BAND) & (Nf[p] <= 1)]
+        bg = p[(d > BAND) & (d <= 2 * BAND) & unc]
+        e['D1'] = e['D2'] = np.nan
+        if len(band) >= 10 and len(bg) >= 10:
+            Bv = np.median(Vf[bg], 0)
+            meas = ~Ff[band]
+            # most frequent measured pair
+            cnt = {(0, 1): 0, (0, 2): 0, (1, 2): 0}
+            for pr in cnt:
+                cnt[pr] = int((meas[:, pr[0]] & meas[:, pr[1]]).sum())
+            pa, pb = max(cnt, key=cnt.get)
+            both = meas[:, pa] & meas[:, pb]
+            e['D_pair'] = [pa, pb]
+            e['nD'] = int(both.sum())
+            Y = float(T.max())
+            if both.sum() >= 10 and Bv[pa] > 0 and Bv[pb] > 0 and Y > Bv[pa] and Y > Bv[pb]:
+                Ea = float((Vf[band[both], pa] - Bv[pa]).sum())
+                Eb = float((Vf[band[both], pb] - Bv[pb]).sum())
+                if Ea > 0 and Eb > 0:
+                    dd = np.log(Ea / Eb)
+                    hyp_h = np.log(Bv[pa] / Bv[pb])
+                    hyp_w = np.log((Y - Bv[pa]) / (Y - Bv[pb]))
+                    e['D1'] = float(abs(dd - hyp_h) - abs(dd - hyp_w))
+                    e['D2'] = float(dd - hyp_h)
+        regs.append(e)
+
+    res = dict(name=os.path.basename(wd), kind=sc['kind'], source=os.path.basename(wd).split('_')[0],
+               nzones=int(nz), leak=leak, T=T.tolist(),
+               others={mn: {m: sc['methods'][m][mn]['dE_mean'] for m in ('opposed', 'segments') if mn in sc['methods'][m]}
+                       for mn in MASKS},
+               scores={mn: {m: sc['methods'][m][mn]['dE_mean'] for m in dE if mn in sc['methods'][m]} for mn in MASKS},
+               regions=regs)
+    # NaN marks a feature that abstains; Python's json reads it back
+    json.dump(res, open(os.path.join(wd, 'regions.json'), 'w'), indent=0)
+
+
+if __name__ == '__main__':
+    for wd in sys.argv[1:]:
+        try:
+            main(wd)
+            print('regions', wd, flush=True)
+        except Exception as ex:
+            print('FAILED', wd, repr(ex), flush=True)

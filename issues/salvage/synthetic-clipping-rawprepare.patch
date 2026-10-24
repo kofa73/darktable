@@ -1,0 +1,31 @@
+diff --git a/src/iop/rawprepare.c b/src/iop/rawprepare.c
+index 02a6123988..de95dec43b 100644
+--- a/src/iop/rawprepare.c
++++ b/src/iop/rawprepare.c
+@@ -401,6 +401,26 @@ void process(dt_iop_module_t *self,
+     }
+   }
+ 
++  // TEMPDEBUG synthetic clipping: HL_SYNTH_EV=<k> raises the normalized raw data of
++  // export pipes by k EV and clips it as a sensor would. The clipped value sits just
++  // above 1.0, because laplacian and LCh flag only values above the threshold
++  const char *synth = getenv("HL_SYNTH_EV");
++  if(synth && piece->pipe->dsc.filters && piece->dsc_in.channels == 1
++     && (piece->pipe->type & DT_DEV_PIXELPIPE_EXPORT))
++  {
++    const float gain = exp2f(atof(synth));
++    const size_t n = (size_t)roi_out->width * roi_out->height;
++    size_t nclip = 0;
++    for(size_t k = 0; k < n; k++)
++    {
++      const float v = out[k] * gain;
++      if(v >= 1.0f) nclip++;
++      out[k] = fminf(v, 1.001f);
++    }
++    dt_print(DT_DEBUG_ALWAYS, "TEMPDEBUG synthetic clipping +%s EV: %.4f of %zu photosites clipped",
++             synth, (double)nclip / n, n);
++  }
++
+   if(piece->pipe->dsc.filters && piece->dsc_in.channels == 1 && d->apply_gainmaps)
+   {
+     const uint32_t map_w = d->gainmaps[0]->map_points_h;
