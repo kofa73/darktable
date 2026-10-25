@@ -47,7 +47,7 @@
 #define DS_FACTOR 4
 #define MAX_NUM_SCALES 12
 
-DT_MODULE_INTROSPECTION(5, dt_iop_highlights_params_t)
+DT_MODULE_INTROSPECTION(6, dt_iop_highlights_params_t)
 
 /* As some of the internal algorithms use a smaller value for clipping than given by the UI
    the visualizing is wrong for those algos. It seems to be a a minor issue but sometimes significant.
@@ -93,6 +93,33 @@ typedef enum dt_recovery_mode_t
 } dt_recovery_mode_t;
 #define NUM_RECOVERY_MODES 7
 
+typedef enum dt_iop_highlights_opp_iterate_t
+{
+  DT_HIGHLIGHTS_OPP_ITERATE_WARM_LIGHTS = 0, // $DESCRIPTION: "warm lights"
+  DT_HIGHLIGHTS_OPP_ITERATE_ALL_PARTLY_CLIPPED = 1 // $DESCRIPTION: "all partly clipped"
+} dt_iop_highlights_opp_iterate_t;
+
+typedef enum dt_iop_highlights_fill_t
+{
+  DT_HIGHLIGHTS_FILL_OFF = 0, // $DESCRIPTION: "off"
+  DT_HIGHLIGHTS_FILL_FLAT = 1, // $DESCRIPTION: "flat lift"
+  DT_HIGHLIGHTS_FILL_BIHARMONIC = 2, // $DESCRIPTION: "biharmonic dome"
+  DT_HIGHLIGHTS_FILL_POISSON = 3, // $DESCRIPTION: "poisson dome"
+  DT_HIGHLIGHTS_FILL_DISTANCE = 4 // $DESCRIPTION: "distance dome"
+} dt_iop_highlights_fill_t;
+
+typedef enum dt_iop_highlights_fill_log_t
+{
+  DT_HIGHLIGHTS_FILL_LINEAR = 0, // $DESCRIPTION: "linear luminance"
+  DT_HIGHLIGHTS_FILL_LOG = 1 // $DESCRIPTION: "log luminance"
+} dt_iop_highlights_fill_log_t;
+
+typedef enum dt_iop_highlights_fill_cap_t
+{
+  DT_HIGHLIGHTS_FILL_SOFT_CAP = 0, // $DESCRIPTION: "soft"
+  DT_HIGHLIGHTS_FILL_HARD_CAP = 1 // $DESCRIPTION: "hard"
+} dt_iop_highlights_fill_cap_t;
+
 typedef enum dt_highlights_mask_t
 {
   DT_HIGHLIGHTS_MASK_OFF,
@@ -114,6 +141,19 @@ typedef struct dt_iop_highlights_params_t
   float combine;                      // $MIN: 0.0 $MAX: 8.0 $DEFAULT: 2.0 $DESCRIPTION: "combine"
   dt_recovery_mode_t recovery;        // $DEFAULT: DT_RECOVERY_MODE_OFF $DESCRIPTION: "rebuild"
   float solid_color;                  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "inpaint a flat color"
+  int opp_passes;                     // $MIN: 0 $MAX: 20 $DEFAULT: 0 $DESCRIPTION: "reference passes"
+  dt_iop_highlights_opp_iterate_t opp_iterate; // $DEFAULT: DT_HIGHLIGHTS_OPP_ITERATE_WARM_LIGHTS $DESCRIPTION: "iterate where"
+  gboolean opp_cbrt;                  // $DEFAULT: FALSE $DESCRIPTION: "cube-root offset"
+  dt_iop_highlights_fill_t fill;      // $DEFAULT: DT_HIGHLIGHTS_FILL_OFF $DESCRIPTION: "brightness fill"
+  dt_iop_highlights_fill_log_t fill_log; // $DEFAULT: DT_HIGHLIGHTS_FILL_LINEAR $DESCRIPTION: "solve on"
+  float fill_max_rise;                // $MIN: 0.0 $MAX: 4.0 $DEFAULT: 2.0 $DESCRIPTION: "max rise"
+  dt_iop_highlights_fill_cap_t fill_cap; // $DEFAULT: DT_HIGHLIGHTS_FILL_SOFT_CAP $DESCRIPTION: "cap"
+  float fill_occluder;                // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.8 $DESCRIPTION: "rim occluder threshold"
+  int fill_specks;                    // $MIN: 0 $MAX: 256 $DEFAULT: 64 $DESCRIPTION: "merge clipped specks up to"
+  gboolean fill_round;                // $DEFAULT: TRUE $DESCRIPTION: "round the dome ridge"
+  float fill_threshold;               // $MIN: 0.05 $MAX: 1.0 $DEFAULT: 0.5 $DESCRIPTION: "fully clipped threshold"
+  gboolean fill_partial;              // $DEFAULT: FALSE $DESCRIPTION: "fill partly clipped too"
+  float fill_strength;                // $MIN: 0.0 $MAX: 4.0 $DEFAULT: 1.0 $DESCRIPTION: "dome strength"
 } dt_iop_highlights_params_t;
 
 typedef struct dt_iop_highlights_gui_data_t
@@ -128,6 +168,20 @@ typedef struct dt_iop_highlights_gui_data_t
   GtkWidget *combine;
   GtkWidget *recovery;
   GtkWidget *strength;
+  GtkWidget *opposed_section;
+  GtkWidget *opp_passes;
+  GtkWidget *opp_iterate;
+  GtkWidget *opp_cbrt;
+  GtkWidget *fill;
+  GtkWidget *fill_log;
+  GtkWidget *fill_max_rise;
+  GtkWidget *fill_cap;
+  GtkWidget *fill_occluder;
+  GtkWidget *fill_specks;
+  GtkWidget *fill_round;
+  GtkWidget *fill_threshold;
+  GtkWidget *fill_partial;
+  GtkWidget *fill_strength;
   dt_highlights_mask_t hlr_mask_mode;
   dt_aligned_pixel_t oppchroma;
   gboolean oppclipped;
@@ -238,6 +292,8 @@ int legacy_params(dt_iop_module_t *self,
     float solid_color;
   } dt_iop_highlights_params_v5_t;
 
+  typedef dt_iop_highlights_params_t dt_iop_highlights_params_v6_t;
+
   if(old_version == 1)
   {
     typedef struct dt_iop_highlights_params_v1_t
@@ -340,12 +396,41 @@ int legacy_params(dt_iop_module_t *self,
     *new_version = 5;
     return 0;
   }
+  if(old_version == 5)
+  {
+    const dt_iop_highlights_params_v5_t *o = (dt_iop_highlights_params_v5_t *)old_params;
+    dt_iop_highlights_params_v6_t *n = calloc(1, sizeof(dt_iop_highlights_params_v6_t));
+    if(!n) return 1;
+
+    n->mode = o->mode;
+    n->strength = o->strength;
+    n->clip = o->clip;
+    n->noise_level = o->noise_level;
+    n->iterations = o->iterations;
+    n->scales = o->scales;
+    n->candidating = o->candidating;
+    n->combine = o->combine;
+    n->recovery = o->recovery;
+    n->solid_color = o->solid_color;
+    n->fill_max_rise = 2.0f;
+    n->fill_occluder = 0.8f;
+    n->fill_specks = 64;
+    n->fill_round = TRUE;
+    n->fill_threshold = 0.5f;
+    n->fill_strength = 1.0f;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_highlights_params_v6_t);
+    *new_version = 6;
+    return 0;
+  }
 
   return 1;
 }
 
 #include "hlreconstruct/segmentation.c"
 #include "hlreconstruct/segbased.c"
+#include "hlreconstruct/opposed_fill.c"
 #include "hlreconstruct/opposed.c"
 #include "hlreconstruct/laplacian.c"
 #include "hlreconstruct/inpaint.c"
@@ -479,6 +564,13 @@ void tiling_callback(dt_iop_module_t *self,
   {
     tiling->factor += 0.5f; // enough for in&output buffers plus masks
     tiling->factor_cl += 0.5f; // enough for in&output buffers plus masks
+    if(filters && d->fill != DT_HIGHLIGHTS_FILL_OFF)
+    {
+      // reserve whole-grid solver memory even though opposed cannot tile
+      const float cell_area = is_xtrans ? 9.0f : 4.0f;
+      tiling->factor += 1.0f + 224.0f / (sizeof(float) * cell_area);
+      tiling->maxbuf = fmaxf(tiling->maxbuf, 7.0f * sizeof(double) / (sizeof(float) * cell_area));
+    }
     return;
   }
 
@@ -1063,8 +1155,15 @@ void commit_params(dt_iop_module_t *self,
   */
   const gboolean use_opposed = d->mode == DT_IOP_HIGHLIGHTS_OPPOSED;
   const gboolean opplinear = use_opposed && linear;
+  // the other experiment controls only act through these three, which have no OpenCL code
+  const gboolean experiments_changed = d->opp_passes > 0
+                                       || d->opp_cbrt
+                                       || d->fill != DT_HIGHLIGHTS_FILL_OFF;
 
-  piece->process_cl_ready = ((d->mode == DT_IOP_HIGHLIGHTS_INPAINT) || (d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || opplinear) ? FALSE : TRUE;
+  piece->process_cl_ready = !(use_opposed && experiments_changed)
+                            && (d->mode != DT_IOP_HIGHLIGHTS_INPAINT)
+                            && (d->mode != DT_IOP_HIGHLIGHTS_SEGMENTS)
+                            && !opplinear;
 
   if((d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || use_opposed)
     piece->process_tiling_ready = FALSE;
@@ -1240,6 +1339,26 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   gtk_widget_set_visible(g->recovery, use_segmentation);
   gtk_widget_set_visible(g->strength, use_recovery);
   dt_bauhaus_widget_set_quad_visibility(g->strength, use_recovery);
+
+  const gboolean use_opposed = p->mode == DT_IOP_HIGHLIGHTS_OPPOSED;
+  const gboolean use_fill = use_opposed && p->fill != DT_HIGHLIGHTS_FILL_OFF;
+  const gboolean use_distance_fill = use_fill && p->fill == DT_HIGHLIGHTS_FILL_DISTANCE;
+  const gboolean use_slope_fill = use_fill
+                                  && (p->fill == DT_HIGHLIGHTS_FILL_POISSON || use_distance_fill);
+  gtk_widget_set_visible(g->opposed_section, use_opposed);
+  gtk_widget_set_visible(g->opp_passes, use_opposed);
+  gtk_widget_set_visible(g->opp_iterate, use_opposed && p->opp_passes > 0);
+  gtk_widget_set_visible(g->opp_cbrt, use_opposed);
+  gtk_widget_set_visible(g->fill, use_opposed);
+  gtk_widget_set_visible(g->fill_log, use_fill);
+  gtk_widget_set_visible(g->fill_max_rise, use_fill);
+  gtk_widget_set_visible(g->fill_cap, use_fill);
+  gtk_widget_set_visible(g->fill_occluder, use_fill);
+  gtk_widget_set_visible(g->fill_specks, use_fill);
+  gtk_widget_set_visible(g->fill_round, use_distance_fill);
+  gtk_widget_set_visible(g->fill_threshold, use_fill);
+  gtk_widget_set_visible(g->fill_partial, use_fill);
+  gtk_widget_set_visible(g->fill_strength, use_slope_fill);
 
   // The special case for strength button active needs further care here
   if((use_segmentation && (p->recovery == DT_RECOVERY_MODE_OFF)) && (g->hlr_mask_mode == DT_HIGHLIGHTS_MASK_STRENGTH))
@@ -1421,6 +1540,58 @@ void gui_init(dt_iop_module_t *self)
   g->scales = dt_bauhaus_combobox_from_params(self, "scales");
   gtk_widget_set_tooltip_text(g->scales, _("increase to correct larger clipped areas.\n"
                                            "large values bring huge performance penalties"));
+
+  g->opposed_section = dt_ui_section_label_new(C_("section", "opposed experiments"));
+  dt_gui_box_add(box_raw, g->opposed_section);
+
+  g->opp_passes = dt_bauhaus_slider_from_params(self, "opp_passes");
+  dt_bauhaus_slider_set_digits(g->opp_passes, 0);
+  gtk_widget_set_tooltip_text(g->opp_passes, _("repeat reference estimation for partly clipped photosites"));
+
+  g->opp_iterate = dt_bauhaus_combobox_from_params(self, "opp_iterate");
+  gtk_widget_set_tooltip_text(g->opp_iterate, _("choose which partly clipped photosites use later reference passes"));
+
+  g->opp_cbrt = dt_bauhaus_toggle_from_params(self, "opp_cbrt");
+  gtk_widget_set_tooltip_text(g->opp_cbrt, _("measure and apply chroma offsets in cube-root space"));
+
+  g->fill = dt_bauhaus_combobox_from_params(self, "fill");
+  gtk_widget_set_tooltip_text(g->fill, _("choose a brightness fill for clipped cells"));
+
+  g->fill_log = dt_bauhaus_combobox_from_params(self, "fill_log");
+  gtk_widget_set_tooltip_text(g->fill_log, _("choose linear or log luminance for the solve"));
+
+  g->fill_max_rise = dt_bauhaus_slider_from_params(self, "fill_max_rise");
+  dt_bauhaus_slider_set_digits(g->fill_max_rise, 1);
+  dt_bauhaus_slider_set_format(g->fill_max_rise, _(" EV"));
+  gtk_widget_set_tooltip_text(g->fill_max_rise, _("limit the brightness rise in stops"));
+
+  g->fill_cap = dt_bauhaus_combobox_from_params(self, "fill_cap");
+  gtk_widget_set_tooltip_text(g->fill_cap, _("compress the rise smoothly or clip it"));
+
+  g->fill_occluder = dt_bauhaus_slider_from_params(self, "fill_occluder");
+  dt_bauhaus_slider_set_format(g->fill_occluder, "%");
+  dt_bauhaus_slider_set_digits(g->fill_occluder, 0);
+  gtk_widget_set_tooltip_text(g->fill_occluder, _("leave dark unselected cells free below this region-relative luminance"));
+
+  g->fill_specks = dt_bauhaus_slider_from_params(self, "fill_specks");
+  dt_bauhaus_slider_set_digits(g->fill_specks, 0);
+  gtk_widget_set_tooltip_text(g->fill_specks,
+                              _("merge enclosed clipped specks up to this area in pixels of the image scaled to 1600 px on the long edge"));
+
+  g->fill_round = dt_bauhaus_toggle_from_params(self, "fill_round");
+  gtk_widget_set_tooltip_text(g->fill_round, _("round the ridge of distance-based domes"));
+
+  g->fill_threshold = dt_bauhaus_slider_from_params(self, "fill_threshold");
+  dt_bauhaus_slider_set_format(g->fill_threshold, "%");
+  dt_bauhaus_slider_set_digits(g->fill_threshold, 0);
+  gtk_widget_set_tooltip_text(g->fill_threshold, _("require this clipped share in every channel to select a cell"));
+
+  g->fill_partial = dt_bauhaus_toggle_from_params(self, "fill_partial");
+  gtk_widget_set_tooltip_text(g->fill_partial, _("select cells with any clipped photosite"));
+
+  g->fill_strength = dt_bauhaus_slider_from_params(self, "fill_strength");
+  dt_bauhaus_slider_set_digits(g->fill_strength, 1);
+  gtk_widget_set_tooltip_text(g->fill_strength, _("scale the measured rim slope for poisson and distance domes"));
 
   GtkWidget *notapplicable = dt_ui_label_new(_("not applicable"));
   gtk_widget_set_tooltip_text(notapplicable, _("this module does not work with monochrome RAW files"));

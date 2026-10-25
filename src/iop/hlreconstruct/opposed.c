@@ -43,7 +43,9 @@ static dt_hash_t _opposed_hash(dt_dev_pixelpipe_iop_t *piece)
   const dt_iop_highlights_data_t *d = piece->data;
   dt_hash_t hash = dt_dev_pixelpipe_piece_hash(piece, NULL, FALSE);
   hash = dt_hash(hash, &d->clip, sizeof(d->clip));
-  return dt_hash(hash, &piece->module->dev->chroma.late_correction, sizeof(int));
+  hash = dt_hash(hash, &piece->module->dev->chroma.late_correction, sizeof(int));
+  const gboolean cbrt_space = d->mode == DT_IOP_HIGHLIGHTS_OPPOSED && d->opp_cbrt;
+  return dt_hash(hash, &cbrt_space, sizeof(cbrt_space));
 }
 
 static inline float _calc_linear_refavg(const float *in, const int color)
@@ -57,6 +59,21 @@ static inline float _calc_linear_refavg(const float *in, const int color)
 static inline size_t _raw_to_cmap(const size_t width, const size_t row, const size_t col)
 {
   return (row / 3) * width + (col / 3);
+}
+
+static inline float _opp_estimate(const float *in,
+                                  const uint8_t(*const xtrans)[6],
+                                  const uint32_t filters,
+                                  const int row,
+                                  const int col,
+                                  const dt_iop_roi_t *const roi,
+                                  const dt_aligned_pixel_t correction,
+                                  const float chroma,
+                                  const gboolean cbrt_space)
+{
+  if(cbrt_space)
+    return fcube(fmaxf(0.0f, _calc_refavg(in, xtrans, filters, row, col, roi, correction, FALSE) + chroma));
+  return _calc_refavg(in, xtrans, filters, row, col, roi, correction, TRUE) + chroma;
 }
 
 static inline char _mask_dilated(const char *in, const size_t w1)
@@ -241,6 +258,7 @@ static float *_process_opposed(dt_iop_module_t *self,
                                const gboolean keep,
                                const float clipval)
 {
+  dt_iop_highlights_data_t *d = piece->data;
   dt_iop_highlights_gui_data_t *g = self->gui_data;
   const uint8_t(*const xtrans)[6] = (const uint8_t(*const)[6])piece->xtrans;
   const uint32_t filters = piece->filters;
@@ -267,6 +285,13 @@ static float *_process_opposed(dt_iop_module_t *self,
   const size_t msize = dt_round_size((size_t) mwidth, 8) * dt_round_size(mheight, 8);
 
   dt_aligned_pixel_t chrominance = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  const gboolean experiments = d->mode == DT_IOP_HIGHLIGHTS_OPPOSED;
+  const int opp_iter = experiments ? CLAMP(d->opp_passes, 0, 20) : 0;
+  const gboolean iter_rg = experiments
+                           && d->opp_iterate == DT_HIGHLIGHTS_OPP_ITERATE_WARM_LIGHTS;
+  const gboolean cbrt_space = experiments && d->opp_cbrt;
+  const gboolean fill_active = experiments && d->fill != DT_HIGHLIGHTS_FILL_OFF;
 
   const dt_hash_t opphash = _opposed_hash(piece);
   const gboolean fullpipe = dt_pipe_is_full(piece->pipe);
@@ -367,7 +392,9 @@ static float *_process_opposed(dt_iop_module_t *self,
             if((inval < clips[color]) && (inval > lo_clips[color])
                && (mask[(color+3) * msize + _raw_to_cmap(mwidth, row, col)]))
             {
-              sums[color] += inval - _calc_refavg(input, xtrans, filters, row, col, roi_in, correction, TRUE);
+              sums[color] += cbrt_space
+                ? cbrtf(inval) - _calc_refavg(input, xtrans, filters, row, col, roi_in, correction, FALSE)
+                : inval - _calc_refavg(input, xtrans, filters, row, col, roi_in, correction, TRUE);
               cnts[color] += 1.0f;
             }
           }
@@ -401,7 +428,92 @@ static float *_process_opposed(dt_iop_module_t *self,
           "allocation for mask generation failed");
   }
 
-  float *tmpout = keep ? dt_alloc_align_float(iwidth * iheight) : NULL;
+  const gboolean fill_mosaic = fill_active && filters != 0;
+  if(opp_iter > 0 || cbrt_space)
+  {
+    float *cur = dt_alloc_align_float(iwidth * iheight);
+    float *nxt = opp_iter > 0 ? dt_alloc_align_float(iwidth * iheight) : NULL;
+    if(cur && (nxt || opp_iter == 0))
+    {
+      DT_OMP_FOR(collapse(2))
+      for(size_t row = 0; row < iheight; row++)
+      {
+        for(size_t col = 0; col < iwidth; col++)
+        {
+          const size_t idx = row * iwidth + col;
+          const int color = fcol(row, col, filters, xtrans);
+          const float inval = input[idx];
+          cur[idx] = inval >= clips[color]
+            ? MAX(inval, _opp_estimate(input, xtrans, filters, row, col, roi_in,
+                                       correction, chrominance[color], cbrt_space))
+            : inval;
+        }
+      }
+
+      for(int pass = 0; pass < opp_iter; pass++)
+      {
+        DT_OMP_FOR(collapse(2))
+        for(size_t row = 0; row < iheight; row++)
+        {
+          for(size_t col = 0; col < iwidth; col++)
+          {
+            const size_t idx = row * iwidth + col;
+            const int color = fcol(row, col, filters, xtrans);
+            const float inval = input[idx];
+            float oval = cur[idx];
+            if(inval >= clips[color])
+            {
+              gboolean partial = FALSE;
+              gboolean measured[3] = { FALSE, FALSE, FALSE };
+              for(int y = MAX(0, (int)row - 1); y <= MIN((int)iheight - 1, (int)row + 1); y++)
+                for(int x = MAX(0, (int)col - 1); x <= MIN((int)iwidth - 1, (int)col + 1); x++)
+                {
+                  const int c = fcol(y, x, filters, xtrans);
+                  if(input[(size_t)y * iwidth + x] < clips[c])
+                    measured[c] = TRUE;
+                  if(c != color && input[(size_t)y * iwidth + x] < clips[c])
+                    partial = TRUE;
+                }
+              if(iter_rg)
+                partial = color != 2 && measured[2] && !measured[color == 0 ? 1 : 0];
+              if(partial)
+                oval = MAX(inval, _opp_estimate(cur, xtrans, filters, row, col, roi_in,
+                                                correction, chrominance[color], cbrt_space));
+            }
+            nxt[idx] = oval;
+          }
+        }
+        float *t = cur;
+        cur = nxt;
+        nxt = t;
+      }
+
+      dt_free_align(nxt);
+      if(fill_mosaic)
+        _opposed_fill(input, cur, iwidth, iheight, filters, xtrans, clips, d);
+
+      DT_OMP_FOR(collapse(2))
+      for(size_t row = 0; row < roi_out->height; row++)
+      {
+        for(size_t col = 0; col < roi_out->width; col++)
+        {
+          const size_t irow = row + roi_out->y;
+          const size_t icol = col + roi_out->x;
+          output[row * roi_out->width + col] = (irow < iheight && icol < iwidth)
+            ? cur[irow * iwidth + icol] : 0.0f;
+        }
+      }
+      if(keep) return cur;
+      dt_free_align(cur);
+      return NULL;
+    }
+    dt_free_align(cur);
+    dt_free_align(nxt);
+    dt_print(DT_DEBUG_ALWAYS, "highlights opposed experiment skipped: could not allocate working buffers");
+  }
+
+  const gboolean need_full = keep || fill_mosaic;
+  float *tmpout = need_full ? dt_alloc_align_float(iwidth * iheight) : NULL;
   if(tmpout)
   {
     DT_OMP_FOR(collapse(2))
@@ -414,14 +526,18 @@ static float *_process_opposed(dt_iop_module_t *self,
         const float inval = input[idx];
         if(inval >= clips[color])
         {
-          const float ref = _calc_refavg(input, xtrans, filters, row, col, roi_in, correction, TRUE);
-          tmpout[idx] = MAX(inval, ref + chrominance[color]);
+          tmpout[idx] = MAX(inval, _opp_estimate(input, xtrans, filters, row, col,
+                                                  roi_in, correction, chrominance[color], cbrt_space));
         }
         else
           tmpout[idx] = inval;
       }
     }
+    if(fill_mosaic)
+      _opposed_fill(input, tmpout, iwidth, iheight, filters, xtrans, clips, d);
   }
+  else if(fill_mosaic)
+    dt_print(DT_DEBUG_ALWAYS, "highlights opposed fill skipped: could not allocate the full image buffer");
 
   DT_OMP_FOR(collapse(2))
   for(size_t row = 0; row < roi_out->height; row++)
@@ -442,16 +558,16 @@ static float *_process_opposed(dt_iop_module_t *self,
           const int color = fcol(irow, icol, filters, xtrans);
           oval = input[ix];
           if(oval >= clips[color])
-          {
-            const float ref = _calc_refavg(input, xtrans, filters, irow, icol, roi_in, correction, TRUE);
-            oval = MAX(oval, ref + chrominance[color]);
-          }
+            oval = MAX(oval, _opp_estimate(input, xtrans, filters, irow, icol,
+                                            roi_in, correction, chrominance[color], cbrt_space));
         }
       }
       output[odx] = oval;
     }
   }
-  return tmpout;
+  if(keep) return tmpout;
+  dt_free_align(tmpout);
+  return NULL;
 }
 
 #ifdef HAVE_OPENCL
