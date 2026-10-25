@@ -47,7 +47,7 @@
 #define DS_FACTOR 4
 #define MAX_NUM_SCALES 12
 
-DT_MODULE_INTROSPECTION(6, dt_iop_highlights_params_t)
+DT_MODULE_INTROSPECTION(7, dt_iop_highlights_params_t)
 
 /* As some of the internal algorithms use a smaller value for clipping than given by the UI
    the visualizing is wrong for those algos. It seems to be a a minor issue but sometimes significant.
@@ -98,6 +98,12 @@ typedef enum dt_iop_highlights_opp_iterate_t
   DT_HIGHLIGHTS_OPP_ITERATE_WARM_LIGHTS = 0, // $DESCRIPTION: "warm lights"
   DT_HIGHLIGHTS_OPP_ITERATE_ALL_PARTLY_CLIPPED = 1 // $DESCRIPTION: "all partly clipped"
 } dt_iop_highlights_opp_iterate_t;
+
+typedef enum dt_iop_highlights_opp_chroma_t
+{
+  DT_HIGHLIGHTS_OPP_CHROMA_IMAGE_WIDE = 0, // $DESCRIPTION: "image-wide"
+  DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION = 1 // $DESCRIPTION: "per region"
+} dt_iop_highlights_opp_chroma_t;
 
 typedef enum dt_iop_highlights_fill_t
 {
@@ -154,6 +160,7 @@ typedef struct dt_iop_highlights_params_t
   float fill_threshold;               // $MIN: 0.05 $MAX: 1.0 $DEFAULT: 0.5 $DESCRIPTION: "fully clipped threshold"
   gboolean fill_partial;              // $DEFAULT: FALSE $DESCRIPTION: "fill partly clipped too"
   float fill_strength;                // $MIN: 0.0 $MAX: 4.0 $DEFAULT: 1.0 $DESCRIPTION: "dome strength"
+  dt_iop_highlights_opp_chroma_t opp_local; // $DEFAULT: DT_HIGHLIGHTS_OPP_CHROMA_IMAGE_WIDE $DESCRIPTION: "chroma offset"
 } dt_iop_highlights_params_t;
 
 typedef struct dt_iop_highlights_gui_data_t
@@ -172,6 +179,7 @@ typedef struct dt_iop_highlights_gui_data_t
   GtkWidget *opp_passes;
   GtkWidget *opp_iterate;
   GtkWidget *opp_cbrt;
+  GtkWidget *opp_local;
   GtkWidget *fill;
   GtkWidget *fill_log;
   GtkWidget *fill_max_rise;
@@ -292,7 +300,32 @@ int legacy_params(dt_iop_module_t *self,
     float solid_color;
   } dt_iop_highlights_params_v5_t;
 
-  typedef dt_iop_highlights_params_t dt_iop_highlights_params_v6_t;
+  typedef struct dt_iop_highlights_params_v6_t
+  {
+    dt_iop_highlights_mode_t mode;
+    float strength;
+    float clip;
+    float noise_level;
+    int iterations;
+    dt_atrous_wavelets_scales_t scales;
+    float candidating;
+    float combine;
+    dt_recovery_mode_t recovery;
+    float solid_color;
+    int opp_passes;
+    dt_iop_highlights_opp_iterate_t opp_iterate;
+    gboolean opp_cbrt;
+    dt_iop_highlights_fill_t fill;
+    dt_iop_highlights_fill_log_t fill_log;
+    float fill_max_rise;
+    dt_iop_highlights_fill_cap_t fill_cap;
+    float fill_occluder;
+    int fill_specks;
+    gboolean fill_round;
+    float fill_threshold;
+    gboolean fill_partial;
+    float fill_strength;
+  } dt_iop_highlights_params_v6_t;
 
   if(old_version == 1)
   {
@@ -422,6 +455,20 @@ int legacy_params(dt_iop_module_t *self,
     *new_params = n;
     *new_params_size = sizeof(dt_iop_highlights_params_v6_t);
     *new_version = 6;
+    return 0;
+  }
+  if(old_version == 6)
+  {
+    const dt_iop_highlights_params_v6_t *o = (dt_iop_highlights_params_v6_t *)old_params;
+    dt_iop_highlights_params_t *n = calloc(1, sizeof(dt_iop_highlights_params_t));
+    if(!n) return 1;
+
+    memcpy(n, o, sizeof(*o));
+    n->opp_local = DT_HIGHLIGHTS_OPP_CHROMA_IMAGE_WIDE;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_highlights_params_t);
+    *new_version = 7;
     return 0;
   }
 
@@ -564,6 +611,21 @@ void tiling_callback(dt_iop_module_t *self,
   {
     tiling->factor += 0.5f; // enough for in&output buffers plus masks
     tiling->factor_cl += 0.5f; // enough for in&output buffers plus masks
+    if(filters && d->opp_local == DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION)
+    {
+      const size_t mwidth = (size_t)roi_in->width / 3;
+      const size_t mheight = (size_t)roi_in->height / 3;
+      const size_t msize = dt_round_size(mwidth, 8) * dt_round_size(mheight, 8);
+      const size_t cells = mwidth * mheight;
+      // eight-connected regions can occupy at most one region in each 2x2 block
+      const size_t max_regions = ((mwidth + 1) / 2) * ((mheight + 1) / 2);
+      const size_t label_bytes = 2 * msize * sizeof(uint32_t) + cells * sizeof(size_t);
+      const size_t offset_bytes = msize * sizeof(uint32_t)
+                                  + (max_regions + 1) * sizeof(opp_region_chroma_t);
+
+      // the labeler frees its labels and queue before allocating per-region offsets
+      tiling->overhead += MAX(label_bytes, offset_bytes);
+    }
     if(filters && d->fill != DT_HIGHLIGHTS_FILL_OFF)
     {
       // reserve whole-grid solver memory even though opposed cannot tile
@@ -1158,6 +1220,7 @@ void commit_params(dt_iop_module_t *self,
   // the other experiment controls only act through these three, which have no OpenCL code
   const gboolean experiments_changed = d->opp_passes > 0
                                        || d->opp_cbrt
+                                       || d->opp_local == DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION
                                        || d->fill != DT_HIGHLIGHTS_FILL_OFF;
 
   piece->process_cl_ready = !(use_opposed && experiments_changed)
@@ -1349,6 +1412,7 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   gtk_widget_set_visible(g->opp_passes, use_opposed);
   gtk_widget_set_visible(g->opp_iterate, use_opposed && p->opp_passes > 0);
   gtk_widget_set_visible(g->opp_cbrt, use_opposed);
+  gtk_widget_set_visible(g->opp_local, use_opposed);
   gtk_widget_set_visible(g->fill, use_opposed);
   gtk_widget_set_visible(g->fill_log, use_fill);
   gtk_widget_set_visible(g->fill_max_rise, use_fill);
@@ -1553,6 +1617,9 @@ void gui_init(dt_iop_module_t *self)
 
   g->opp_cbrt = dt_bauhaus_toggle_from_params(self, "opp_cbrt");
   gtk_widget_set_tooltip_text(g->opp_cbrt, _("measure and apply chroma offsets in cube-root space"));
+
+  g->opp_local = dt_bauhaus_combobox_from_params(self, "opp_local");
+  gtk_widget_set_tooltip_text(g->opp_local, _("measure the chroma offset around each clipped region instead of over the whole image"));
 
   g->fill = dt_bauhaus_combobox_from_params(self, "fill");
   gtk_widget_set_tooltip_text(g->fill, _("choose a brightness fill for clipped cells"));

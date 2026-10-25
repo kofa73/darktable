@@ -45,7 +45,10 @@ static dt_hash_t _opposed_hash(dt_dev_pixelpipe_iop_t *piece)
   hash = dt_hash(hash, &d->clip, sizeof(d->clip));
   hash = dt_hash(hash, &piece->module->dev->chroma.late_correction, sizeof(int));
   const gboolean cbrt_space = d->mode == DT_IOP_HIGHLIGHTS_OPPOSED && d->opp_cbrt;
-  return dt_hash(hash, &cbrt_space, sizeof(cbrt_space));
+  hash = dt_hash(hash, &cbrt_space, sizeof(cbrt_space));
+  const gboolean local_chroma = d->mode == DT_IOP_HIGHLIGHTS_OPPOSED && piece->filters != 0
+                                && d->opp_local == DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION;
+  return dt_hash(hash, &local_chroma, sizeof(local_chroma));
 }
 
 static inline float _calc_linear_refavg(const float *in, const int color)
@@ -93,6 +96,142 @@ static inline char _mask_dilated(const char *in, const size_t w1)
           in[w1-3]  | in[w1-2]  | in[w1+2]  | in[w1+3]  |
           in[w2-3]  | in[w2-2]  | in[w2-1]  | in[w2]    | in[w2+1]  | in[w2+2]  | in[w2+3] |
           in[w3-2]  | in[w3-1]  | in[w3]    | in[w3+1]  | in[w3+2]) ? 1 : 0;
+}
+
+typedef struct opp_region_chroma_t
+{
+  double sum[3];
+  double count[3];
+  float offset[3];
+} opp_region_chroma_t;
+
+static uint32_t *_opp_region_labels(const char *mask,
+                                    const size_t mwidth,
+                                    const size_t mheight,
+                                    const size_t msize,
+                                    size_t *region_count)
+{
+  *region_count = 0;
+  if(mwidth == 0 || mheight == 0 || mwidth > SIZE_MAX / mheight
+     || msize > SIZE_MAX / sizeof(uint32_t))
+    return NULL;
+
+  const size_t cell_count = mwidth * mheight;
+  if(cell_count > SIZE_MAX / sizeof(size_t))
+    return NULL;
+
+  uint32_t *labels = calloc(msize, sizeof(*labels));
+  uint32_t *grown = calloc(msize, sizeof(*grown));
+  size_t *queue = malloc(cell_count * sizeof(*queue));
+  if(!labels || !grown || !queue)
+  {
+    free(labels);
+    free(grown);
+    free(queue);
+    return NULL;
+  }
+
+  uint32_t label_count = 0;
+  for(size_t row = 0; row < mheight; row++)
+  {
+    for(size_t col = 0; col < mwidth; col++)
+    {
+      const size_t cell = row * mwidth + col;
+      if(labels[cell] || !(mask[cell] || mask[msize + cell] || mask[2 * msize + cell]))
+        continue;
+      if(label_count == UINT32_MAX)
+      {
+        free(labels);
+        free(grown);
+        free(queue);
+        return NULL;
+      }
+
+      const uint32_t label = ++label_count;
+      size_t head = 0;
+      size_t tail = 0;
+      labels[cell] = label;
+      queue[tail++] = cell;
+      while(head < tail)
+      {
+        const size_t current = queue[head++];
+        const size_t current_row = current / mwidth;
+        const size_t current_col = current % mwidth;
+        const size_t row0 = current_row > 0 ? current_row - 1 : current_row;
+        const size_t row1 = MIN(current_row + 1, mheight - 1);
+        const size_t col0 = current_col > 0 ? current_col - 1 : current_col;
+        const size_t col1 = MIN(current_col + 1, mwidth - 1);
+        for(size_t r = row0; r <= row1; r++)
+        {
+          for(size_t c = col0; c <= col1; c++)
+          {
+            const size_t neighbor = r * mwidth + c;
+            if(!labels[neighbor]
+               && (mask[neighbor] || mask[msize + neighbor] || mask[2 * msize + neighbor]))
+            {
+              labels[neighbor] = label;
+              queue[tail++] = neighbor;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  memcpy(grown, labels, msize * sizeof(*grown));
+  // clipped cells keep their labels; row-major seeds claim empty overlap cells
+  for(size_t row = 0; row < mheight; row++)
+  {
+    for(size_t col = 0; col < mwidth; col++)
+    {
+      const size_t cell = row * mwidth + col;
+      const uint32_t label = labels[cell];
+      if(!label) continue;
+
+      const size_t row0 = row > 3 ? row - 3 : 0;
+      const size_t row1 = MIN(row + 3, mheight - 1);
+      const size_t col0 = col > 3 ? col - 3 : 0;
+      const size_t col1 = MIN(col + 3, mwidth - 1);
+      for(size_t r = row0; r <= row1; r++)
+      {
+        const int dy = (int)r - (int)row;
+        for(size_t c = col0; c <= col1; c++)
+        {
+          const int dx = (int)c - (int)col;
+          if((dy == -3 || dy == 3) && (dx == -3 || dx == 3)) continue;
+          const size_t grown_cell = r * mwidth + c;
+          if(!grown[grown_cell]) grown[grown_cell] = label;
+        }
+      }
+    }
+  }
+
+  free(labels);
+  free(queue);
+  *region_count = label_count;
+  return grown;
+}
+
+static inline float _opp_chroma_for(const dt_aligned_pixel_t chrominance,
+                                    const uint32_t *grown_regions,
+                                    const opp_region_chroma_t *region_chrominance,
+                                    const size_t mwidth,
+                                    const size_t mheight,
+                                    const size_t row,
+                                    const size_t col,
+                                    const int color)
+{
+  if(grown_regions && region_chrominance)
+  {
+    const size_t mrow = row / 3;
+    const size_t mcol = col / 3;
+    if(mrow < mheight && mcol < mwidth)
+    {
+      const uint32_t label = grown_regions[mrow * mwidth + mcol];
+      if(label) return region_chrominance[label].offset[color];
+    }
+  }
+  return chrominance[color];
 }
 
 
@@ -291,17 +430,21 @@ static float *_process_opposed(dt_iop_module_t *self,
   const gboolean iter_rg = experiments
                            && d->opp_iterate == DT_HIGHLIGHTS_OPP_ITERATE_WARM_LIGHTS;
   const gboolean cbrt_space = experiments && d->opp_cbrt;
+  const gboolean local_chroma = experiments && filters != 0
+                                && d->opp_local == DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION;
   const gboolean fill_active = experiments && d->fill != DT_HIGHLIGHTS_FILL_OFF;
 
   const dt_hash_t opphash = _opposed_hash(piece);
   const gboolean fullpipe = dt_pipe_is_full(piece->pipe);
 
+  uint32_t *grown_regions = NULL;
+  opp_region_chroma_t *region_chrominance = NULL;
   gboolean is_hashed = FALSE;
   gboolean unclipped = FALSE;
   if(self->dev->gui_attached && g)
   {
     dt_iop_gui_enter_critical_section(self);
-    is_hashed = opphash == g->opphash;
+    is_hashed = !local_chroma && opphash == g->opphash;
     unclipped = !g->oppclipped;
     if(is_hashed)
     {
@@ -359,6 +502,20 @@ static float *_process_opposed(dt_iop_module_t *self,
       dt_aligned_pixel_t cnts = {0.0f, 0.0f, 0.0f, 0.0f};
       if(anyclipped)
       {
+        size_t region_count = 0;
+        if(local_chroma)
+        {
+          grown_regions = _opp_region_labels(mask, mwidth, mheight, msize, &region_count);
+          if(grown_regions && region_count > 0
+             && region_count < SIZE_MAX / sizeof(*region_chrominance))
+            region_chrominance = calloc(region_count + 1, sizeof(*region_chrominance));
+          if(!region_chrominance)
+          {
+            free(grown_regions);
+            grown_regions = NULL;
+          }
+        }
+
         /* We want to use the photosites closely around clipped data to be taken into account.
          The mask buffers holds data for each color channel, we dilate the mask buffer slightly
          to get those locations.
@@ -401,6 +558,45 @@ static float *_process_opposed(dt_iop_module_t *self,
         }
         for_three_channels(c)
           chrominance[c] = (cnts[c] > 100.0f) ? sums[c] / cnts[c] : 0.0f;
+
+        if(region_chrominance)
+        {
+          for(size_t row = 0; row < iheight; row++)
+          {
+            for(size_t col = 0; col < iwidth; col++)
+            {
+              const size_t idx = row * iwidth + col;
+              const int color = fcol(row, col, filters, xtrans);
+              const float inval = input[idx];
+              const size_t mrow = row / 3;
+              const size_t mcol = col / 3;
+              if(mrow < mheight && mcol < mwidth
+                 && (inval < clips[color]) && (inval > lo_clips[color]))
+              {
+                const size_t cell = mrow * mwidth + mcol;
+                if(mask[(color+3) * msize + cell])
+                {
+                  const uint32_t label = grown_regions[cell];
+                  if(label)
+                  {
+                    region_chrominance[label].sum[color] += cbrt_space
+                      ? cbrtf(inval) - _calc_refavg(input, xtrans, filters, row, col, roi_in, correction, FALSE)
+                      : inval - _calc_refavg(input, xtrans, filters, row, col, roi_in, correction, TRUE);
+                    region_chrominance[label].count[color] += 1.0;
+                  }
+                }
+              }
+            }
+          }
+
+          for(size_t region = 1; region <= region_count; region++)
+          {
+            for_three_channels(c)
+              region_chrominance[region].offset[c] = region_chrominance[region].count[c] > 30
+                ? (float)(region_chrominance[region].sum[c] / region_chrominance[region].count[c])
+                : chrominance[c];
+          }
+        }
       }
 
       if(self->dev->gui_attached && g && fullpipe)
@@ -445,7 +641,9 @@ static float *_process_opposed(dt_iop_module_t *self,
           const float inval = input[idx];
           cur[idx] = inval >= clips[color]
             ? MAX(inval, _opp_estimate(input, xtrans, filters, row, col, roi_in,
-                                       correction, chrominance[color], cbrt_space))
+                                       correction, _opp_chroma_for(chrominance, grown_regions,
+                                                                  region_chrominance, mwidth, mheight,
+                                                                  row, col, color), cbrt_space))
             : inval;
         }
       }
@@ -478,7 +676,9 @@ static float *_process_opposed(dt_iop_module_t *self,
                 partial = color != 2 && measured[2] && !measured[color == 0 ? 1 : 0];
               if(partial)
                 oval = MAX(inval, _opp_estimate(cur, xtrans, filters, row, col, roi_in,
-                                                correction, chrominance[color], cbrt_space));
+                                                correction, _opp_chroma_for(chrominance, grown_regions,
+                                                                           region_chrominance, mwidth, mheight,
+                                                                           row, col, color), cbrt_space));
             }
             nxt[idx] = oval;
           }
@@ -503,8 +703,15 @@ static float *_process_opposed(dt_iop_module_t *self,
             ? cur[irow * iwidth + icol] : 0.0f;
         }
       }
-      if(keep) return cur;
+      if(keep)
+      {
+        free(grown_regions);
+        free(region_chrominance);
+        return cur;
+      }
       dt_free_align(cur);
+      free(grown_regions);
+      free(region_chrominance);
       return NULL;
     }
     dt_free_align(cur);
@@ -527,7 +734,10 @@ static float *_process_opposed(dt_iop_module_t *self,
         if(inval >= clips[color])
         {
           tmpout[idx] = MAX(inval, _opp_estimate(input, xtrans, filters, row, col,
-                                                  roi_in, correction, chrominance[color], cbrt_space));
+                                                  roi_in, correction,
+                                                  _opp_chroma_for(chrominance, grown_regions,
+                                                                  region_chrominance, mwidth, mheight,
+                                                                  row, col, color), cbrt_space));
         }
         else
           tmpout[idx] = inval;
@@ -559,14 +769,24 @@ static float *_process_opposed(dt_iop_module_t *self,
           oval = input[ix];
           if(oval >= clips[color])
             oval = MAX(oval, _opp_estimate(input, xtrans, filters, irow, icol,
-                                            roi_in, correction, chrominance[color], cbrt_space));
+                                            roi_in, correction,
+                                            _opp_chroma_for(chrominance, grown_regions,
+                                                            region_chrominance, mwidth, mheight,
+                                                            irow, icol, color), cbrt_space));
         }
       }
       output[odx] = oval;
     }
   }
-  if(keep) return tmpout;
+  if(keep)
+  {
+    free(grown_regions);
+    free(region_chrominance);
+    return tmpout;
+  }
   dt_free_align(tmpout);
+  free(grown_regions);
+  free(region_chrominance);
   return NULL;
 }
 
