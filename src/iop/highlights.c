@@ -47,7 +47,7 @@
 #define DS_FACTOR 4
 #define MAX_NUM_SCALES 12
 
-DT_MODULE_INTROSPECTION(7, dt_iop_highlights_params_t)
+DT_MODULE_INTROSPECTION(8, dt_iop_highlights_params_t)
 
 /* As some of the internal algorithms use a smaller value for clipping than given by the UI
    the visualizing is wrong for those algos. It seems to be a a minor issue but sometimes significant.
@@ -105,6 +105,13 @@ typedef enum dt_iop_highlights_opp_chroma_t
   DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION = 1 // $DESCRIPTION: "per region"
 } dt_iop_highlights_opp_chroma_t;
 
+typedef enum dt_iop_highlights_fill_color_t
+{
+  DT_HIGHLIGHTS_FILL_COLOR_OPPOSED = 0, // $DESCRIPTION: "opposed"
+  DT_HIGHLIGHTS_FILL_COLOR_WHITE = 1,   // $DESCRIPTION: "white"
+  DT_HIGHLIGHTS_FILL_COLOR_RIM = 2      // $DESCRIPTION: "from rim"
+} dt_iop_highlights_fill_color_t;
+
 typedef enum dt_iop_highlights_fill_t
 {
   DT_HIGHLIGHTS_FILL_OFF = 0, // $DESCRIPTION: "off"
@@ -161,6 +168,7 @@ typedef struct dt_iop_highlights_params_t
   gboolean fill_partial;              // $DEFAULT: FALSE $DESCRIPTION: "fill partly clipped too"
   float fill_strength;                // $MIN: 0.0 $MAX: 4.0 $DEFAULT: 1.0 $DESCRIPTION: "dome strength"
   dt_iop_highlights_opp_chroma_t opp_local; // $DEFAULT: DT_HIGHLIGHTS_OPP_CHROMA_IMAGE_WIDE $DESCRIPTION: "chroma offset"
+  dt_iop_highlights_fill_color_t fill_color; // $DEFAULT: DT_HIGHLIGHTS_FILL_COLOR_OPPOSED $DESCRIPTION: "fully clipped color"
 } dt_iop_highlights_params_t;
 
 typedef struct dt_iop_highlights_gui_data_t
@@ -180,6 +188,7 @@ typedef struct dt_iop_highlights_gui_data_t
   GtkWidget *opp_iterate;
   GtkWidget *opp_cbrt;
   GtkWidget *opp_local;
+  GtkWidget *fill_color;
   GtkWidget *fill;
   GtkWidget *fill_log;
   GtkWidget *fill_max_rise;
@@ -327,6 +336,12 @@ int legacy_params(dt_iop_module_t *self,
     float fill_strength;
   } dt_iop_highlights_params_v6_t;
 
+  typedef struct dt_iop_highlights_params_v7_t
+  {
+    dt_iop_highlights_params_v6_t v6;
+    dt_iop_highlights_opp_chroma_t opp_local;
+  } dt_iop_highlights_params_v7_t;
+
   if(old_version == 1)
   {
     typedef struct dt_iop_highlights_params_v1_t
@@ -460,15 +475,29 @@ int legacy_params(dt_iop_module_t *self,
   if(old_version == 6)
   {
     const dt_iop_highlights_params_v6_t *o = (dt_iop_highlights_params_v6_t *)old_params;
+    dt_iop_highlights_params_v7_t *n = calloc(1, sizeof(dt_iop_highlights_params_v7_t));
+    if(!n) return 1;
+
+    n->v6 = *o;
+    n->opp_local = DT_HIGHLIGHTS_OPP_CHROMA_IMAGE_WIDE;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_highlights_params_v7_t);
+    *new_version = 7;
+    return 0;
+  }
+  if(old_version == 7)
+  {
+    const dt_iop_highlights_params_v7_t *o = (dt_iop_highlights_params_v7_t *)old_params;
     dt_iop_highlights_params_t *n = calloc(1, sizeof(dt_iop_highlights_params_t));
     if(!n) return 1;
 
     memcpy(n, o, sizeof(*o));
-    n->opp_local = DT_HIGHLIGHTS_OPP_CHROMA_IMAGE_WIDE;
+    n->fill_color = DT_HIGHLIGHTS_FILL_COLOR_OPPOSED;
 
     *new_params = n;
     *new_params_size = sizeof(dt_iop_highlights_params_t);
-    *new_version = 7;
+    *new_version = 8;
     return 0;
   }
 
@@ -626,11 +655,12 @@ void tiling_callback(dt_iop_module_t *self,
       // the labeler frees its labels and queue before allocating per-region offsets
       tiling->overhead += MAX(label_bytes, offset_bytes);
     }
-    if(filters && d->fill != DT_HIGHLIGHTS_FILL_OFF)
+    if(filters && (d->fill != DT_HIGHLIGHTS_FILL_OFF || d->fill_color != DT_HIGHLIGHTS_FILL_COLOR_OPPOSED))
     {
-      // reserve whole-grid solver memory even though opposed cannot tile
+      // reserve whole-grid solver memory even though opposed cannot tile; the cell means of the
+      // fill and the color step add three floats per cell
       const float cell_area = is_xtrans ? 9.0f : 4.0f;
-      tiling->factor += 1.0f + 224.0f / (sizeof(float) * cell_area);
+      tiling->factor += 1.0f + (224.0f + 3.0f * sizeof(float)) / (sizeof(float) * cell_area);
       tiling->maxbuf = fmaxf(tiling->maxbuf, 7.0f * sizeof(double) / (sizeof(float) * cell_area));
     }
     return;
@@ -1221,6 +1251,7 @@ void commit_params(dt_iop_module_t *self,
   const gboolean experiments_changed = d->opp_passes > 0
                                        || d->opp_cbrt
                                        || d->opp_local == DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION
+                                       || d->fill_color != DT_HIGHLIGHTS_FILL_COLOR_OPPOSED
                                        || d->fill != DT_HIGHLIGHTS_FILL_OFF;
 
   piece->process_cl_ready = !(use_opposed && experiments_changed)
@@ -1412,15 +1443,18 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   gtk_widget_set_visible(g->opp_passes, use_opposed);
   gtk_widget_set_visible(g->opp_iterate, use_opposed && p->opp_passes > 0);
   gtk_widget_set_visible(g->opp_cbrt, use_opposed);
+  // the color of fully clipped regions shares their selection and the rise limit with the fill
+  const gboolean use_color = use_opposed && p->fill_color != DT_HIGHLIGHTS_FILL_COLOR_OPPOSED;
   gtk_widget_set_visible(g->opp_local, use_opposed);
+  gtk_widget_set_visible(g->fill_color, use_opposed);
   gtk_widget_set_visible(g->fill, use_opposed);
   gtk_widget_set_visible(g->fill_log, use_fill);
-  gtk_widget_set_visible(g->fill_max_rise, use_fill);
+  gtk_widget_set_visible(g->fill_max_rise, use_fill || use_color);
   gtk_widget_set_visible(g->fill_cap, use_fill);
-  gtk_widget_set_visible(g->fill_occluder, use_fill);
-  gtk_widget_set_visible(g->fill_specks, use_fill);
+  gtk_widget_set_visible(g->fill_occluder, use_fill || (use_opposed && p->fill_color == DT_HIGHLIGHTS_FILL_COLOR_RIM));
+  gtk_widget_set_visible(g->fill_specks, use_fill || use_color);
   gtk_widget_set_visible(g->fill_round, use_distance_fill);
-  gtk_widget_set_visible(g->fill_threshold, use_fill);
+  gtk_widget_set_visible(g->fill_threshold, use_fill || use_color);
   gtk_widget_set_visible(g->fill_partial, use_fill);
   gtk_widget_set_visible(g->fill_strength, use_slope_fill);
 
@@ -1620,6 +1654,10 @@ void gui_init(dt_iop_module_t *self)
 
   g->opp_local = dt_bauhaus_combobox_from_params(self, "opp_local");
   gtk_widget_set_tooltip_text(g->opp_local, _("measure the chroma offset around each clipped region instead of over the whole image"));
+
+  g->fill_color = dt_bauhaus_combobox_from_params(self, "fill_color");
+  gtk_widget_set_tooltip_text(g->fill_color, _("color of fully clipped regions: opposed's estimate, neutral white,\n"
+                                               "or the color of the region's rim carried inward"));
 
   g->fill = dt_bauhaus_combobox_from_params(self, "fill");
   gtk_widget_set_tooltip_text(g->fill, _("choose a brightness fill for clipped cells"));

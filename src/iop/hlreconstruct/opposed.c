@@ -432,7 +432,9 @@ static float *_process_opposed(dt_iop_module_t *self,
   const gboolean cbrt_space = experiments && d->opp_cbrt;
   const gboolean local_chroma = experiments && filters != 0
                                 && d->opp_local == DT_HIGHLIGHTS_OPP_CHROMA_PER_REGION;
-  const gboolean fill_active = experiments && d->fill != DT_HIGHLIGHTS_FILL_OFF;
+  const gboolean fill_active = experiments
+                               && (d->fill != DT_HIGHLIGHTS_FILL_OFF
+                                   || d->fill_color != DT_HIGHLIGHTS_FILL_COLOR_OPPOSED);
 
   const dt_hash_t opphash = _opposed_hash(piece);
   const gboolean fullpipe = dt_pipe_is_full(piece->pipe);

@@ -946,41 +946,175 @@ static void _opposed_fill_region(const float *cell_y,
   dt_free_align(free_cells);
 }
 
-static gboolean _opposed_fill(const float *input,
-                              float *output,
-                              const size_t width,
-                              const size_t height,
-                              const uint32_t filters,
-                              const uint8_t(*const xtrans)[6],
-                              const dt_aligned_pixel_t clips,
-                              const dt_iop_highlights_data_t *d)
+/* chromaticity of a cell: the channels relative to the largest one, so white is (1, 1, 1). This
+   is the white-balanced space highlight reconstruction works in, not opposed's D65-corrected
+   reference space: with the scene-referred defaults the data is as-shot balanced and color
+   calibration adapts from the as-shot illuminant, so equal channels here render neutral, while
+   D65-neutral cells came out light blue under a warm as-shot illuminant */
+static inline void _opposed_fill_chroma(const float *rgb, float *chroma)
 {
-  if(filters == 0 || d->fill == DT_HIGHLIGHTS_FILL_OFF
-     || d->fill < DT_HIGHLIGHTS_FILL_FLAT || d->fill > DT_HIGHLIGHTS_FILL_DISTANCE)
-    return FALSE;
+  const float v[3] = { fmaxf(rgb[0], 0.0f), fmaxf(rgb[1], 0.0f), fmaxf(rgb[2], 0.0f) };
+  const float largest = fmaxf(v[0], fmaxf(v[1], v[2]));
+  for(int c = 0; c < 3; c++) chroma[c] = largest > 0.0f ? v[c] / largest : 1.0f;
+}
 
-  const double start = dt_get_wtime();
-  const size_t cell_width = filters == 9u ? 3 : 2;
-  const size_t cells_w = width / cell_width;
-  const size_t cells_h = height / cell_width;
-  const size_t count = cells_w * cells_h;
-  if(count == 0 || count > INT_MAX) return FALSE;
+/* gives the cells of one fully clipped region a new chromaticity: neutral for "white", or for
+   "from rim" each channel's share solved inward from the cells around the region (Laplace, as the
+   flat lift). Clipped values are lower bounds, so a cell gets the smallest brightness at which
+   the new chromaticity keeps every channel at or above its current value, limited to "max rise"
+   above its largest channel; channels that would need more keep their value. */
+static void _opposed_fill_color_region(const float *cell_rgb,
+                                       const float *cell_y,
+                                       const uint8_t *flags,
+                                       float *output,
+                                       const size_t grid_width,
+                                       const size_t photosite_width,
+                                       const size_t cell_size,
+                                       const size_t grid_height,
+                                       const uint32_t filters,
+                                       const uint8_t(*const xtrans)[6],
+                                       const int *queue,
+                                       const size_t area,
+                                       const size_t xmin,
+                                       const size_t ymin,
+                                       const size_t xmax,
+                                       const size_t ymax,
+                                       const dt_iop_highlights_data_t *d,
+                                       _opposed_fill_stats_t *stats)
+{
+  const size_t x0 = xmin > 2 ? xmin - 2 : 0;
+  const size_t y0 = ymin > 2 ? ymin - 2 : 0;
+  const size_t x1 = MIN(grid_width, xmax + 3);
+  const size_t y1 = MIN(grid_height, ymax + 3);
+  const size_t width = x1 - x0;
+  const size_t height = y1 - y0;
+  const size_t count = width * height;
+  const float max_rise = CLAMP(d->fill_max_rise, 0.0f, 4.0f);
 
-  const float prototype_scale = (float)MAX(width, height) / 1600.0f;
-  const float cell_pixels = cell_width / fmaxf(prototype_scale, 1.0e-6f);
-  const float threshold = CLAMP(d->fill_threshold, 0.05f, 1.0f);
-  float *cell_y = dt_alloc_align_float(count);
-  uint8_t *flags = dt_calloc_aligned(count);
-  int *queue = dt_alloc_align_int(count);
-  if(!cell_y || !flags || !queue)
+  // per crop cell and channel the chromaticity to give the region (the region's cells) or to
+  // solve from (the cells around it)
+  float *chroma = dt_alloc_align_float(3 * count);
+  if(!chroma)
   {
-    dt_free_align(cell_y);
-    dt_free_align(flags);
-    dt_free_align(queue);
-    dt_print(DT_DEBUG_ALWAYS, "highlights opposed fill skipped: could not allocate cell data");
-    return FALSE;
+    dt_print(DT_DEBUG_ALWAYS,
+             "highlights opposed color region unchanged: %zu cells, could not allocate crop data", area);
+    return;
+  }
+  for(size_t i = 0; i < 3 * count; i++) chroma[i] = 1.0f;
+
+  if(d->fill_color == DT_HIGHLIGHTS_FILL_COLOR_RIM)
+  {
+    float *values = dt_alloc_align_float(count);
+    float *solution = dt_alloc_align_float(count);
+    uint8_t *region = dt_calloc_aligned(count);
+    uint8_t *free_cells = dt_calloc_aligned(count);
+    gboolean solved = values && solution && region && free_cells;
+    if(solved)
+    {
+      for(size_t j = 0; j < area; j++)
+      {
+        const size_t global = (size_t)queue[j];
+        region[(global / grid_width - y0) * width + global % grid_width - x0] = 1;
+        values[j] = cell_y[global];
+      }
+      // dark cells around the region (leaves, roofs against a clipped sky) do not set its color:
+      // as for the dome they are free, so the color is carried from the bright part of the rim
+      const float dark = CLAMP(d->fill_occluder, 0.0f, 1.0f) * _opposed_fill_median(values, area);
+      for(size_t index = 0; index < count; index++)
+        if(!region[index] && cell_y[(y0 + index / width) * grid_width + x0 + index % width] < dark)
+          free_cells[index] = 1;
+      // a fixed cell carries the mean chromaticity of the unselected cells in its 3x3
+      // neighborhood: one noisy or clipped rim cell would otherwise set the color of the
+      // region's edge on its own
+      for(size_t index = 0; index < count; index++)
+      {
+        if(region[index]) continue;
+        const size_t row = y0 + index / width;
+        const size_t col = x0 + index % width;
+        float sum[3] = { 0.0f, 0.0f, 0.0f };
+        int n = 0;
+        for(size_t r = row > 0 ? row - 1 : 0; r <= MIN(row + 1, grid_height - 1); r++)
+          for(size_t c = col > 0 ? col - 1 : 0; c <= MIN(col + 1, grid_width - 1); c++)
+          {
+            const size_t cell = r * grid_width + c;
+            if((flags[cell] & OPPOSED_FILL_SELECTED) || cell_y[cell] < dark) continue;
+            float k[3];
+            _opposed_fill_chroma(cell_rgb + 3 * cell, k);
+            for(int ch = 0; ch < 3; ch++) sum[ch] += k[ch];
+            n++;
+          }
+        for(int ch = 0; ch < 3; ch++) chroma[3 * index + ch] = n ? sum[ch] / n : 1.0f;
+      }
+      for(int ch = 0; ch < 3 && solved; ch++)
+      {
+        for(size_t index = 0; index < count; index++) values[index] = chroma[3 * index + ch];
+        double relative_residual = INFINITY;
+        solved = _opposed_fill_solve_level(width, height, 1, 0.0f, values, region, free_cells,
+                                           solution, stats, &relative_residual);
+        if(solved)
+          for(size_t index = 0; index < count; index++)
+            if(region[index]) chroma[3 * index + ch] = solution[index];
+      }
+    }
+    if(!solved)
+    {
+      dt_print(DT_DEBUG_ALWAYS,
+               "highlights opposed color region: %zu cells, rim color not solved, using white", area);
+      for(size_t i = 0; i < 3 * count; i++) chroma[i] = 1.0f;
+    }
+    dt_free_align(values);
+    dt_free_align(solution);
+    dt_free_align(region);
+    dt_free_align(free_cells);
   }
 
+  const float rise = exp2f(max_rise);
+  DT_OMP_FOR(if(area > 4096))
+  for(size_t j = 0; j < area; j++)
+  {
+    const size_t global = (size_t)queue[j];
+    const size_t row = global / grid_width;
+    const size_t col = global % grid_width;
+    const float *k = chroma + 3 * ((row - y0) * width + col - x0);
+    const float *m = cell_rgb + 3 * global;
+    float needed = 0.0f;
+    float largest = 0.0f;
+    for(int c = 0; c < 3; c++)
+    {
+      const float v = fmaxf(m[c], 0.0f);
+      needed = fmaxf(needed, v / fmaxf(k[c], 0.02f));
+      largest = fmaxf(largest, v);
+    }
+    const float level = fminf(needed, largest * rise);
+    float gain[3];
+    for(int c = 0; c < 3; c++)
+      gain[c] = m[c] > 0.0f ? fmaxf(1.0f, level * fmaxf(k[c], 0.02f) / m[c]) : 1.0f;
+    for(size_t dy = 0; dy < cell_size; dy++)
+      for(size_t dx = 0; dx < cell_size; dx++)
+      {
+        const size_t py = row * cell_size + dy;
+        const size_t px = col * cell_size + dx;
+        output[py * photosite_width + px] *= gain[fcol((int)py, (int)px, filters, xtrans)];
+      }
+  }
+  dt_free_align(chroma);
+}
+
+// cell means and luminance of the reconstructed mosaic, and with flags its fully clipped and clipped cells
+static void _opposed_fill_cells(const float *input,
+                                const float *output,
+                                const size_t width,
+                                const size_t cells_w,
+                                const size_t count,
+                                const size_t cell_width,
+                                const uint32_t filters,
+                                const uint8_t(*const xtrans)[6],
+                                const dt_aligned_pixel_t clips,
+                                const float threshold,
+                                float *cell_rgb,
+                                float *cell_y,
+                                uint8_t *flags)
+{
   // rec2020 weights only approximate luminance in white-balanced camera rgb
   DT_OMP_FOR()
   for(size_t cell = 0; cell < count; cell++)
@@ -1001,27 +1135,68 @@ static gboolean _opposed_fill(const float *input,
         samples[color]++;
         clipped[color] += input[index] >= clips[color];
       }
-    gboolean full = TRUE;
-    gboolean any = FALSE;
-    for(int color = 0; color < 3; color++)
+    if(flags)
     {
-      const gboolean channel_clipped = samples[color] > 0
-                                       && (float)clipped[color] / samples[color] >= threshold;
-      full &= channel_clipped;
-      any |= clipped[color] > 0;
+      gboolean full = TRUE;
+      gboolean any = FALSE;
+      for(int color = 0; color < 3; color++)
+      {
+        full &= samples[color] > 0 && (float)clipped[color] / samples[color] >= threshold;
+        any |= clipped[color] > 0;
+      }
+      flags[cell] = (full ? OPPOSED_FILL_SELECTED : 0) | (any ? OPPOSED_FILL_CLIPPED : 0);
     }
-    if(d->fill_partial)
-      flags[cell] &= (uint8_t)~OPPOSED_FILL_SELECTED;
-    if(d->fill_partial ? any : full)
-      flags[cell] |= OPPOSED_FILL_SELECTED;
-    if(any) flags[cell] |= OPPOSED_FILL_CLIPPED;
+    for(int color = 0; color < 3; color++)
+      cell_rgb[3 * cell + color] = samples[color] ? sums[color] / samples[color] : 0.0f;
+    cell_y[cell] = fmaxf(0.2627f * cell_rgb[3 * cell] + 0.6780f * cell_rgb[3 * cell + 1]
+                         + 0.0593f * cell_rgb[3 * cell + 2], 1.0e-6f);
+  }
+}
 
-    const float red = samples[0] ? sums[0] / samples[0] : 0.0f;
-    const float green = samples[1] ? sums[1] / samples[1] : 0.0f;
-    const float blue = samples[2] ? sums[2] / samples[2] : 0.0f;
-    cell_y[cell] = fmaxf(0.2627f * red + 0.6780f * green + 0.0593f * blue, 1.0e-6f);
+static gboolean _opposed_fill(const float *input,
+                              float *output,
+                              const size_t width,
+                              const size_t height,
+                              const uint32_t filters,
+                              const uint8_t(*const xtrans)[6],
+                              const dt_aligned_pixel_t clips,
+                              const dt_iop_highlights_data_t *d)
+{
+  const gboolean do_fill = d->fill >= DT_HIGHLIGHTS_FILL_FLAT && d->fill <= DT_HIGHLIGHTS_FILL_DISTANCE;
+  const gboolean do_color = d->fill_color == DT_HIGHLIGHTS_FILL_COLOR_WHITE
+                            || d->fill_color == DT_HIGHLIGHTS_FILL_COLOR_RIM;
+  if(filters == 0 || (!do_fill && !do_color))
+    return FALSE;
+
+  const double start = dt_get_wtime();
+  const size_t cell_width = filters == 9u ? 3 : 2;
+  const size_t cells_w = width / cell_width;
+  const size_t cells_h = height / cell_width;
+  const size_t count = cells_w * cells_h;
+  if(count == 0 || count > INT_MAX) return FALSE;
+
+  const float prototype_scale = (float)MAX(width, height) / 1600.0f;
+  const float cell_pixels = cell_width / fmaxf(prototype_scale, 1.0e-6f);
+  const float threshold = CLAMP(d->fill_threshold, 0.05f, 1.0f);
+  float *cell_y = dt_alloc_align_float(count);
+  float *cell_rgb = dt_alloc_align_float(3 * count);
+  uint8_t *flags = dt_calloc_aligned(count);
+  int *queue = dt_alloc_align_int(count);
+  if(!cell_y || !cell_rgb || !flags || !queue)
+  {
+    dt_free_align(cell_y);
+    dt_free_align(cell_rgb);
+    dt_free_align(flags);
+    dt_free_align(queue);
+    dt_print(DT_DEBUG_ALWAYS, "highlights opposed fill skipped: could not allocate cell data");
+    return FALSE;
   }
 
+  _opposed_fill_cells(input, output, width, cells_w, count, cell_width, filters, xtrans, clips,
+                      threshold, cell_rgb, cell_y, flags);
+
+  // fully clipped cells, with the enclosed clipped specks merged, are the selection of the color
+  // and, unless partly clipped cells are filled too, of the dome
   if(d->fill_specks > 0)
   {
     _opposed_fill_mark_exterior(flags, cells_w, cells_h, queue);
@@ -1046,25 +1221,55 @@ static gboolean _opposed_fill(const float *input,
   }
 
   _opposed_fill_stats_t stats = { 0 };
-  for(size_t cell = 0; cell < count; cell++)
-    if((flags[cell] & OPPOSED_FILL_SELECTED) && !(flags[cell] & OPPOSED_FILL_VISITED))
-    {
-      size_t xmin, ymin, xmax, ymax;
-      const size_t area = _opposed_fill_flood(flags, cells_w, cells_h, cell,
-                                               OPPOSED_FILL_SELECTED, queue,
-                                               &xmin, &ymin, &xmax, &ymax);
-      stats.regions++;
-      stats.largest_region = MAX(stats.largest_region, area);
-    _opposed_fill_region(cell_y, flags, output, cells_w, width, cell_width, cells_h,
-                           queue, area, xmin, ymin, xmax, ymax,
-                           cell_pixels, d, &stats);
-    }
+  size_t color_regions = 0;
+  if(do_color)
+  {
+    for(size_t cell = 0; cell < count; cell++)
+      if((flags[cell] & OPPOSED_FILL_SELECTED) && !(flags[cell] & OPPOSED_FILL_VISITED))
+      {
+        size_t xmin, ymin, xmax, ymax;
+        const size_t area = _opposed_fill_flood(flags, cells_w, cells_h, cell,
+                                                 OPPOSED_FILL_SELECTED, queue,
+                                                 &xmin, &ymin, &xmax, &ymax);
+        _opposed_fill_color_region(cell_rgb, cell_y, flags, output, cells_w, width, cell_width, cells_h,
+                                   filters, xtrans, queue, area, xmin, ymin, xmax, ymax,
+                                   d, &stats);
+        color_regions++;
+      }
+    for(size_t cell = 0; cell < count; cell++)
+      flags[cell] &= (uint8_t)~OPPOSED_FILL_VISITED;
+    // the dome measures and scales the recolored cells
+    _opposed_fill_cells(input, output, width, cells_w, count, cell_width, filters, xtrans, clips,
+                        threshold, cell_rgb, cell_y, NULL);
+  }
+
+  if(do_fill)
+  {
+    if(d->fill_partial)
+      for(size_t cell = 0; cell < count; cell++)
+        if(flags[cell] & OPPOSED_FILL_CLIPPED) flags[cell] |= OPPOSED_FILL_SELECTED;
+
+    for(size_t cell = 0; cell < count; cell++)
+      if((flags[cell] & OPPOSED_FILL_SELECTED) && !(flags[cell] & OPPOSED_FILL_VISITED))
+      {
+        size_t xmin, ymin, xmax, ymax;
+        const size_t area = _opposed_fill_flood(flags, cells_w, cells_h, cell,
+                                                 OPPOSED_FILL_SELECTED, queue,
+                                                 &xmin, &ymin, &xmax, &ymax);
+        stats.regions++;
+        stats.largest_region = MAX(stats.largest_region, area);
+        _opposed_fill_region(cell_y, flags, output, cells_w, width, cell_width, cells_h,
+                             queue, area, xmin, ymin, xmax, ymax,
+                             cell_pixels, d, &stats);
+      }
+  }
 
   dt_print(DT_DEBUG_PERF,
-           "highlights opposed fill: %zu regions, %zu solved, largest %zu cells, %zu solver iterations (max %zu), residual %.3g, solve %.3f s, total %.3f s",
-           stats.regions, stats.solved_regions, stats.largest_region, stats.iterations,
+           "highlights opposed fill: %zu color regions, %zu regions, %zu solved, largest %zu cells, %zu solver iterations (max %zu), residual %.3g, solve %.3f s, total %.3f s",
+           color_regions, stats.regions, stats.solved_regions, stats.largest_region, stats.iterations,
            stats.max_iterations, stats.max_relative_residual, stats.solver_time, dt_get_wtime() - start);
   dt_free_align(cell_y);
+  dt_free_align(cell_rgb);
   dt_free_align(flags);
   dt_free_align(queue);
   return TRUE;
