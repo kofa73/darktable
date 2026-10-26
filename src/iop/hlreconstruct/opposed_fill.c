@@ -853,8 +853,15 @@ static void _opposed_fill_region(const float *cell_y,
   }
   if(solved && d->fill == DT_HIGHLIGHTS_FILL_DISTANCE && slope > 0.0f && limit > 0.0f)
   {
+    // the dome rises with the distance from the bright rim only: dark occluders in front of a
+    // clipped area (free cells) would otherwise pull the dome down around them, a dark halo.
+    // Without any bright rim cell every cell outside the region counts.
+    gboolean bright_rim = FALSE;
+    for(size_t index = 0; index < count && !bright_rim; index++)
+      bright_rim = !region[index] && !free_cells[index];
     for(size_t index = 0; index < count; index++)
-      distance[index] = region[index] ? DT_DISTANCE_TRANSFORM_MAX : 0.0f;
+      distance[index] = region[index] || (bright_rim && free_cells[index]) ? DT_DISTANCE_TRANSFORM_MAX
+                                                                          : 0.0f;
     const float max_distance = dt_image_distance_transform(NULL, distance, width, height,
                                                             1.0f, DT_DISTANCE_TRANSFORM_NONE)
                                * cell_pixels;
