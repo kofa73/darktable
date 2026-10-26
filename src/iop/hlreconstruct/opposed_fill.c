@@ -702,82 +702,8 @@ static size_t _opposed_fill_collect_ring(const size_t width,
   return count;
 }
 
-/* how far a region's surroundings glow: the median luminance of the cells about 8 prototype
-   pixels out divided by that of the cells at the rim, both capped at the luminance of a cell
-   clipped in every channel: reconstructed partly clipped values above it would otherwise make
-   the rim look brighter than its glow. A lamp's glow stays near the clip level
-   for many pixels (Laneway's lamp 0.94), a window, sign or lightbox drops to its dark frame
-   within a few (0.15-0.54); the dome's own rings, 1.5 and 3.5 px out, see both alike.
-   Returns 1 when either ring has too few cells to tell. */
-static float _opposed_fill_glow(const float *cell_y,
-                                const uint8_t *flags,
-                                const size_t grid_width,
-                                const size_t grid_height,
-                                const int *queue,
-                                const size_t area,
-                                const size_t xmin,
-                                const size_t ymin,
-                                const size_t xmax,
-                                const size_t ymax,
-                                const float cell_pixels,
-                                const float cap)
-{
-  const float far_min = 4.0f, far_max = 8.0f;
-  const float near_max = fmaxf(1.5f, cell_pixels);
-  const size_t margin = (size_t)ceilf(far_max / cell_pixels) + 1;
-  const size_t x0 = xmin > margin ? xmin - margin : 0;
-  const size_t y0 = ymin > margin ? ymin - margin : 0;
-  const size_t x1 = MIN(grid_width, xmax + margin + 1);
-  const size_t y1 = MIN(grid_height, ymax + margin + 1);
-  const size_t width = x1 - x0;
-  const size_t height = y1 - y0;
-  const size_t count = width * height;
-  float *distance = dt_alloc_align_float(count);
-  float *near = dt_alloc_align_float(count);
-  float *far = dt_alloc_align_float(count);
-  if(!distance || !near || !far)
-  {
-    dt_free_align(distance);
-    dt_free_align(near);
-    dt_free_align(far);
-    return 1.0f;
-  }
-  for(size_t index = 0; index < count; index++) distance[index] = DT_DISTANCE_TRANSFORM_MAX;
-  for(size_t j = 0; j < area; j++)
-  {
-    const size_t global = (size_t)queue[j];
-    distance[(global / grid_width - y0) * width + global % grid_width - x0] = 0.0f;
-  }
-  dt_image_distance_transform(NULL, distance, width, height, 1.0f, DT_DISTANCE_TRANSFORM_NONE);
-
-  size_t near_count = 0, far_count = 0;
-  for(size_t index = 0; index < count; index++)
-  {
-    const size_t global = (y0 + index / width) * grid_width + x0 + index % width;
-    // the region's own cells and other selected regions are not its surroundings
-    if(distance[index] <= 0.0f || (flags[global] & OPPOSED_FILL_SELECTED)) continue;
-    const float dist = distance[index] * cell_pixels;
-    const float y = fminf(cell_y[global], cap);
-    if(dist <= near_max)
-      near[near_count++] = y;
-    else if(dist > far_min && dist <= far_max)
-      far[far_count++] = y;
-  }
-  float ratio = 1.0f;
-  if(near_count >= 8 && far_count >= 8)
-  {
-    const float near_median = _opposed_fill_median(near, near_count);
-    if(near_median > 0.0f) ratio = _opposed_fill_median(far, far_count) / near_median;
-  }
-  dt_free_align(distance);
-  dt_free_align(near);
-  dt_free_align(far);
-  return ratio;
-}
-
 static void _opposed_fill_region(const float *cell_y,
                                  const float *occluder_y,
-                                 const float clip_y,
                                  const uint8_t *flags,
                                  float *output,
                                  const size_t grid_width,
@@ -894,18 +820,6 @@ static void _opposed_fill_region(const float *cell_y,
       slope = fmaxf((median_ring1 - median_ring2) / 2.0f, 0.0f) * strength;
   }
 
-  // "glow required" scales the dome from none to full over 0.25 of the glow ratio
-  float dome_share = 1.0f;
-  if(slope > 0.0f && d->fill_glow > 0.0f)
-  {
-    const float glow = _opposed_fill_glow(cell_y, flags, grid_width, grid_height, queue, area,
-                                          xmin, ymin, xmax, ymax, cell_pixels, clip_y);
-    dome_share = CLAMP((glow - d->fill_glow) / 0.25f, 0.0f, 1.0f);
-    if(area >= 64)
-      dt_print(DT_DEBUG_PERF, "highlights opposed fill glow: %zu cells at cell (%zu, %zu), ratio %.2f, dome x%.2f",
-               area, xmin, ymin, glow, dome_share);
-  }
-
   float limit = log_luminance ? max_rise * logf(2.0f)
                               : (exp2f(max_rise) - 1.0f) * median_ring1;
   limit = fmaxf(limit, 0.0f);
@@ -917,7 +831,7 @@ static void _opposed_fill_region(const float *cell_y,
     // the cell spacing converts the prototype rim slope to finite-difference source units
     const float poisson = slope * ring1_count / area_cells * cell_pixels * cell_pixels;
     const float cap = 4.0f * limit / (area_cells / 3.14159265358979323846f);
-    source = dome_share * fminf(poisson, cap);
+    source = fminf(poisson, cap);
   }
 
   double relative_residual = INFINITY;
@@ -997,7 +911,7 @@ static void _opposed_fill_region(const float *cell_y,
     DT_OMP_FOR(if(count > 16384))
     for(size_t index = 0; index < count; index++)
       if(region[index])
-        solution[index] += -dome_share * limit * expm1f(-slope * distance[index] / limit);
+        solution[index] += -limit * expm1f(-slope * distance[index] / limit);
   }
 
   if(solved)
@@ -1345,7 +1259,6 @@ static gboolean _opposed_fill(const float *input,
 
   if(do_fill)
   {
-    const float clip_y = 0.2627f * clips[0] + 0.6780f * clips[1] + 0.0593f * clips[2];
     if(d->fill_partial)
       for(size_t cell = 0; cell < count; cell++)
         if(flags[cell] & OPPOSED_FILL_CLIPPED) flags[cell] |= OPPOSED_FILL_SELECTED;
@@ -1359,7 +1272,7 @@ static gboolean _opposed_fill(const float *input,
                                                  &xmin, &ymin, &xmax, &ymax);
         stats.regions++;
         stats.largest_region = MAX(stats.largest_region, area);
-        _opposed_fill_region(cell_y, occluder_y ? occluder_y : cell_y, clip_y, flags, output, cells_w, width,
+        _opposed_fill_region(cell_y, occluder_y ? occluder_y : cell_y, flags, output, cells_w, width,
                              cell_width, cells_h,
                              queue, area, xmin, ymin, xmax, ymax,
                              cell_pixels, d, &stats);
