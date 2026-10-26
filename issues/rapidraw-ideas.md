@@ -62,7 +62,7 @@ Not worth trying: d (demosaic-order artifact) and e (done in issue 30).
 ## Visual comparison with RapidRAW's exports (2026-10-26)
 
 Kofa exported 5 images from RapidRAW (exposure -2 EV, "basic" tone mapper, 16-bit TIFF; the
-`rr/` directories next to the raws). `/tmp/hl-controls/rr/sheet.py` maps the darktable renders
+`rr/` directories next to the raws). `/tmp/hl-controls/rr/sheet.py` (copy in `tools/rapidraw-compare/`) maps the darktable renders
 (issue 31's `c-def` opposed, `c-white`, `c-lrr` = per region + from rim + rim fix + distance dome;
 the truth frame) into the TIFF's linear sRGB scale with per-channel gains fitted on unclipped
 mid-tones (gains equal within 5%), aligns by phase correlation and shows all through RapidRAW's

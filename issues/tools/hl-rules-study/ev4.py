@@ -110,5 +110,15 @@ for t in (25, 50):
 for t in (25,):
     ev2.METHODS['gd-r-ob%d' % t] = ['6', '--wb', '4', '--exp', '10']
     ev2.METHOD_ENV['gd-r-ob%d' % t] = {'DT_GD_MG': '1', 'DT_HL_BLEND': '%.2f' % (t / 100)}
+# issue opposed-two-clipped-ring (30): inpaint opposed from the rebuilt dt-src (upstream master
+# e1e2e26baa plus the switches), baseline and iterated references (DT_OPP_ITER), offsets in
+# cube-root space (DT_OPP_CBRT)
+for name, env in (('opp-b', {}), ('opp-it1', {'DT_OPP_ITER': '1'}), ('opp-it10', {'DT_OPP_ITER': '10'}),
+                  ('opp-cit10', {'DT_OPP_ITER': '10', 'DT_OPP_CBRT': '1'}), ('opp-c', {'DT_OPP_CBRT': '1'}),
+                  # iteration only for red and green with blue measured (DT_OPP_ITER_RG)
+                  ('opp-rg10', {'DT_OPP_ITER': '10', 'DT_OPP_ITER_RG': '1'}),
+                  ('opp-rg2', {'DT_OPP_ITER': '2', 'DT_OPP_ITER_RG': '1'})):
+    ev2.METHODS[name] = ['5']
+    ev2.METHOD_ENV[name] = env
 if __name__ == '__main__':
     ev2.main()

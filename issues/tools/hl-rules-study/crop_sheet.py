@@ -13,7 +13,21 @@ import numpy as np, cv2
 sys.path.insert(0, '/tmp/claude-gd-artefacts/scripts')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ev2
-from lin_eval import to_srgb8
+from lin_eval import to_srgb8 as to_srgb8_clip
+
+# CS_HUEKEEP=1 (issue 29): a pixel over display white is scaled down as a whole by its largest sRGB
+# channel instead of clipping each channel by itself, so that the panels show hue and brightness
+# gradients up to white, not the hue shifts of per-channel clipping (issue 28)
+HUEKEEP = os.environ.get('CS_HUEKEEP') == '1'
+
+
+def to_srgb8(lin):
+    if not HUEKEEP:
+        return to_srgb8_clip(lin)
+    a = np.maximum(np.maximum(lin, 0) @ ev2.TO_SRGB.T, 0)
+    a = a / np.maximum(a.max(-1, keepdims=True), 1)
+    s = np.where(a <= 0.0031308, 12.92 * a, 1.055 * a ** (1 / 2.4) - 0.055)
+    return (s * 255 + 0.5).astype(np.uint8)
 
 CROPS = int(os.environ.get('CS_CROPS', '3'))
 MIN_PX = int(os.environ.get('CS_MIN_PX', '40'))
@@ -21,6 +35,7 @@ H = int(os.environ.get('CS_HEIGHT', '200'))
 # exposures of the method panels, comma list in EV (the truth panel stays at -2 EV)
 EVS = [int(v) for v in os.environ.get('CS_EVS', '0,-2').split(',')]
 METHODS = os.environ.get('SSIM_METHODS', 'opposed,gd-wb4x10').split(',')
+SELECT = os.environ.get('CS_SELECT', 'unrecorded')
 # panel labels: short forms of the GUI names ("continuous border, ... in fully clipped")
 LABEL = {'opposed': 'inpaint opposed', 'gd-wb4x10': 'CB hue fill', 'gd-wb4x11': 'CB white fill',
          'gd-wb4x13': 'measured, edge fill', 'gd-wb4x14': 'CB edge fill', 'gd-dome': 'dome (log)',
@@ -28,7 +43,11 @@ LABEL = {'opposed': 'inpaint opposed', 'gd-wb4x10': 'CB hue fill', 'gd-wb4x11': 
          # reduced resolution ("full resolution" off)
          'gd-r-hold': 'CB hue fill', 'gd-r-wb11': 'CB white fill', 'gd-r-wb14': 'CB edge fill',
          'gd-r-nohold': 'no hold, joint capped', 'gd-r-nohold-wb0': 'no hold, basic',
-         'gd-r-dome': 'dome (log)', 'gd-r-domelin': 'dome (linear)'}
+         'gd-r-dome': 'dome (log)', 'gd-r-domelin': 'dome (linear)',
+         # issue 29: inpaint opposed with a brightness fill of the fully clipped regions; "small":
+         # regions up to 50,000 render pixels only
+         'opp-flat': 'opp. flat lift', 'opp-domelin': 'opp. dome lin', 'opp-domelog': 'opp. dome log',
+         'opp-domelin-s': 'opp. dome lin small', 'opp-domelog-s': 'opp. dome log small'}
 disk = lambda r: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2)
 
 
@@ -49,8 +68,12 @@ def rows(wd):
     Ra = mk[..., 0].astype(np.float32)
     if Ra.max() > 1.5:
         Ra = Ra / np.iinfo(mk.dtype).max
-    clip = np.load(os.path.join(wd, 'masks.npz'))['F'].astype(np.float32).max(2) > 0
-    core = clip & (Ra > 0.02)
+    F = np.load(os.path.join(wd, 'masks.npz'))['F'].astype(np.float32)
+    clip = F.max(2) > 0
+    unrec = clip & (Ra > 0.02)
+    # CS_SELECT=full (issue 29): crop the largest fully clipped regions, recorded by the truth frame
+    # or not, and show the truth panel at every exposure of the method panels
+    core = (F.min(2) >= 0.5) if SELECT == 'full' else unrec
     n, lab, st, _ = cv2.connectedComponentsWithStats(cv2.morphologyEx(core.astype(np.uint8), cv2.MORPH_CLOSE, disk(3)), 8)
     # area of the unrecorded pixels themselves, not of the closed mask
     area = np.bincount(lab[core], minlength=n)
@@ -74,12 +97,13 @@ def rows(wd):
             for m in METHODS:
                 p = cv2.resize(to_srgb8(imgs[m][sl] * 2.0 ** off), size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST)
                 panels.append((p, '%s %+d EV' % (LABEL.get(m, m), off)))
-        t = to_srgb8(T[sl] * 0.25)
-        # the truth's clipped pixels would show the raw clipping's magenta: no data, so flat gray
-        t[core[sl]] = 128
         cs, _ = cv2.findContours((lab[sl] == i).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        cv2.drawContours(t, cs, -1, (0, 255, 0), 1)
-        panels.append((cv2.resize(t, size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST), 'truth frame -2 EV'))
+        for off in (EVS if SELECT == 'full' else [-2]):
+            t = to_srgb8(T[sl] * 2.0 ** off)
+            # the truth's clipped pixels would show the raw clipping's magenta: no data, so flat gray
+            t[unrec[sl]] = 128
+            cv2.drawContours(t, cs, -1, (0, 255, 0), 1)
+            panels.append((cv2.resize(t, size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST), 'truth frame %+d EV' % off))
         row = []
         for p, lbl in panels:
             p = np.concatenate([p, np.full((H - p.shape[0], p.shape[1], 3), 128, np.uint8)])

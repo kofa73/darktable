@@ -15,6 +15,21 @@ first, then the issue file you work on.
 - **Next direction: inpaint opposed's brightness** in fully clipped areas (issue 29, wip): a flat
   lift from the rim and a dome, opposed's hue kept; offline prototype on the existing renders first.
 
+- **Update 2026-10-24 evening (Kofa away; issue 29):** the salvage domes tried on inpaint opposed,
+  offline on its renders. Best: a flat lift plus a distance-based dome (occluder rim pixels free,
+  2 EV soft limit, clipped specks merged): 22 / 7 against opposed at -2 / -3 EV, median deficit of
+  fully clipped pixels 0.20 -> 0.08 EV; the gains are on clouds and glare, not on lamps, whose
+  partly clipped ring is already too dark. It brightens opposed's wrong sky hues too (beige, lilac).
+  On top of local chroma offsets it scores 35 / 9 but the skies turn pink-magenta. Decision for
+  Kofa at the end of `opposed-brightness.md`.
+
+- **Update 2026-10-25 (Kofa chose option (c), issue 30):** opposed's dark ring on warm lights comes
+  from two clipped channels clamping each other's reference; iterating the references where red
+  and green clip and blue is measured fixes it (4 / 1 against opposed, no tint) and lets issue 29's
+  dome reach the lamps: together 27 / 7. Experiment copy and build `/tmp/hl-rules-study/dt-src`,
+  `dt-build` (switches `DT_OPP_ITER`, `DT_OPP_ITER_RG`, `DT_OPP_CBRT`). Decision for Kofa at the end
+  of `opposed-two-clipped-ring.md`.
+
 Sections 1-5 below describe the gradient domain work as it was; they are kept for reference.
 
 ## 1. State in one paragraph
