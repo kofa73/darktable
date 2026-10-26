@@ -703,6 +703,7 @@ static size_t _opposed_fill_collect_ring(const size_t width,
 }
 
 static void _opposed_fill_region(const float *cell_y,
+                                 const float *occluder_y,
                                  const uint8_t *flags,
                                  float *output,
                                  const size_t grid_width,
@@ -760,7 +761,7 @@ static void _opposed_fill_region(const float *cell_y,
     const size_t row = global / grid_width;
     const size_t col = global % grid_width;
     region[(row - y0) * width + col - x0] = 1;
-    solution[j] = cell_y[global];
+    solution[j] = occluder_y[global];
   }
   const float median_y = _opposed_fill_median(solution, area);
   for(size_t index = 0; index < count; index++)
@@ -1182,8 +1183,13 @@ static gboolean _opposed_fill(const float *input,
   float *cell_rgb = dt_alloc_align_float(3 * count);
   uint8_t *flags = dt_calloc_aligned(count);
   int *queue = dt_alloc_align_int(count);
-  if(!cell_y || !cell_rgb || !flags || !queue)
+  // the color step raises the region's cells (up to "max rise" for a warm rim), so the dome's
+  // occluder threshold, relative to the region's median, would free the bright ring around a
+  // recolored lamp and leave no rim slope: the threshold uses the luminance before the color step
+  float *occluder_y = do_color && do_fill ? dt_alloc_align_float(count) : NULL;
+  if(!cell_y || !cell_rgb || !flags || !queue || (do_color && do_fill && !occluder_y))
   {
+    dt_free_align(occluder_y);
     dt_free_align(cell_y);
     dt_free_align(cell_rgb);
     dt_free_align(flags);
@@ -1238,6 +1244,7 @@ static gboolean _opposed_fill(const float *input,
       }
     for(size_t cell = 0; cell < count; cell++)
       flags[cell] &= (uint8_t)~OPPOSED_FILL_VISITED;
+    if(occluder_y) memcpy(occluder_y, cell_y, count * sizeof(float));
     // the dome measures and scales the recolored cells
     _opposed_fill_cells(input, output, width, cells_w, count, cell_width, filters, xtrans, clips,
                         threshold, cell_rgb, cell_y, NULL);
@@ -1258,7 +1265,8 @@ static gboolean _opposed_fill(const float *input,
                                                  &xmin, &ymin, &xmax, &ymax);
         stats.regions++;
         stats.largest_region = MAX(stats.largest_region, area);
-        _opposed_fill_region(cell_y, flags, output, cells_w, width, cell_width, cells_h,
+        _opposed_fill_region(cell_y, occluder_y ? occluder_y : cell_y, flags, output, cells_w, width,
+                             cell_width, cells_h,
                              queue, area, xmin, ymin, xmax, ymax,
                              cell_pixels, d, &stats);
       }
@@ -1268,6 +1276,7 @@ static gboolean _opposed_fill(const float *input,
            "highlights opposed fill: %zu color regions, %zu regions, %zu solved, largest %zu cells, %zu solver iterations (max %zu), residual %.3g, solve %.3f s, total %.3f s",
            color_regions, stats.regions, stats.solved_regions, stats.largest_region, stats.iterations,
            stats.max_iterations, stats.max_relative_residual, stats.solver_time, dt_get_wtime() - start);
+  dt_free_align(occluder_y);
   dt_free_align(cell_y);
   dt_free_align(cell_rgb);
   dt_free_align(flags);
