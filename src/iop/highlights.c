@@ -47,7 +47,7 @@
 #define DS_FACTOR 4
 #define MAX_NUM_SCALES 12
 
-DT_MODULE_INTROSPECTION(8, dt_iop_highlights_params_t)
+DT_MODULE_INTROSPECTION(9, dt_iop_highlights_params_t)
 
 /* As some of the internal algorithms use a smaller value for clipping than given by the UI
    the visualizing is wrong for those algos. It seems to be a a minor issue but sometimes significant.
@@ -169,6 +169,7 @@ typedef struct dt_iop_highlights_params_t
   float fill_strength;                // $MIN: 0.0 $MAX: 4.0 $DEFAULT: 1.0 $DESCRIPTION: "dome strength"
   dt_iop_highlights_opp_chroma_t opp_local; // $DEFAULT: DT_HIGHLIGHTS_OPP_CHROMA_IMAGE_WIDE $DESCRIPTION: "chroma offset"
   dt_iop_highlights_fill_color_t fill_color; // $DEFAULT: DT_HIGHLIGHTS_FILL_COLOR_OPPOSED $DESCRIPTION: "fully clipped color"
+  float fill_glow;                    // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.6 $DESCRIPTION: "glow required"
 } dt_iop_highlights_params_t;
 
 typedef struct dt_iop_highlights_gui_data_t
@@ -199,6 +200,7 @@ typedef struct dt_iop_highlights_gui_data_t
   GtkWidget *fill_threshold;
   GtkWidget *fill_partial;
   GtkWidget *fill_strength;
+  GtkWidget *fill_glow;
   dt_highlights_mask_t hlr_mask_mode;
   dt_aligned_pixel_t oppchroma;
   gboolean oppclipped;
@@ -341,6 +343,12 @@ int legacy_params(dt_iop_module_t *self,
     dt_iop_highlights_params_v6_t v6;
     dt_iop_highlights_opp_chroma_t opp_local;
   } dt_iop_highlights_params_v7_t;
+
+  typedef struct dt_iop_highlights_params_v8_t
+  {
+    dt_iop_highlights_params_v7_t v7;
+    dt_iop_highlights_fill_color_t fill_color;
+  } dt_iop_highlights_params_v8_t;
 
   if(old_version == 1)
   {
@@ -489,15 +497,30 @@ int legacy_params(dt_iop_module_t *self,
   if(old_version == 7)
   {
     const dt_iop_highlights_params_v7_t *o = (dt_iop_highlights_params_v7_t *)old_params;
+    dt_iop_highlights_params_v8_t *n = calloc(1, sizeof(dt_iop_highlights_params_v8_t));
+    if(!n) return 1;
+
+    n->v7 = *o;
+    n->fill_color = DT_HIGHLIGHTS_FILL_COLOR_OPPOSED;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_highlights_params_v8_t);
+    *new_version = 8;
+    return 0;
+  }
+  if(old_version == 8)
+  {
+    const dt_iop_highlights_params_v8_t *o = (dt_iop_highlights_params_v8_t *)old_params;
     dt_iop_highlights_params_t *n = calloc(1, sizeof(dt_iop_highlights_params_t));
     if(!n) return 1;
 
     memcpy(n, o, sizeof(*o));
-    n->fill_color = DT_HIGHLIGHTS_FILL_COLOR_OPPOSED;
+    // older edits keep their domes: no glow test
+    n->fill_glow = 0.0f;
 
     *new_params = n;
     *new_params_size = sizeof(dt_iop_highlights_params_t);
-    *new_version = 8;
+    *new_version = 9;
     return 0;
   }
 
@@ -1457,6 +1480,7 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   gtk_widget_set_visible(g->fill_threshold, use_fill || use_color);
   gtk_widget_set_visible(g->fill_partial, use_fill);
   gtk_widget_set_visible(g->fill_strength, use_slope_fill);
+  gtk_widget_set_visible(g->fill_glow, use_slope_fill);
 
   // The special case for strength button active needs further care here
   if((use_segmentation && (p->recovery == DT_RECOVERY_MODE_OFF)) && (g->hlr_mask_mode == DT_HIGHLIGHTS_MASK_STRENGTH))
@@ -1697,6 +1721,13 @@ void gui_init(dt_iop_module_t *self)
   g->fill_strength = dt_bauhaus_slider_from_params(self, "fill_strength");
   dt_bauhaus_slider_set_digits(g->fill_strength, 1);
   gtk_widget_set_tooltip_text(g->fill_strength, _("scale the measured rim slope for poisson and distance domes"));
+
+  g->fill_glow = dt_bauhaus_slider_from_params(self, "fill_glow");
+  dt_bauhaus_slider_set_digits(g->fill_glow, 2);
+  gtk_widget_set_tooltip_text(g->fill_glow, _("dome only regions whose surroundings glow: the rim brightness about 8 px out\n"
+                                              "(at 1600 px width) relative to the rim itself must exceed this value,\n"
+                                              "full dome 0.25 above it; flat lights such as windows and signs drop faster.\n"
+                                              "0 turns the test off"));
 
   GtkWidget *notapplicable = dt_ui_label_new(_("not applicable"));
   gtk_widget_set_tooltip_text(notapplicable, _("this module does not work with monochrome RAW files"));
