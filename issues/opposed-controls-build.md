@@ -161,3 +161,12 @@ color step; distance dome not yet tried in the GUI.
   8047d90229 (threshold from the luminance before the color step); settings without a color step
   render identically. Laneway with the fix: strength 1 a mild lift, strength 4 / max rise 4 a bright
   warm-yellow core (`/tmp/hl-controls/rr/dome/fix-variants.jpg`). The edge line remains.
+- `_16` (fix in place, strength 4 / max rise 4): bright warm lamp core, but the round sign, the
+  lightbox and the left backlit window get domes too (blobs; dark blur around the window's backlit
+  objects). Glow profile outside the clipped areas (`/tmp/hl-controls/rr/profile/profile.py`,
+  2x2 quads ~ 1 px at 1600 px): the lamp stays near clip level to ~16 px, window / sign /
+  lightbox / wall drop to half within 2-8 px; the dome's rings (1.5, 3.5 px) cannot tell them apart.
+  Proposed: a glow test per region (ring at 8 px / ring at 1 px, ramp 0.6-0.85); Kofa: not yet.
+- Halo fix (Kofa chose to keep it): dome distance from bright rim cells only (free occluder cells
+  skipped). Small effect on the window (mean +0.5 levels): only 33 of 316 adjacent cells are dark,
+  the objects' blurred edges still count as rim.
