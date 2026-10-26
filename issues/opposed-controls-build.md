@@ -170,3 +170,10 @@ color step; distance dome not yet tried in the GUI.
 - Halo fix (Kofa chose to keep it): dome distance from bright rim cells only (free occluder cells
   skipped). Small effect on the window (mean +0.5 levels): only 33 of 316 adjacent cells are dark,
   the objects' blurred edges still count as rim.
+- "Glow required" (params v9, default 0.6, v8 edits load with 0 = off; committed with the code):
+  rim luminance 4-8 px out / at the rim, capped at a fully clipped cell's luminance (with the
+  region's own median as cap the lamp read 0.69). Laneway with `_17` settings + 0.6: lamp 1.00
+  (full dome, unchanged), light on the right 0.81 (x0.82), window 0.55, lit background wall 0.23,
+  others 0.12-0.27 (no dome); window and background wall come out flat
+  (`/tmp/hl-controls/rr/dome/glow-lamp-window.jpg`, `glow-right.jpg`). Old settings render
+  identically. Note: darktable-cli does not overwrite an existing output file (writes `_01`).
