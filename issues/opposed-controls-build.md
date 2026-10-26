@@ -177,3 +177,8 @@ color step; distance dome not yet tried in the GUI.
   others 0.12-0.27 (no dome); window and background wall come out flat
   (`/tmp/hl-controls/rr/dome/glow-lamp-window.jpg`, `glow-right.jpg`). Old settings render
   identically. Note: darktable-cli does not overwrite an existing output file (writes `_01`).
+- g005 test (Kofa, exports `P1060152_02`-`_05`): the glow test cuts domes already at 0.05. Ratios
+  there: M sign 0.03, lightboxes 0.09 / 0.16, neon text 0.09-0.17, street lamp 0.37, headlights
+  0.44 / 0.54; the order is right but the scale differs from Laneway (lamp 1.00, flat window 0.55),
+  so no single threshold works. Reverted (c01fa90c5e), params back to version 8; edits saved with
+  the v9 build do not load the highlights module in this build.
