@@ -1,4 +1,4 @@
-# Handoff (2026-10-24, updated 14:50 UTC)
+# Handoff (2026-10-24, updated 2026-10-26 evening)
 
 State of the highlight reconstruction work after the sessions of 2026-10-23/24, for the next
 session. The issue files in this directory hold the details and results; this file says where
@@ -29,6 +29,31 @@ first, then the issue file you work on.
   dome reach the lamps: together 27 / 7. Experiment copy and build `/tmp/hl-rules-study/dt-src`,
   `dt-build` (switches `DT_OPP_ITER`, `DT_OPP_ITER_RG`, `DT_OPP_CBRT`). Decision for Kofa at the end
   of `opposed-two-clipped-ring.md`.
+
+- **Update 2026-10-26 evening: where things stand now.** Work is on branch `opposed-controls`
+  (from `hl-research`), everything committed (last: `ded18e0122`), nothing pushed. It is an
+  experiment build of inpaint opposed with GUI controls (issue 31, wip; Kofa builds and tests it
+  himself; my build of the same tree: `/tmp/hl-controls/build`, `cmake --build . -j 12`). Params
+  version 8. Commits since 2026-10-25: `8047d90229` (dome occluder threshold from the luminance
+  before the color step: "from rim" had frozen the dome), `28d108271e` (dome distance from bright
+  rim cells only, small effect), `b7b7b0c3ce` "glow required" (params v9) reverted in `c01fa90c5e`
+  (no single threshold works across images; v9 edits do not load in this build).
+  - Kofa's Laneway GUI test (exports `_04`-`_17` in `/tmp/gradient-domain-eval/iain/darktable_exported/`,
+    settings decoded with exiftool, notes at the end of `opposed-controls-build.md`): best so far
+    11 reference passes (warm lights), cube-root offset + per-region chroma (only together), fully
+    clipped color "from rim", distance dome strength 4 / max rise 4, merge specks 0. Open on
+    Laneway: a faint lavender line along the recolored core's edge; the lit background wall is a
+    blob with the dome and dirty gray without it (truth: much brighter, peak at a spotlight on its
+    side); flat lights (window, sign, lightbox) should not be domed.
+  - Issue 32 (pending): RapidRAW's variant (`/workspace/RapidRAW`) compared visually; its
+    headroom chroma fade and half-strength rim color are the ideas worth trying.
+  - Issue 33 (pending): early literature (`/tmp/hl-article/early/`); recommended next: Xu et al.'s
+    transition band between 1/2/3-channel clipped pixels (for the edge line), then their
+    free-center 2D Gaussian fit for fully clipped brightness (for the wall and lamps). Waiting for
+    Kofa's choice.
+  - Untested so far: these settings on skies (g213, g065) for magenta, and on the 103 scored pairs.
+  - Tool note: darktable-cli does not overwrite an existing output file (it writes `_01`); delete
+    old outputs before re-rendering.
 
 Sections 1-5 below describe the gradient domain work as it was; they are kept for reference.
 

@@ -182,3 +182,6 @@ color step; distance dome not yet tried in the GUI.
   0.44 / 0.54; the order is right but the scale differs from Laneway (lamp 1.00, flat window 0.55),
   so no single threshold works. Reverted (c01fa90c5e), params back to version 8; edits saved with
   the v9 build do not load the highlights module in this build.
+- Scratch cleanup 2026-10-26: removed the Laneway PFM renders (`/tmp/hl-controls/rr/laneway/*.pfm`,
+  regenerable with `tools/rapidraw-compare/render_laneway.py`), intermediate darktable-cli renders in
+  `/tmp/hl-controls/rr/dome/` and `g005/`, and the pypdf venv; kept the crop sheets cited above.
