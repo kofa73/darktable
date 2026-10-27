@@ -56,47 +56,51 @@ first, then the issue file you work on.
   - Tool note: darktable-cli does not overwrite an existing output file (it writes `_01`); delete
     old outputs before re-rendering.
 
-- **Update 2026-10-27: where things stand now.** Branch `opposed-controls`, last commit
-  `4eb6d1e9d9` (notes only; code unchanged since `c01fa90c5e`), nothing pushed. Kofa chose to
-  score the Laneway settings before issues 32 / 33. Details at the end of
-  `opposed-controls-build.md`; run directory `/tmp/hl-rules-study/tasks/2026-10-27-baseline/`
-  (scripts, logs, tables `table-*.txt`, crop sheets `sheet-*.png`, config copies `cfg0`-`cfg3`;
-  script copies in `tools/opposed-baseline/`).
-  - Renders with `/tmp/hl-controls/build` in the 103 workdirs (kept, 6 GB, the baseline for later
-    experiments): `c-def` (defaults = opposed; 103 ties against the old `opposed.pfm`), `c-best`
-    (export `_17`: 11 passes warm lights, cube-root offset, per region, from rim, specks 0,
-    distance dome strength 4 / max rise 4), `c-nodome` (`c-best` without the dome). Scores in
-    `pair_align-base27.json`. About 13-14 s wall per render (3 threads, 4 in parallel).
-  - SSIMULACRA 2 at -2 / -3 EV: `c-nodome` vs `c-def` 62 / 7 / 34 / 0; `c-best` vs `c-def`
-    50 / 19 / 29 / 5; dome alone (`c-best` vs `c-nodome`) 18 / 21 / 59 / 5, with losses up to
-    -87 (t47), -60 (g426), -56 (g105), -51 (g065) at -3 EV.
-  - Visual: `c-nodome` turns skies pink to lilac (t20, t47, t45, g105; g065 salmon): out by
-    Kofa's rule. Ablation on 6 sky pairs: **the cube-root offset causes the pink**; passes alone
-    and passes + per region look like opposed; passes + from rim without the cube root is near
-    neutral on skies, but q08's house turns yellow-green. The dome gives smeared blobs on clouds
-    and windows and dark blotches at -3 EV; on lamps it is close to the truth at -2 EV, with ragged
-    core edges at -3 EV and a pink g294 floor lamp with a bluish-white streak.
-  - Next, waiting for Kofa's choice (proposed to him in this order):
-    1. recommended: score passes + per region + from rim without the cube root on the 103 pairs,
-       plus dome strength 1-2 (about 15 minutes of rendering): how much of the 62 / 7 needs the
-       cube root, and whether a milder dome is a gain;
-    2. cube-root offset for warm lights only (as the reference passes), skies keep the linear
-       offset;
-    3. issue 33's transition band (edge line) or issue 32's ideas, against this baseline.
+- **Update 2026-10-27 (end of day): where things stand now.** Branch `opposed-controls`, code
+  unchanged since `c01fa90c5e` (params v8), only notes committed since; nothing pushed. Issue 31
+  (`opposed-controls-build.md`) is wip and has all details.
+  - **Candidate settings (Kofa agreed):** reference passes 11 (warm lights), cube-root offset off,
+    chroma offset per region, fully clipped color from rim, brightness fill flat lift with max
+    rise 2, merge clipped specks up to 64, the rest default. Against inpaint opposed at -2 / -3 EV:
+    56 wins / 4 losses / 43 ties (render code `c-k065p`). Kofa confirmed in darktable that the
+    11 passes help (g065 sky peach instead of lilac; lamp cores white instead of light blue) and
+    chose to keep per region.
+  - **Next, waiting for Kofa's go:** issue 33's transition band between 1/2/3-channel clipped
+    pixels (recommended: for the hard, noisy edges of the restored area and Laneway's lavender
+    edge line), or issue 32's ideas (RapidRAW's headroom chroma fade, half-strength rim color).
+    Score against the candidate settings.
+  - **How we got there** (run directory `/tmp/hl-rules-study/tasks/2026-10-27-baseline/`: scripts
+    `render.py`, `run_render*.sh`, `run_score*.sh`, `region_color.py`, tables `table*-*.txt`, sheets
+    `sheet*-*.png`; script copies in `tools/opposed-baseline/`):
+    1. Kofa's Laneway export `_17` (11 passes, cube-root offset, per region, from rim, specks 0,
+       distance dome strength 4 / max rise 4; code `c-best`, sheets "Laneway with dome") scored
+       50 / 19 against opposed; without the dome (`c-nodome`, "Laneway no dome") 62 / 7. But the
+       **cube-root offset turns skies pink** (ablation), and the dome at strength 4 is a net loss
+       (blobs on clouds and windows).
+    2. Without the cube root: from rim 37 / 3, + per region 55 / 4, + dome strength 1 or 2 no
+       gain (strength 2 gives blobs). From rim is the most neutral on skies; per region shifts
+       them mildly toward magenta (+0.01-0.09 on r/g and b/g); every variant is too red where the
+       truth sky is blue.
+    3. Kofa's g065 export (passes 0, per region, from rim, flat lift max rise 2, specks 64;
+       `bracketed/colored/g065-sunset-field/darktable_exported/`): 56 / 3; with passes 11 56 / 4
+       but large wins on g065, g294, g298, t60 0034 (+31 to +46).
+  - **Kofa's criteria from the sheets** (also in memory): skies must not turn magenta (opposed is
+    reliably good on skies; "Laneway with dome" looks artificial). Blown lights on night images
+    are fine if not dull, gray or false-colored; hard or noisy edges are a defect (light should
+    fall off gradually). Sheets stay without a tone mapper (it hides bright magenta but not dim).
+    Close-ups of a strong lamp on a white wall (t60) are poor test cases; g294 is realistic.
+    q08's green sky is the phone DNG GainMap (all methods). His darktable writes no sidecars:
+    read his settings from the exported JPG (`exiftool -j -struct -XMP:all`).
+  - **Renders kept** in the 103 workdirs (about 14 GB, rendered with `/tmp/hl-controls/build`):
+    `c-def` (defaults = opposed), `c-best`, `c-nodome`, `c-p11r` (passes 11 + from rim),
+    `c-p11lr` (+ per region), `c-p11r-d1`, `c-p11r-d2` (+ dome 1 / 2), `c-k065`, `c-k065p`. Scores
+    in `pair_align-base27.json` and `pair_align-flat27.json` (union masks differ per run, so
+    compare win / loss counts, not absolute values). The `c-p11r-d*`, `c-best`, `c-nodome` renders
+    can go once the next experiment no longer compares against them.
   - Tool notes: `pair_align.py` needs `opposed` first in `SSIM_METHODS` (it aligns on it); without
     it, it clears `align/` and fails, which also breaks `crop_sheet.py` on those workdirs until a
-    rerun. darktable-cli does not overwrite an existing output file (it writes `_01`).
-  - Later on 2026-10-27 (option 1 done, details in `opposed-controls-build.md`): without the cube
-    root, "from rim" scores 37 / 3 against opposed, + per region 55 / 4, + dome 1 or 2 no gain
-    (dome 2 blobs). From rim is the most neutral on skies; per region shifts them mildly toward
-    magenta. Kofa's own g065 settings (passes 0, per region, from rim, flat lift max rise 2,
-    specks 64): 56 / 3; with reference passes 11 56 / 4, but large wins on g065, g294, g298, t60
-    (peach instead of lilac sky, white instead of blue lamp cores). Kofa confirmed in darktable:
-    passes 11 help. **Candidate now:** passes 11, no cube root, per region, from rim, flat lift
-    max rise 2, specks 64. Kofa: keep per region. Next: issue 33 (transition band, for the
-    hard / noisy edges Kofa named as a defect) or issue 32. Renders kept in the 103 workdirs:
-    `c-def`, `c-best`, `c-nodome`, `c-p11r`, `c-p11lr`, `c-p11r-d1`, `c-p11r-d2`, `c-k065`,
-    `c-k065p`.
+    rerun. darktable-cli does not overwrite an existing output file (it writes `_01`). Sheet
+    labels use GUI words (`crop_sheet.py` `LABEL`, multi-line with `|`, `CS_LEGEND`).
 
 Sections 1-5 below describe the gradient domain work as it was; they are kept for reference.
 
