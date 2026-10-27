@@ -30,14 +30,7 @@ first, then the issue file you work on.
   `dt-build` (switches `DT_OPP_ITER`, `DT_OPP_ITER_RG`, `DT_OPP_CBRT`). Decision for Kofa at the end
   of `opposed-two-clipped-ring.md`.
 
-- **Update 2026-10-27:** Kofa chose to score the Laneway settings first. Result (end of
-  `opposed-controls-build.md`): without the dome 62 / 7 against opposed at -2 / -3 EV, but pink
-  skies, caused by the cube-root offset (ablation); the dome at strength 4 / max rise 4 is a net
-  loss (18 / 21), with blobs on clouds and windows. Baseline renders `c-def`, `c-best`,
-  `c-nodome` in the 103 workdirs; run directory `/tmp/hl-rules-study/tasks/2026-10-27-baseline/`.
-  Issues 32 / 33 still wait for Kofa's choice.
-
-- **Update 2026-10-26 evening: where things stand now.** Work is on branch `opposed-controls`
+- **Update 2026-10-26 evening.** Work is on branch `opposed-controls`
   (from `hl-research`), everything committed (last: `ded18e0122`), nothing pushed. It is an
   experiment build of inpaint opposed with GUI controls (issue 31, wip; Kofa builds and tests it
   himself; my build of the same tree: `/tmp/hl-controls/build`, `cmake --build . -j 12`). Params
@@ -58,9 +51,41 @@ first, then the issue file you work on.
     transition band between 1/2/3-channel clipped pixels (for the edge line), then their
     free-center 2D Gaussian fit for fully clipped brightness (for the wall and lamps). Waiting for
     Kofa's choice.
-  - Untested so far: these settings on skies (g213, g065) for magenta, and on the 103 scored pairs.
+  - Untested so far: these settings on skies (g213, g065) for magenta, and on the 103 scored pairs
+    (done 2026-10-27, next entry).
   - Tool note: darktable-cli does not overwrite an existing output file (it writes `_01`); delete
     old outputs before re-rendering.
+
+- **Update 2026-10-27: where things stand now.** Branch `opposed-controls`, last commit
+  `4eb6d1e9d9` (notes only; code unchanged since `c01fa90c5e`), nothing pushed. Kofa chose to
+  score the Laneway settings before issues 32 / 33. Details at the end of
+  `opposed-controls-build.md`; run directory `/tmp/hl-rules-study/tasks/2026-10-27-baseline/`
+  (scripts, logs, tables `table-*.txt`, crop sheets `sheet-*.png`, config copies `cfg0`-`cfg3`;
+  script copies in `tools/opposed-baseline/`).
+  - Renders with `/tmp/hl-controls/build` in the 103 workdirs (kept, 6 GB, the baseline for later
+    experiments): `c-def` (defaults = opposed; 103 ties against the old `opposed.pfm`), `c-best`
+    (export `_17`: 11 passes warm lights, cube-root offset, per region, from rim, specks 0,
+    distance dome strength 4 / max rise 4), `c-nodome` (`c-best` without the dome). Scores in
+    `pair_align-base27.json`. About 13-14 s wall per render (3 threads, 4 in parallel).
+  - SSIMULACRA 2 at -2 / -3 EV: `c-nodome` vs `c-def` 62 / 7 / 34 / 0; `c-best` vs `c-def`
+    50 / 19 / 29 / 5; dome alone (`c-best` vs `c-nodome`) 18 / 21 / 59 / 5, with losses up to
+    -87 (t47), -60 (g426), -56 (g105), -51 (g065) at -3 EV.
+  - Visual: `c-nodome` turns skies pink to lilac (t20, t47, t45, g105; g065 salmon): out by
+    Kofa's rule. Ablation on 6 sky pairs: **the cube-root offset causes the pink**; passes alone
+    and passes + per region look like opposed; passes + from rim without the cube root is near
+    neutral on skies, but q08's house turns yellow-green. The dome gives smeared blobs on clouds
+    and windows and dark blotches at -3 EV; on lamps it is close to the truth at -2 EV, with ragged
+    core edges at -3 EV and a pink g294 floor lamp with a bluish-white streak.
+  - Next, waiting for Kofa's choice (proposed to him in this order):
+    1. recommended: score passes + per region + from rim without the cube root on the 103 pairs,
+       plus dome strength 1-2 (about 15 minutes of rendering): how much of the 62 / 7 needs the
+       cube root, and whether a milder dome is a gain;
+    2. cube-root offset for warm lights only (as the reference passes), skies keep the linear
+       offset;
+    3. issue 33's transition band (edge line) or issue 32's ideas, against this baseline.
+  - Tool notes: `pair_align.py` needs `opposed` first in `SSIM_METHODS` (it aligns on it); without
+    it, it clears `align/` and fails, which also breaks `crop_sheet.py` on those workdirs until a
+    rerun. darktable-cli does not overwrite an existing output file (it writes `_01`).
 
 Sections 1-5 below describe the gradient domain work as it was; they are kept for reference.
 
