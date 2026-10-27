@@ -256,3 +256,9 @@ long as the blown parts do not look ugly: not dull, not gray, no false colors su
 Also a defect for him: hard, noisy edges of the restored area (the dome's ragged core edges on t60
 and g298 at -3 EV); a light should fall off gradually. Candidates: issue 33's transition band
 (Xu et al.) between 1-, 2- and 3-channel clipped pixels; smoothing the dome's rim slope.
+
+Kofa, same day: crop sheets stay without a tone mapper (it desaturates and hides a strong, very
+bright magenta but not a dimmer one). Close-ups of a strong lamp on a white wall (t60) are
+pointless test cases; g294 (corridor wall lamp) is realistic: inpaint opposed looks wrong and dull
+there, the Laneway settings with or without the dome much better; at -3 EV the dome gives a brighter
+spot on the wall, without it the wall is smoother; he accepts both.
