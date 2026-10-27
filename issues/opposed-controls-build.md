@@ -262,3 +262,11 @@ bright magenta but not a dimmer one). Close-ups of a strong lamp on a white wall
 pointless test cases; g294 (corridor wall lamp) is realistic: inpaint opposed looks wrong and dull
 there, the Laneway settings with or without the dome much better; at -3 EV the dome gives a brighter
 spot on the wall, without it the wall is smoother; he accepts both.
+
+Kofa on the sky sheet (2026-10-27): inpaint opposed is reliably good on skies; the Laneway
+settings with the dome look very artificial there. g065: no variant gets the sky colors right.
+Cause: in the clipped frame the whole sky is clipped (top quarter 98% fully clipped, second quarter
+37% fully and 99% in at least one channel), so no measured sky color is left; opposed's image-wide
+offsets give mauve, "from rim" the horizon glow's and tree line's beige / salmon. The sheet's
+outline misled: the region covers the whole crop, so its outline runs along the crop edges; the
+gray patch is only where the truth frame clipped too. The legend of later sheets says so.
