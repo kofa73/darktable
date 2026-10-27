@@ -237,4 +237,6 @@ Visual check (hue-preserving display, -2 / -3 EV; `sheet-sky.png`, `sheet-lamps.
 
 Kept: the run directory (scripts, logs, tables, sheets, config copies `cfg0`-`cfg3`) and the
 `c-def`, `c-best`, `c-nodome` PFMs in the 103 workdirs (6 GB; the baseline for issues 32 / 33).
-Removed: the ablation PFMs (`c-p11*`, 455 MB; regenerable with `render.py`).
+Removed: the ablation PFMs (`c-p11*`, 455 MB; regenerable with `render.py`). The sheets were
+redone with labels in GUI words and a legend (`crop_sheet.py`: multi-line LABEL, CS_LEGEND); the
+script names above (`c-def` etc.) appear only as file names.

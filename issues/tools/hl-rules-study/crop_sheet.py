@@ -47,11 +47,24 @@ LABEL = {'opposed': 'inpaint opposed', 'gd-wb4x10': 'CB hue fill', 'gd-wb4x11': 
          # issue 29: inpaint opposed with a brightness fill of the fully clipped regions; "small":
          # regions up to 50,000 render pixels only
          'opp-flat': 'opp. flat lift', 'opp-domelin': 'opp. dome lin', 'opp-domelog': 'opp. dome log',
-         'opp-domelin-s': 'opp. dome lin small', 'opp-domelog-s': 'opp. dome log small'}
+         'opp-domelin-s': 'opp. dome lin small', 'opp-domelog-s': 'opp. dome log small',
+         # issue 31 (2026-10-27): opposed-controls build; '|' starts a new line, the legend
+         # (CS_LEGEND) gives the full settings
+         'c-def': 'inpaint opposed|defaults', 'c-p11': 'passes 11',
+         'c-p11l': 'passes 11|per region', 'c-p11cl': 'passes 11|per region|cube root',
+         'c-p11r': 'passes 11|from rim', 'c-nodome': 'Laneway|no dome', 'c-best': 'Laneway|with dome'}
+# CS_LEGEND: lines (separated by '|') printed above the first row, to explain the short labels
+LEGEND = [l for l in os.environ.get('CS_LEGEND', '').split('|') if l]
 disk = lambda r: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2)
 
 
 def text(img, s, y, scale=0.45):
+    # multi-line labels ('|'), the last line at y
+    lines = s.split('|')
+    if len(lines) > 1:
+        for k, l in enumerate(lines):
+            text(img, l, y - 15 * (len(lines) - 1 - k), scale)
+        return
     cv2.putText(img, s, (4, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(img, s, (4, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 1, cv2.LINE_AA)
 
@@ -96,14 +109,14 @@ def rows(wd):
         for off in EVS:
             for m in METHODS:
                 p = cv2.resize(to_srgb8(imgs[m][sl] * 2.0 ** off), size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST)
-                panels.append((p, '%s %+d EV' % (LABEL.get(m, m), off)))
+                panels.append((p, '%s|%+d EV' % (LABEL.get(m, m), off)))
         cs, _ = cv2.findContours((lab[sl] == i).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         for off in (EVS if SELECT == 'full' else [-2]):
             t = to_srgb8(T[sl] * 2.0 ** off)
             # the truth's clipped pixels would show the raw clipping's magenta: no data, so flat gray
             t[unrec[sl]] = 128
             cv2.drawContours(t, cs, -1, (0, 255, 0), 1)
-            panels.append((cv2.resize(t, size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST), 'truth frame %+d EV' % off))
+            panels.append((cv2.resize(t, size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST), 'truth frame|%+d EV' % off))
         row = []
         for p, lbl in panels:
             p = np.concatenate([p, np.full((H - p.shape[0], p.shape[1], 3), 128, np.uint8)])
@@ -126,6 +139,11 @@ def main():
     if not allrows:
         return
     W = max(r.shape[1] for r in allrows)
+    if LEGEND:
+        bar = np.full((10 + 20 * len(LEGEND), W, 3), 255, np.uint8)
+        for k, l in enumerate(LEGEND):
+            cv2.putText(bar, l, (4, 20 + 20 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+        allrows = [bar] + allrows
     pad = lambda r: np.concatenate([r, np.full((r.shape[0], W - r.shape[1], 3), 255, np.uint8)], 1)
     sheet = np.concatenate([np.concatenate([pad(r), np.full((6, W, 3), 255, np.uint8)]) for r in allrows])
     cv2.imwrite(sys.argv[1], cv2.cvtColor(sheet, cv2.COLOR_RGB2BGR))
