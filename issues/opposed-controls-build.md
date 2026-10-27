@@ -313,3 +313,11 @@ Rec2020 r/g, b/g; both above 1 = pink / magenta):
 
 Kept: the PFMs `c-p11r`, `c-p11lr`, `c-p11r-d1`, `c-p11r-d2` in the 103 workdirs (14 GB with the
 baseline's), until Kofa has chosen.
+
+Kofa, manual test on g065 (2026-10-27): a slight edge for "no cube root, from rim, flat lift" over
+the others. Settings decoded from his export
+(`bracketed/colored/g065-sunset-field/darktable_exported/2025-06-11-20-07-18-P1070347.jpg`, v8;
+his darktable writes no sidecars): reference passes 0, cube-root offset off, chroma offset per
+region, fully clipped color from rim, brightness fill flat lift (max rise 2), merge clipped specks
+up to 64, the rest default; AgX on. Scoring on the 103 pairs as `c-k065` and, with reference passes
+11 (warm lights), `c-k065p` (`run_render3.sh`, `run_score3.sh`, `pair_align-flat27.json`).
