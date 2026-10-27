@@ -6,7 +6,7 @@ done; at most one item is wip at a time. Background: `/tmp/hl-article-research-1
 Gradient domain stopped on 2026-10-24 (Kofa): what stays valid is in [learnings.md](learnings.md);
 reusable code is in [salvage/](salvage/README.md), the evaluation scripts in `tools/`, agents' notes in
 `agent-notes/`; the deleted branch is archived locally only (`/tmp/hl-archive/gradient-hl.bundle`).
-State and next steps of the latest session: [HANDOFF.md](HANDOFF.md) (updated 2026-10-26 evening).
+State and next steps of the latest session: [HANDOFF.md](HANDOFF.md) (updated 2026-10-27).
 
 | # | file | description | status |
 |---|---|---|---|
@@ -40,6 +40,6 @@ State and next steps of the latest session: [HANDOFF.md](HANDOFF.md) (updated 20
 | 28 | [score-display-clipping.md](score-display-clipping.md) | score and crop sheets clip each sRGB channel at 0 / -1 EV: a third to half of the truth in clipped areas is white or hue-shifted | pending (rescored at -2 / -3 EV: gradient domain 41 / 39 against opposed, skies 5 / 4) |
 | 29 | [opposed-brightness.md](opposed-brightness.md) | inpaint opposed: raise the brightness of fully clipped areas (flat lift from the rim, dome); offline: distance dome 22 / 7, gains on clouds, not lamps; brighter wrong-hued skies; Kofa chose (c): issue 30 first | pending |
 | 30 | [opposed-two-clipped-ring.md](opposed-two-clipped-ring.md) | inpaint opposed: partly clipped pixels too dark where red and green clip (g294 0.5 EV); fix: iterate the references for warm lights only, 4 / 1 alone, with issue 29's dome 27 / 7; waits for Kofa | done |
-| 31 | [opposed-controls-build.md](opposed-controls-build.md) | experiment build with GUI controls for inpaint opposed (branch `opposed-controls`, params v8): rim fix, cube-root and per-region chroma, fully clipped color, brightness fill with dome fixes (8047d90229, 28d108271e); glow test reverted; Kofa testing on Laneway | wip |
+| 31 | [opposed-controls-build.md](opposed-controls-build.md) | experiment build with GUI controls for inpaint opposed (branch `opposed-controls`, params v8): rim fix, cube-root and per-region chroma, fully clipped color, brightness fill with dome fixes (8047d90229, 28d108271e); glow test reverted; Laneway settings on 103 pairs: 62 / 7 without the dome, but the cube-root offset makes skies pink; dome at strength 4 a net loss | wip |
 | 32 | [rapidraw-ideas.md](rapidraw-ideas.md) | ideas from RapidRAW's opposed variant; its exports beat ours on t60 and g294 (neutral, no colored rim), lose on g065; candidates: headroom chroma fade, fully clipped color strength, brightness-weighted offsets; none tried | pending |
 | 33 | [early-literature-ideas.md](early-literature-ideas.md) | unpatented ideas from the early literature: transition band between 1/2/3-channel clipped pixels (edge line), free-center 2D Gaussian fit for fully clipped brightness (Xu et al. 2011); none tried | pending |

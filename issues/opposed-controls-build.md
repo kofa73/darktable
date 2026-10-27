@@ -1,6 +1,6 @@
 # Experiment build: GUI controls for the inpaint opposed variants
 
-Status: wip (2026-10-25; 8c0538ed4a committed; adding per-region chroma after Kofa's test). Kind: experiment build, requested by Kofa.
+Status: wip (2026-10-27: baseline of the Laneway settings scored; cube-root offset makes skies pink, the dome at strength 4 is a net loss). Kind: experiment build, requested by Kofa.
 
 ## Goal
 
@@ -185,3 +185,56 @@ color step; distance dome not yet tried in the GUI.
 - Scratch cleanup 2026-10-26: removed the Laneway PFM renders (`/tmp/hl-controls/rr/laneway/*.pfm`,
   regenerable with `tools/rapidraw-compare/render_laneway.py`), intermediate darktable-cli renders in
   `/tmp/hl-controls/rr/dome/` and `g005/`, and the pypdf venv; kept the crop sheets cited above.
+
+## Baseline of the Laneway settings on the 103 pairs and on skies (2026-10-27)
+
+Kofa chose to score the best Laneway settings before trying issues 32 / 33. Renders with this
+build (`/tmp/hl-controls/build`, at c01fa90c5e) into the 103 scored workdirs, 1600 px, linear
+Rec2020; scripts in `tools/opposed-baseline/` (run directory
+`/tmp/hl-rules-study/tasks/2026-10-27-baseline/`):
+
+- `c-def`: all controls at their defaults (= inpaint opposed; against the old `opposed.pfm`
+  103 ties, though 1% of pixels differ slightly: that file is from an older build)
+- `c-best`: export `_17`'s settings: reference passes 11 (warm lights), cube-root offset, chroma
+  offset per region, fully clipped color from rim, merge specks 0, distance dome strength 4 / max
+  rise 4, the rest default
+- `c-nodome`: `c-best` without the dome
+
+Render wall time (3 threads, 4 renders in parallel): mean 12.9 s `c-def`, 13.7 s `c-best`,
+maximum 17.6 / 20.2 s.
+
+SSIMULACRA 2 at -2 / -3 EV (`pair_align-base27.json`, `table-*.txt` in the run directory; win /
+loss / tie / mixed):
+
+| comparison | all | city | colored | indoor | night | phone | sky | specular |
+|---|---|---|---|---|---|---|---|---|
+| `c-nodome` vs `c-def` | 62 / 7 / 34 / 0 | 17 / 1 | 9 / 1 | 3 / 2 | 11 / 1 | 9 / 0 | 10 / 1 | 3 / 1 |
+| `c-best` vs `c-def` | 50 / 19 / 29 / 5 | 12 / 6 | 5 / 4 | 3 / 2 | 10 / 2 | 9 / 0 | 8 / 2 | 3 / 3 |
+| `c-best` vs `c-nodome` (the dome) | 18 / 21 / 59 / 5 | 4 / 6 | 2 / 4 | 2 / 0 | 2 / 2 | 2 / 3 | 4 / 3 | 2 / 3 |
+
+The dome's largest losses (d at -2 / -3 EV): t47 -49 / -87, t20 0715 -42 / -47, g065 -45 / -51,
+g426 -39 / -60, g105 -35 / -56, g193 -31 / -32, t39 +2 / -52, g313 -22 / -37, g315 -1 / -38;
+largest wins: g014 +30 / +31, t32 +27 / +7, g216 +23 / +1, g281 +19 / +15, g117 +14 / +14.
+
+Visual check (hue-preserving display, -2 / -3 EV; `sheet-sky.png`, `sheet-lamps.png`,
+`sheet-domeloss.png`, `sheet-ablation.png` in the run directory):
+
+- Lamps (t60, g294, g298): `c-def` light-blue cores; `c-nodome` neutral to faint lavender, at
+  -3 EV flat gray and darker than the rim; `c-best` bright and close to the truth at -2 EV, at
+  -3 EV the t60 0034 upper lobe stays bluish, the core edges are ragged / speckled (t60, g298 floor
+  spot), and the g294 floor lamp is pink with a bluish-white streak on its top edge.
+- Skies: `c-nodome` turns them pink to lilac (t20, t47, t45, g105's mirror; g065 salmon where the
+  truth is peach-orange): out by Kofa's rule despite the score wins. q08 improves (the cyan house
+  wall turns near white, the sky less cyan).
+- Dome on large areas: smeared bright blobs over cloud texture (g213, g313) and g426's window,
+  dark blotches beside the bright parts at -3 EV (t39, t47, g065).
+- Ablation on 6 sky pairs, one control added at a time on 11 reference passes: passes alone and
+  passes + per region look like `c-def` (lilac skies, cyan q08); + cube-root offset (with per
+  region) turns g065 strongly magenta and t20 / t45 / g105 pink; passes + from rim without the
+  cube root is near neutral (g065 beige, t20 gray) but q08's house turns yellow-green. **The pink
+  comes from the cube-root offset**, as in issue 30; "from rim" on top of it shifts g065 from
+  magenta to salmon.
+
+Kept: the run directory (scripts, logs, tables, sheets, config copies `cfg0`-`cfg3`) and the
+`c-def`, `c-best`, `c-nodome` PFMs in the 103 workdirs (6 GB; the baseline for issues 32 / 33).
+Removed: the ablation PFMs (`c-p11*`, 455 MB; regenerable with `render.py`).

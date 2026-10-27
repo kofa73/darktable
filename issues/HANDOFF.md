@@ -1,4 +1,4 @@
-# Handoff (2026-10-24, updated 2026-10-26 evening)
+# Handoff (2026-10-24, updated 2026-10-27)
 
 State of the highlight reconstruction work after the sessions of 2026-10-23/24, for the next
 session. The issue files in this directory hold the details and results; this file says where
@@ -29,6 +29,13 @@ first, then the issue file you work on.
   dome reach the lamps: together 27 / 7. Experiment copy and build `/tmp/hl-rules-study/dt-src`,
   `dt-build` (switches `DT_OPP_ITER`, `DT_OPP_ITER_RG`, `DT_OPP_CBRT`). Decision for Kofa at the end
   of `opposed-two-clipped-ring.md`.
+
+- **Update 2026-10-27:** Kofa chose to score the Laneway settings first. Result (end of
+  `opposed-controls-build.md`): without the dome 62 / 7 against opposed at -2 / -3 EV, but pink
+  skies, caused by the cube-root offset (ablation); the dome at strength 4 / max rise 4 is a net
+  loss (18 / 21), with blobs on clouds and windows. Baseline renders `c-def`, `c-best`,
+  `c-nodome` in the 103 workdirs; run directory `/tmp/hl-rules-study/tasks/2026-10-27-baseline/`.
+  Issues 32 / 33 still wait for Kofa's choice.
 
 - **Update 2026-10-26 evening: where things stand now.** Work is on branch `opposed-controls`
   (from `hl-research`), everything committed (last: `ded18e0122`), nothing pushed. It is an
