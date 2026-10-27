@@ -269,4 +269,7 @@ Cause: in the clipped frame the whole sky is clipped (top quarter 98% fully clip
 37% fully and 99% in at least one channel), so no measured sky color is left; opposed's image-wide
 offsets give mauve, "from rim" the horizon glow's and tree line's beige / salmon. The sheet's
 outline misled: the region covers the whole crop, so its outline runs along the crop edges; the
-gray patch is only where the truth frame clipped too. The legend of later sheets says so.
+gray patch is only where the truth frame clipped too. Kofa read the outline as circling a small
+part: it is the region's lower edge (crossing the sky above the horizon glow), its upper edge runs
+along the crop's top border. Later sheets add a "clipped region" panel per row with the region
+tinted green (`crop_sheet.py`); the truth panels keep their colors.

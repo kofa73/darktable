@@ -117,6 +117,14 @@ def rows(wd):
             t[unrec[sl]] = 128
             cv2.drawContours(t, cs, -1, (0, 255, 0), 1)
             panels.append((cv2.resize(t, size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST), 'truth frame|%+d EV' % off))
+        # an extra panel with the region tinted green: an outline alone that runs along the crop
+        # border reads as a small circled area (g065, 2026-10-27); the truth panels keep their colors
+        t = to_srgb8(T[sl] * 2.0 ** -2)
+        t[unrec[sl]] = 128
+        reg = lab[sl] == i
+        t[reg] = (0.6 * t[reg] + 0.4 * np.array([0, 255, 0])).astype(np.uint8)
+        panels.append((cv2.resize(t, size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST),
+                       'clipped region|(green)'))
         row = []
         for p, lbl in panels:
             p = np.concatenate([p, np.full((H - p.shape[0], p.shape[1], 3), 128, np.uint8)])
