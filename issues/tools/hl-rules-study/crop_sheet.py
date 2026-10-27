@@ -52,7 +52,8 @@ LABEL = {'opposed': 'inpaint opposed', 'gd-wb4x10': 'CB hue fill', 'gd-wb4x11': 
          # (CS_LEGEND) gives the full settings
          'c-def': 'inpaint opposed|defaults', 'c-p11': 'passes 11',
          'c-p11l': 'passes 11|per region', 'c-p11cl': 'passes 11|per region|cube root',
-         'c-p11r': 'passes 11|from rim', 'c-nodome': 'Laneway|no dome', 'c-best': 'Laneway|with dome'}
+         'c-p11r': 'passes 11|from rim', 'c-p11lr': 'passes 11|per region|from rim',
+         'c-p11r-d1': 'passes 11|from rim|dome 1', 'c-p11r-d2': 'passes 11|from rim|dome 2', 'c-nodome': 'Laneway|no dome', 'c-best': 'Laneway|with dome'}
 # CS_LEGEND: lines (separated by '|') printed above the first row, to explain the short labels
 LEGEND = [l for l in os.environ.get('CS_LEGEND', '').split('|') if l]
 disk = lambda r: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2)

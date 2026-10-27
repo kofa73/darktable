@@ -273,3 +273,43 @@ gray patch is only where the truth frame clipped too. Kofa read the outline as c
 part: it is the region's lower edge (crossing the sky above the horizon glow), its upper edge runs
 along the crop's top border. Later sheets add a "clipped region" panel per row with the region
 tinted green (`crop_sheet.py`); the truth panels keep their colors.
+
+### "From rim" without the cube root on the 103 pairs (2026-10-27)
+
+All with reference passes 11 (warm lights) and merge clipped specks up to 0; cube-root offset off.
+SSIMULACRA 2 at -2 / -3 EV (`pair_align-rim27.json`, `table2-*.txt`; win / loss / tie / mixed):
+
+| variant | vs inpaint opposed | night | sky |
+|---|---|---|---|
+| from rim | 37 / 3 / 61 / 2 | 7 / 1 | 9 / 0 |
+| from rim + per region | 55 / 4 / 44 / 0 | 9 / 1 | 11 / 0 |
+| from rim + distance dome strength 1, max rise 2 | 38 / 8 / 55 / 2 | 6 / 2 | 9 / 0 |
+| from rim + distance dome strength 2, max rise 4 | 35 / 13 / 51 / 4 | 6 / 2 | 8 / 0 |
+| Laneway without the dome (cube root on; repeat) | 62 / 7 / 34 / 0 | 11 / 1 | 10 / 1 |
+
+Against "from rim" alone: + per region 21 / 4, + dome 1 26 / 7, + dome 2 21 / 14.
+
+Mean color of the fully clipped pixels that the truth frame recorded (`region_color.py`; linear
+Rec2020 r/g, b/g; both above 1 = pink / magenta):
+
+| pair | opposed | from rim | + per region | Laneway no dome | truth |
+|---|---|---|---|---|---|
+| g065 | 1.19, 1.17 | 1.24, 0.88 | 1.25, 0.88 | 1.48, 0.84 | 1.26, 0.74 |
+| t20 0715 | 1.13, 0.95 | 1.09, 0.98 | 1.12, 1.07 | 1.20, 1.28 | 0.80, 1.64 |
+| t47 | 1.06, 0.91 | 1.07, 0.93 | 1.08, 0.96 | 1.13, 1.02 | 0.86, 1.29 |
+| g213 | 1.05, 0.91 | 1.02, 0.96 | 1.07, 1.04 | 1.09, 1.08 | 0.91, 1.20 |
+| g105 | 1.10, 0.89 | 1.06, 0.92 | 1.07, 0.97 | 1.10, 1.07 | 1.02, 0.97 |
+
+- "From rim" is the most neutral; on g065 much closer to the truth than opposed (whose b/g excess
+  is the mauve). Per region adds 0.01-0.09 to both ratios (mild magenta shift), the cube root
+  much more. Every variant is too red where the truth sky is blue: no measured blue is left.
+- Sheets (`sheet2-sky.png` at -2 EV; `sheet2-night-2.png`, `sheet2-night-3.png`; night scenes
+  instead of the t60 close-ups): from rim removes opposed's blue cores and patches (g294 wall
+  streak, g298, t53 window, g300 floor lines). Per region makes the g389 neon sign, the g486
+  platform lamp and the t55 lightbox pinker. Dome 1 is a mild, mostly smooth lift; dome 2 gives
+  bright blobs in the g298 and t53 cores; on skies both domes add speckled texture (t47, g105) and
+  blobs (g213, g313). n041's lamp core stays grayish in every variant.
+- Render wall time as before (12-15 s mean per render, 3 threads, 4 in parallel).
+
+Kept: the PFMs `c-p11r`, `c-p11lr`, `c-p11r-d1`, `c-p11r-d2` in the 103 workdirs (14 GB with the
+baseline's), until Kofa has chosen.

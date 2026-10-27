@@ -21,6 +21,12 @@ ev2.METHODS.update({
     'c-p11l': ['5', '--opp-passes', '11', '--opp-local', '1', '--fill-specks', '0'],
     'c-p11cl': ['5', '--opp-passes', '11', '--opp-cbrt', '1', '--opp-local', '1', '--fill-specks', '0'],
     'c-p11r': ['5', '--opp-passes', '11', '--fill-color', '2', '--fill-specks', '0'],
+    # Kofa 2026-10-27: "from rim" without the cube root is good on skies; score it on the 103 pairs
+    'c-p11lr': ['5', '--opp-passes', '11', '--opp-local', '1', '--fill-color', '2', '--fill-specks', '0'],
+    'c-p11r-d1': ['5', '--opp-passes', '11', '--fill-color', '2', '--fill-specks', '0', '--fill', '4',
+                  '--fill-strength', '1'],
+    'c-p11r-d2': ['5', '--opp-passes', '11', '--fill-color', '2', '--fill-specks', '0', '--fill', '4',
+                  '--fill-strength', '2', '--fill-max-rise', '4'],
 })
 for wd in sys.argv[1:]:
     sc = json.load(open(os.path.join(wd, 'scores.json')))
