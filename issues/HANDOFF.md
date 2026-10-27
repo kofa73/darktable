@@ -93,7 +93,7 @@ first, then the issue file you work on.
     specks 64): 56 / 3; with reference passes 11 56 / 4, but large wins on g065, g294, g298, t60
     (peach instead of lilac sky, white instead of blue lamp cores). Kofa confirmed in darktable:
     passes 11 help. **Candidate now:** passes 11, no cube root, per region, from rim, flat lift
-    max rise 2, specks 64. Open: keep per region or not; then issue 33 (transition band, for the
+    max rise 2, specks 64. Kofa: keep per region. Next: issue 33 (transition band, for the
     hard / noisy edges Kofa named as a defect) or issue 32. Renders kept in the 103 workdirs:
     `c-def`, `c-best`, `c-nodome`, `c-p11r`, `c-p11lr`, `c-p11r-d1`, `c-p11r-d2`, `c-k065`,
     `c-k065p`.

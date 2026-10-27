@@ -351,3 +351,5 @@ g065 settings plus reference passes 11 (`c-k065p`): passes 11 (warm lights), cub
 off, per region, from rim, flat lift max rise 2, merge specks 64. Still open: per region (21 / 4
 over from rim alone, but a mild magenta shift on skies and pinker neon / lightbox) and flat lift
 (6 / 3, no visible harm).
+
+Kofa (2026-10-27): per region stays in the candidate settings.
