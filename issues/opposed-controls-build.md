@@ -240,3 +240,19 @@ Kept: the run directory (scripts, logs, tables, sheets, config copies `cfg0`-`cf
 Removed: the ablation PFMs (`c-p11*`, 455 MB; regenerable with `render.py`). The sheets were
 redone with labels in GUI words and a legend (`crop_sheet.py`: multi-line LABEL, CS_LEGEND); the
 script names above (`c-def` etc.) appear only as file names.
+
+Kofa on the ablation sheet (2026-10-27): "from rim" (without the cube root) is usually pretty good;
+q08 is bad for most variants (green sky), not only for "from rim". q08 is a phone DNG: its GainMap
+is applied before highlight reconstruction and flags unclipped pixels (darktable #12128,
+`learnings.md`), so it does not judge the variants. Next (started 2026-10-27): the 103 pairs with
+reference passes 11 + from rim, + per region, + distance dome strength 1 (max rise 2) and
+strength 2 (max rise 4); scripts `run_render2.sh`, `run_score2.sh`, scores `pair_align-rim27.json`.
+
+Kofa on the lamp sheet (2026-10-27): the dome is usually OK. On t60 0031 (first row) the truth's
+wall above and below the lamp is smooth, while every variant, inpaint opposed included, leaves
+uneven patches there, some blue; probably no issue with a tone mapper and less darkening than
+-2 / -3 EV. His criterion for lights: they are usually blown on night images and that is fine, as
+long as the blown parts do not look ugly: not dull, not gray, no false colors such as magenta.
+Also a defect for him: hard, noisy edges of the restored area (the dome's ragged core edges on t60
+and g298 at -3 EV); a light should fall off gradually. Candidates: issue 33's transition band
+(Xu et al.) between 1-, 2- and 3-channel clipped pixels; smoothing the dome's rim slope.
