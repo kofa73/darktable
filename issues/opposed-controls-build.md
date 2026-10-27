@@ -1,6 +1,6 @@
 # Experiment build: GUI controls for the inpaint opposed variants
 
-Status: wip (2026-10-27: baseline of the Laneway settings scored; cube-root offset makes skies pink, the dome at strength 4 is a net loss). Kind: experiment build, requested by Kofa.
+Status: wip (2026-10-27: cube-root offset makes skies pink, the dome at strength 4 is a net loss; candidate: passes 11, per region, from rim, flat lift, no cube root). Kind: experiment build, requested by Kofa.
 
 ## Goal
 
@@ -345,3 +345,9 @@ counts of the earlier variants recomputed in it are unchanged: from rim 37 / 3, 
   measured, the case the warm-lights passes handle). g298 and t60 cores stay light blue with
   passes 0, neutral white with passes 11. Kofa judged g065 in darktable with AgX, which may hide
   the lilac; proposed to him: compare passes 0 and 11 there.
+
+Kofa, after comparing in darktable (2026-10-27): "yes, 11 passes helps". Current candidate: his
+g065 settings plus reference passes 11 (`c-k065p`): passes 11 (warm lights), cube-root offset
+off, per region, from rim, flat lift max rise 2, merge specks 64. Still open: per region (21 / 4
+over from rim alone, but a mild magenta shift on skies and pinker neon / lightbox) and flat lift
+(6 / 3, no visible harm).

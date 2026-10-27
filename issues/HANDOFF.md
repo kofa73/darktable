@@ -86,6 +86,17 @@ first, then the issue file you work on.
   - Tool notes: `pair_align.py` needs `opposed` first in `SSIM_METHODS` (it aligns on it); without
     it, it clears `align/` and fails, which also breaks `crop_sheet.py` on those workdirs until a
     rerun. darktable-cli does not overwrite an existing output file (it writes `_01`).
+  - Later on 2026-10-27 (option 1 done, details in `opposed-controls-build.md`): without the cube
+    root, "from rim" scores 37 / 3 against opposed, + per region 55 / 4, + dome 1 or 2 no gain
+    (dome 2 blobs). From rim is the most neutral on skies; per region shifts them mildly toward
+    magenta. Kofa's own g065 settings (passes 0, per region, from rim, flat lift max rise 2,
+    specks 64): 56 / 3; with reference passes 11 56 / 4, but large wins on g065, g294, g298, t60
+    (peach instead of lilac sky, white instead of blue lamp cores). Kofa confirmed in darktable:
+    passes 11 help. **Candidate now:** passes 11, no cube root, per region, from rim, flat lift
+    max rise 2, specks 64. Open: keep per region or not; then issue 33 (transition band, for the
+    hard / noisy edges Kofa named as a defect) or issue 32. Renders kept in the 103 workdirs:
+    `c-def`, `c-best`, `c-nodome`, `c-p11r`, `c-p11lr`, `c-p11r-d1`, `c-p11r-d2`, `c-k065`,
+    `c-k065p`.
 
 Sections 1-5 below describe the gradient domain work as it was; they are kept for reference.
 
