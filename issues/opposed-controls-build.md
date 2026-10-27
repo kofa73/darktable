@@ -321,3 +321,27 @@ his darktable writes no sidecars): reference passes 0, cube-root offset off, chr
 region, fully clipped color from rim, brightness fill flat lift (max rise 2), merge clipped specks
 up to 64, the rest default; AgX on. Scoring on the 103 pairs as `c-k065` and, with reference passes
 11 (warm lights), `c-k065p` (`run_render3.sh`, `run_score3.sh`, `pair_align-flat27.json`).
+
+### Kofa's g065 settings on the 103 pairs (2026-10-27)
+
+`c-k065` = his export (passes 0, per region, from rim, flat lift max rise 2, specks 64), `c-k065p`
+= the same with reference passes 11 (warm lights). Scores in `pair_align-flat27.json` (its union
+of changed pixels is larger, so its SSIMULACRA values differ from the earlier runs; the win / loss
+counts of the earlier variants recomputed in it are unchanged: from rim 37 / 3, + per region 55 / 4).
+
+| comparison (-2 / -3 EV) | win / loss / tie / mixed |
+|---|---|
+| `c-k065` vs inpaint opposed | 56 / 3 / 43 / 1 |
+| `c-k065p` vs inpaint opposed | 56 / 4 / 43 / 0 |
+| `c-k065p` vs `c-k065` (passes 11 added) | 8 / 4 / 91 / 0 |
+| `c-k065p` vs passes 11 + per region + from rim, no fill, specks 0 | 6 / 3 / 94 / 0 |
+| `c-k065p` vs passes 11 + from rim, no fill, specks 0 | 27 / 7 / 69 / 0 |
+
+- Flat lift adds little on top of passes 11 + per region + from rim (6 / 3).
+- Passes 11 on top of his settings win few pairs but by much: t60 0034 +46, g294 +46, g298 +31,
+  g065 +33 at -2 EV (his settings +3.5 there). Sheets `sheet3-sky.png`, `sheet3-night.png`:
+  g065 with passes 0 is lilac-pink (-2 EV) to mauve (-3 EV), a lighter opposed; with passes 11
+  peach-beige, nearer the truth's peach-orange (the sunset has red and green clipped and blue
+  measured, the case the warm-lights passes handle). g298 and t60 cores stay light blue with
+  passes 0, neutral white with passes 11. Kofa judged g065 in darktable with AgX, which may hide
+  the lilac; proposed to him: compare passes 0 and 11 there.

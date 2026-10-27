@@ -25,6 +25,10 @@ ev2.METHODS.update({
     'c-p11lr': ['5', '--opp-passes', '11', '--opp-local', '1', '--fill-color', '2', '--fill-specks', '0'],
     'c-p11r-d1': ['5', '--opp-passes', '11', '--fill-color', '2', '--fill-specks', '0', '--fill', '4',
                   '--fill-strength', '1'],
+    # Kofa's g065 export (2026-10-27 19:56): per region, from rim, flat lift (max rise 2), specks 64,
+    # reference passes 0; and the same with reference passes 11 (warm lights)
+    'c-k065': ['5', '--opp-local', '1', '--fill-color', '2', '--fill', '1'],
+    'c-k065p': ['5', '--opp-passes', '11', '--opp-local', '1', '--fill-color', '2', '--fill', '1'],
     'c-p11r-d2': ['5', '--opp-passes', '11', '--fill-color', '2', '--fill-specks', '0', '--fill', '4',
                   '--fill-strength', '2', '--fill-max-rise', '4'],
 })
