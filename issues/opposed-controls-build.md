@@ -353,3 +353,53 @@ over from rim alone, but a mild magenta shift on skies and pinker neon / lightbo
 (6 / 3, no visible harm).
 
 Kofa (2026-10-27): per region stays in the candidate settings.
+
+### X-Trans: the candidate on real pairs (2026-10-31)
+
+Kofa supplied X-Trans brackets (issue 20). Run directory `/tmp/hl-rules-study/tasks/2026-10-31-xtrans/`,
+workdirs `/tmp/hl-rules-study/runs/xtrans/` (kept for later
+experiments), scripts in `tools/xtrans-pairs/`, tables `table-*.txt`, sheets `sheet-*.png`.
+
+Setup, and how it differs from the 103 Bayer pairs:
+
+- 39 pairs (37 X-T3, 2 X-T20), 36 scored; 3 excluded for motion by the usual rule (x11, x22, x24).
+- `ev2.raw_flags` assumed a 2x2 color pattern, which gives wrong masks on X-Trans. It now has an
+  X-Trans path (6x6 window, every color present); Bayer output verified identical on one pair.
+- The X-T3 gap is about 2.65 EV (bracket step 2.67), against about 2 EV on the Bayer pairs: harder,
+  and the truth frames are noisier after scaling. So the counts are not comparable with 56 / 4.
+- Pairs chosen with at most 30% of the photosites clipped (median about 8%; Bayer median 5.5%).
+  Without the cap the picker took +5.33 EV frames with 60-90% clipped.
+- Rendered with `/tmp/hl-controls/build`; `opposed` is that build's default (no `c-def`).
+- Daylight only: no lamps, so reference passes 11 are barely tested here.
+
+| comparison (-2 / -3 EV) | win / loss / tie / mixed |
+|---|---|
+| candidate (`c-k065p`) vs inpaint opposed | 27 / 0 / 9 / 0 |
+| Kofa's g065 settings, passes 0 (`c-k065`) vs inpaint opposed | 20 / 1 / 15 / 0 |
+| passes 11 + from rim (`c-p11r`) vs inpaint opposed | 19 / 0 / 17 / 0 |
+| candidate vs `c-k065` (passes 11 added) | 5 / 0 / 31 / 0 |
+| candidate vs `c-p11r` (per region, flat lift, specks 64 added) | 8 / 3 / 25 / 0 |
+
+Largest wins of the candidate against opposed: x07 +26.5, x19 +12.7, x35 +12.5, x27 +11.8, x04 +10.8.
+Mean color of the fully clipped pixels (`region_color.txt`): nearer the truth than opposed on 28 of
+33 X-T3 pairs, further on 1 (log r/g, b/g distance, 0.02 tolerance).
+
+Visual (`sheet-color.png`, `sheet-sky.png`, `sheet-odd.png`, zooms `sheet-zoom-*.png`; `sheet-color`
+and `sheet-odd` crop the largest area with any channel clipped, new `CS_SELECT=any`):
+
+- Better than opposed: skin (x19: flat beige in opposed, pink with texture in the candidate, close
+  to the truth; x05 similar, milder) and the pink jacket (x07: opposed has a lilac center).
+- **Skies stay pink-lilac in every variant, inpaint opposed included** (x03, x09, also x25, and the
+  bright wall x10) where the truth sky is blue: r/g 1.08, b/g 1.13 on x03 against 0.82, 1.62. The
+  candidate is not worse than opposed there, but it does not fix this. Per region and flat lift
+  together add a little on x09, x10, x14 (b/g +0.04 to +0.05 over from rim, not separated),
+  nothing visible on x03.
+- Colored highlights lose their hue in every variant: yellow flowers and foliage turn beige or
+  peach (x35, x28, x27, x04, x26), red tulips pale salmon (x30). This looks dull rather than false.
+- x23 (sun on a metal slide): all variants pale lilac, truth yellow-green. Its score of about -50
+  is common to all variants, as are x30 and x28 at -20 to -50: those pairs have 7-14% motion, or
+  noise, so ties there mean little.
+- x37 (rainbow gradient): smooth, no false colors, slightly less saturated than the truth.
+- The posterized look of some sheet panels is not in the data: about 10000 distinct values in a
+  100x100 patch of the render.
+

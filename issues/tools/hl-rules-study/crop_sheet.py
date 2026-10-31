@@ -88,7 +88,9 @@ def rows(wd):
     unrec = clip & (Ra > 0.02)
     # CS_SELECT=full (issue 29): crop the largest fully clipped regions, recorded by the truth frame
     # or not, and show the truth panel at every exposure of the method panels
-    core = (F.min(2) >= 0.5) if SELECT == 'full' else unrec
+    # CS_SELECT=any: the largest areas with any channel clipped, for colored subjects that clip one or
+    # two channels and have no fully clipped pixels (X-Trans flowers, x07)
+    core = (F.min(2) >= 0.5) if SELECT == 'full' else (F.max(2) >= 0.5) if SELECT == 'any' else unrec
     n, lab, st, _ = cv2.connectedComponentsWithStats(cv2.morphologyEx(core.astype(np.uint8), cv2.MORPH_CLOSE, disk(3)), 8)
     # area of the unrecorded pixels themselves, not of the closed mask
     area = np.bincount(lab[core], minlength=n)
@@ -113,7 +115,7 @@ def rows(wd):
                 p = cv2.resize(to_srgb8(imgs[m][sl] * 2.0 ** off), size, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST)
                 panels.append((p, '%s|%+d EV' % (LABEL.get(m, m), off)))
         cs, _ = cv2.findContours((lab[sl] == i).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        for off in (EVS if SELECT == 'full' else [-2]):
+        for off in (EVS if SELECT in ('full', 'any') else [-2]):
             t = to_srgb8(T[sl] * 2.0 ** off)
             # the truth's clipped pixels would show the raw clipping's magenta: no data, so flat gray
             t[unrec[sl]] = 128

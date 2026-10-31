@@ -147,6 +147,15 @@ def raw_flags(path, gain):
         a, cols = a[:h, :w], cols[:h, :w]
         f = np.zeros((h // 2, w // 2, 3), np.float32)
         g = np.zeros((h // 2, w // 2), np.float32)
+        if r.raw_pattern.shape[0] == 6:
+            # X-Trans has no fixed colors in a 2x2 block, and some blocks lack red or blue, so in a
+            # fully clipped area a per-block fraction would stay below 1. A 6x6 window holds every
+            # color of the pattern; sampled at the 2 px pitch of the Bayer quads
+            box = lambda m: cv2.blur(m.astype(np.float32), (6, 6), borderType=cv2.BORDER_REFLECT)[::2, ::2]
+            for c in range(3):
+                f[..., c] = box((cols == c) & (a >= 0.98)) / np.maximum(box(cols == c), 1e-6)
+            g = box(np.where(cols == 1, a, 0)) / np.maximum(box(cols == 1), 1e-6) / gain
+            return f, g, cam
         for dy in (0, 1):
             for dx in (0, 1):
                 c = int(cols[dy, dx])
