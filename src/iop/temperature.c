@@ -52,6 +52,10 @@ DT_MODULE_INTROSPECTION(5, dt_iop_temperature_params_t)
 #define DT_IOP_LOWEST_TINT 0.135
 #define DT_IOP_HIGHEST_TINT 2.326
 
+#define DT_IOP_TEMP_CHROMA_MAX 300.f
+#define DT_IOP_TEMP_HUE_CHROMA_TOLERANCE 0.05f
+#define DT_IOP_TEMP_ACHROMATIC_THRESHOLD 0.05f
+
 #define DT_IOP_NUM_OF_STD_TEMP_PRESETS 4
 
 // If you reorder presets combo, change this consts
@@ -76,6 +80,7 @@ typedef struct dt_iop_temperature_params_t
 typedef struct dt_iop_temperature_gui_data_t
 {
   GtkWidget *scale_k, *scale_tint, *scale_r, *scale_g, *scale_b, *scale_y;
+  GtkWidget *scale_hue, *scale_chroma;
   GtkWidget *presets;
   GtkWidget *finetune;
   GtkWidget *buttonbar;
@@ -91,6 +96,8 @@ typedef struct dt_iop_temperature_gui_data_t
   double mod_coeff[4];
   float mod_temp, mod_tint;
   double XYZ_to_CAM[4][3], CAM_to_XYZ[3][4];
+  gboolean matrix_valid;
+  gboolean hue_chroma_valid;
   gboolean colored_sliders;
   gboolean blackbody_is_confusing;
   gboolean button_bar_visible;
@@ -522,6 +529,62 @@ static cmsCIEXYZ _mul2xyz(dt_iop_module_t *self,
   }
 
   return (cmsCIEXYZ){ XYZ[0], XYZ[1], XYZ[2] };
+}
+
+static gboolean _mul2hue_chroma(dt_iop_module_t *self,
+                                const dt_iop_temperature_params_t *p,
+                                float *hue, float *chroma)
+{
+  const dt_iop_temperature_gui_data_t *g = self->gui_data;
+
+  // four gains have three independent ratios, not two
+  if(!g->matrix_valid || (self->dev->image_storage.flags & DT_IMAGE_4BAYER)
+     || !dt_isfinite(p->red) || !dt_isfinite(p->green) || !dt_isfinite(p->blue)
+     || p->red <= 0.f || p->green <= 0.f || p->blue <= 0.f)
+    return FALSE;
+
+  const cmsCIEXYZ xyz = _mul2xyz(self, p);
+  const double sum = xyz.X + xyz.Y + xyz.Z;
+  if(!isfinite(xyz.X) || !isfinite(xyz.Y) || !isfinite(xyz.Z) || !isfinite(sum)
+     || xyz.Y <= 0.0 || sum <= 0.0)
+    return FALSE;
+
+  // keep chroma independent of gain scale; dt_D50_XYZ_to_xyY clips negative XYZ
+  dt_aligned_pixel_t xyY = { xyz.X / sum, xyz.Y / sum, 1.f, 0.f };
+  dt_aligned_pixel_t Lch = { 0.f };
+  dt_xyY_to_Lch(xyY, Lch);
+  *hue = rad2degf(Lch[2]);
+  *chroma = Lch[1];
+  return dt_isfinite(*hue) && dt_isfinite(*chroma) && *chroma <= DT_IOP_TEMP_CHROMA_MAX;
+}
+
+static gboolean _hue_chroma2mul(dt_iop_module_t *self, const float hue,
+                                const float chroma, double coeffs[4])
+{
+  const dt_aligned_pixel_t Lch = { 100.f, chroma, deg2radf(hue), 0.f };
+  dt_aligned_pixel_t xyY = { 0.f };
+  dt_Lch_to_xyY(Lch, xyY);
+  if(!dt_isfinite(xyY[0]) || !dt_isfinite(xyY[1]) || xyY[1] <= 0.f)
+    return FALSE;
+
+  const cmsCIEXYZ xyz = { (double)xyY[0] / xyY[1], 1.0,
+                          (1.0 - xyY[0] - xyY[1]) / xyY[1] };
+  _xyz2mul(self, xyz, coeffs);
+  coeffs[0] /= coeffs[1];
+  coeffs[2] /= coeffs[1];
+  coeffs[1] = 1.0;
+  // the fourth camera matrix row is zero for three-color cameras
+  coeffs[3] = 1.0;
+
+  for(int k = 0; k < 3; k++)
+    if(!isfinite(coeffs[k]) || coeffs[k] <= 0.0 || coeffs[k] > 8.0)
+      return FALSE;
+
+  // reject candidates that become unrepresentable after float conversion
+  dt_iop_temperature_params_t candidate = *(const dt_iop_temperature_params_t *)self->params;
+  _temp_params_from_array(&candidate, coeffs);
+  float readback_hue, readback_chroma;
+  return _mul2hue_chroma(self, &candidate, &readback_hue, &readback_chroma);
 }
 
 static void _mul2temp(dt_iop_module_t *self,
@@ -1212,6 +1275,10 @@ static void _update_controls_lock(dt_iop_module_t *self)
   for(size_t i = 0; i < G_N_ELEMENTS(controls); i++)
     gtk_widget_set_sensitive(controls[i], !locked);
 
+  // these controls also need a representable illuminant
+  gtk_widget_set_sensitive(g->scale_hue, !locked && g->hue_chroma_valid);
+  gtk_widget_set_sensitive(g->scale_chroma, !locked && g->hue_chroma_valid);
+
   dt_bauhaus_combobox_entry_set_sensitive(g->presets, DT_IOP_TEMP_SPOT, !locked);
   // the first entry after the standard ones is the camera name, which
   // _generate_preset_combo() adds as a section: it must stay insensitive
@@ -1220,6 +1287,30 @@ static void _update_controls_lock(dt_iop_module_t *self)
   gtk_widget_queue_draw(g->presets);
 
   gtk_widget_set_visible(g->label_locked, locked);
+}
+
+static void _update_hue_chroma(dt_iop_module_t *self, const gboolean force)
+{
+  dt_iop_temperature_gui_data_t *g = self->gui_data;
+  float hue, chroma;
+  g->hue_chroma_valid = _mul2hue_chroma(self, self->params, &hue, &chroma);
+
+  if(g->hue_chroma_valid)
+  {
+    const float hue_difference = fabsf(remainderf(dt_bauhaus_slider_get(g->scale_hue) - hue, 360.f));
+    const float chroma_difference = fabsf(dt_bauhaus_slider_get(g->scale_chroma) - chroma);
+
+    // avoid moving a dragged slider or changing an undefined achromatic hue
+    DT_ENTER_GUI_UPDATE();
+    if(chroma >= DT_IOP_TEMP_ACHROMATIC_THRESHOLD
+       && (force || hue_difference > DT_IOP_TEMP_HUE_CHROMA_TOLERANCE))
+      dt_bauhaus_slider_set(g->scale_hue, hue);
+    if(force || chroma_difference > DT_IOP_TEMP_HUE_CHROMA_TOLERANCE)
+      dt_bauhaus_slider_set(g->scale_chroma, chroma);
+    DT_LEAVE_GUI_UPDATE();
+  }
+
+  _update_controls_lock(self);
 }
 
 static void _update_preset(dt_iop_module_t *self, int mode)
@@ -1276,6 +1367,7 @@ void gui_update(dt_iop_module_t *self)
 
   dt_bauhaus_slider_set(g->scale_k, tempK);
   dt_bauhaus_slider_set(g->scale_tint, tint);
+  _update_hue_chroma(self, FALSE);
   dt_bauhaus_slider_set(g->scale_r, p->red);
   dt_bauhaus_slider_set(g->scale_g, p->green);
   dt_bauhaus_slider_set(g->scale_b, p->blue);
@@ -1514,12 +1606,14 @@ static void _prepare_matrices(dt_iop_module_t *self)
     // let's just assume for now(TM) that if it is not raw, it is sRGB
     memcpy(g->XYZ_to_CAM, XYZ_to_RGB, sizeof(g->XYZ_to_CAM));
     memcpy(g->CAM_to_XYZ, RGB_to_XYZ, sizeof(g->CAM_to_XYZ));
+    g->matrix_valid = TRUE;
     return;
   }
 
-  if(!dt_colorspaces_conversion_matrices_xyz(self->dev->image_storage.adobe_XYZ_to_CAM,
-                                              self->dev->image_storage.d65_color_matrix,
-                                              g->XYZ_to_CAM, g->CAM_to_XYZ))
+  g->matrix_valid = dt_colorspaces_conversion_matrices_xyz(self->dev->image_storage.adobe_XYZ_to_CAM,
+                                                           self->dev->image_storage.d65_color_matrix,
+                                                           g->XYZ_to_CAM, g->CAM_to_XYZ);
+  if(!g->matrix_valid)
   {
     if(self->dev->image_storage.load_status == DT_IMAGEIO_OK)  // suppress spurious error messages
     {
@@ -1690,6 +1784,9 @@ void reload_defaults(dt_iop_module_t *self)
   // for Leica 'Monochrom' cameras). prepare_matrices is a no-op as well, as there
   // isn't a color matrix, so we can skip that as well.
 
+  if(self->gui_data)
+    ((dt_iop_temperature_gui_data_t *)self->gui_data)->matrix_valid = FALSE;
+
   if(!true_monochrome)
   {
     // set up the matrices gui_data->XYZ_to_CAM, gui_data->CAM_to_XYZ,
@@ -1748,6 +1845,13 @@ void reload_defaults(dt_iop_module_t *self)
 
     dt_bauhaus_slider_set_default(g->scale_k, TempK);
     dt_bauhaus_slider_set_default(g->scale_tint, tint);
+
+    float hue, chroma;
+    if(_mul2hue_chroma(self, d, &hue, &chroma))
+    {
+      dt_bauhaus_slider_set_default(g->scale_hue, hue);
+      dt_bauhaus_slider_set_default(g->scale_chroma, chroma);
+    }
 
     dt_bauhaus_combobox_clear(g->presets);
 
@@ -1834,6 +1938,28 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 
   dt_bauhaus_combobox_set(g->presets, DT_IOP_TEMP_USER);
   _update_preset(self, DT_IOP_TEMP_USER);
+}
+
+static void _hue_chroma_callback(GtkWidget *slider, dt_iop_module_t *self)
+{
+  DT_GUARD_GUI_UPDATE();
+
+  dt_iop_temperature_gui_data_t *g = self->gui_data;
+  const float chroma = dt_bauhaus_slider_get(g->scale_chroma);
+  if(slider == g->scale_hue && chroma < DT_IOP_TEMP_ACHROMATIC_THRESHOLD)
+    return;
+
+  dt_iop_color_picker_reset(self, TRUE);
+
+  double coeffs[4];
+  if(!_hue_chroma2mul(self, dt_bauhaus_slider_get(g->scale_hue), chroma, coeffs))
+  {
+    _update_hue_chroma(self, TRUE);
+    return;
+  }
+
+  _temp_params_from_array(self->params, coeffs);
+  gui_changed(self, NULL, NULL);
 }
 
 static void _btn_toggled(GtkGestureSingle *gesture,
@@ -2021,6 +2147,8 @@ static void _preset_tune_callback(GtkWidget *widget, dt_iop_module_t *self)
   dt_bauhaus_slider_set(g->scale_y, pcoeffs[3]);
   DT_LEAVE_GUI_UPDATE();
 
+  _update_hue_chroma(self, FALSE);
+
   _color_temptint_sliders(self);
   _color_rgb_sliders(self);
   _color_finetuning_slider(self);
@@ -2091,6 +2219,8 @@ static void _gui_sliders_update(dt_iop_module_t *self)
   }
 
   gtk_widget_set_visible(GTK_WIDGET(g->scale_y), (img->flags & DT_IMAGE_4BAYER));
+  gtk_widget_set_visible(g->scale_hue, !(img->flags & DT_IMAGE_4BAYER));
+  gtk_widget_set_visible(g->scale_chroma, !(img->flags & DT_IMAGE_4BAYER));
 }
 
 static void temp_label_click(GtkGestureSingle *gesture,
@@ -2260,6 +2390,19 @@ void gui_init(dt_iop_module_t *self)
     (g->scale_tint,
      _("color tint of the image, from magenta (value < 1) to green (value > 1)"));
 
+  g->scale_hue = dt_bauhaus_slider_new_with_range(self, 0.f, 360.f, 0, 0.f, 1);
+  dt_bauhaus_widget_set_label(g->scale_hue, NULL, N_("hue"));
+  dt_bauhaus_slider_set_format(g->scale_hue, "°");
+  gtk_widget_set_tooltip_text
+    (g->scale_hue, _("hue of the illuminant, from the channel coefficients and the camera matrix"));
+
+  g->scale_chroma = dt_bauhaus_slider_new_with_range(self, 0.f, 100.f, 0, 0.f, 1);
+  dt_bauhaus_widget_set_label(g->scale_chroma, NULL, N_("chroma"));
+  dt_bauhaus_slider_set_format(g->scale_chroma, "%");
+  dt_bauhaus_slider_set_hard_max(g->scale_chroma, DT_IOP_TEMP_CHROMA_MAX);
+  gtk_widget_set_tooltip_text
+    (g->scale_chroma, _("chroma of the illuminant, from the channel coefficients and the camera matrix"));
+
   // the _from_params helper appends to self->widget, so it has to be
   // box_enabled while the checkbox is created
   GtkWidget *box_enabled = dt_gui_vbox(g->buttonbar);
@@ -2285,7 +2428,9 @@ void gui_init(dt_iop_module_t *self)
                  g->finetune,
                  temp_label_box,
                  g->scale_k,
-                 g->scale_tint);
+                 g->scale_tint,
+                 g->scale_hue,
+                 g->scale_chroma);
 
   dt_gui_new_collapsible_section
     (&g->cs,
@@ -2305,12 +2450,20 @@ void gui_init(dt_iop_module_t *self)
   dt_bauhaus_slider_set_digits(g->scale_b, 3);
   dt_bauhaus_slider_set_digits(g->scale_y, 3);
 
+#if !GTK_CHECK_VERSION(4, 0, 0)
   gtk_widget_set_no_show_all(g->scale_y, TRUE);
+  gtk_widget_set_no_show_all(g->scale_hue, TRUE);
+  gtk_widget_set_no_show_all(g->scale_chroma, TRUE);
+#endif
 
   g_signal_connect(G_OBJECT(g->scale_k), "value-changed",
                    G_CALLBACK(_temp_tint_callback), self);
   g_signal_connect(G_OBJECT(g->scale_tint), "value-changed",
                    G_CALLBACK(_temp_tint_callback), self);
+  g_signal_connect(G_OBJECT(g->scale_hue), "value-changed",
+                   G_CALLBACK(_hue_chroma_callback), self);
+  g_signal_connect(G_OBJECT(g->scale_chroma), "value-changed",
+                   G_CALLBACK(_hue_chroma_callback), self);
 
   g_signal_connect(G_OBJECT(g->presets), "value-changed",
                    G_CALLBACK(_preset_tune_callback), self);
