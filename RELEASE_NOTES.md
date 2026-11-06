@@ -231,6 +231,11 @@ changes (where available).
   controls and its camera presets, because the white balance is then
   controlled in color calibration.
 
+- The white balance module has new hue and chroma sliders, which set
+  the channel coefficients from the color of the illuminant, in the
+  same terms as a custom illuminant in color calibration. They are
+  hidden for cameras with four-color sensors.
+
 ## Performance Improvements
 
 - New edits convert the input color profile directly to the working RGB
