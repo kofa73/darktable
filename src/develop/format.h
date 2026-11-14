@@ -107,6 +107,29 @@ static inline gboolean dt_dev_wb_late_correction(const dt_dev_wb_t *wb,
   return dsc->temperature.enabled && wb->late_correction;
 }
 
+// white balance state actually applied to this buffer. pipe->wb is set by
+// temperature's commit_params(), but callers can disable temperature after
+// synch_all(), so only dsc->temperature.enabled tells that this buffer was
+// white balanced; when not, return the disabled state temperature writes,
+// keeping D65coeffs
+static inline void dt_dev_wb_for_buffer(const dt_dev_wb_t *wb,
+                                        const dt_iop_buffer_dsc_t *dsc,
+                                        dt_dev_wb_t *out)
+{
+  if(dsc->temperature.enabled)
+  {
+    *out = *wb;
+    return;
+  }
+  for_four_channels(k)
+  {
+    out->coeffs[k] = 1.0f;
+    out->D65coeffs[k] = wb->D65coeffs[k];
+  }
+  out->late_correction = FALSE;
+  out->camera_reference = FALSE;
+}
+
 size_t dt_iop_buffer_dsc_to_bpp(const struct dt_iop_buffer_dsc_t *dsc);
 
 void default_input_format(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_t *pipe,

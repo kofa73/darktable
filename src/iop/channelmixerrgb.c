@@ -203,6 +203,7 @@ typedef struct dt_iop_channelmixer_rbg_data_t
   float p, gamut;
   gboolean apply_grey;
   gboolean clip;
+  gboolean fallback_to_camera;
   dt_adaptation_t adaptation;
   dt_illuminant_t illuminant_type;
   dt_iop_channelmixer_rgb_version_t version;
@@ -2224,19 +2225,28 @@ static void _set_trouble_messages(dt_iop_module_t *self)
 }
 
 // The illuminants derived from pipe->wb are computed per run, into the
-// caller's variable. pipe->wb can change without a new commit_params()
+// caller's variables. pipe->wb can change without a new commit_params()
 // (only temperature is recommitted when its history item changes), so a
 // result kept in the piece data would make later runs depend on earlier ones.
 static void _get_pipe_illuminant(const dt_iop_module_t *self,
                                  const dt_dev_pixelpipe_t *pipe,
                                  const dt_iop_channelmixer_rbg_data_t *d,
-                                 dt_aligned_pixel_t illuminant)
+                                 dt_aligned_pixel_t illuminant,
+                                 float *p)
 {
   float x = 0.f;
   float y = 0.f;
   gboolean from_pipe_wb = FALSE;
 
-  if(d->illuminant_type == DT_ILLUMINANT_CAMERA)
+  // temperature can be disabled after synch_all(), leaving pipe->wb stale;
+  // read what actually processed this buffer
+  dt_dev_wb_t wb;
+  if(d->illuminant_type == DT_ILLUMINANT_CAMERA
+     || d->fallback_to_camera
+     || d->illuminant_type == DT_ILLUMINANT_FROM_WB)
+    dt_dev_wb_for_buffer(&pipe->wb, &pipe->dsc, &wb);
+
+  if(d->illuminant_type == DT_ILLUMINANT_CAMERA || d->fallback_to_camera)
   {
     // The camera illuminant is a behaviour rather than a preset of
     // values: it uses whatever is in the RAW EXIF. But it depends on
@@ -2247,13 +2257,13 @@ static void _get_pipe_illuminant(const dt_iop_module_t *self,
     // change here, so we can't update the defaults.  So we need to
     // re-run the detection at runtime…
     dt_aligned_pixel_t correction_ratios;
-    _get_d65_correction_ratios(self, &pipe->wb, correction_ratios);
+    _get_d65_correction_ratios(self, &wb, correction_ratios);
     from_pipe_wb = find_illuminant_xy_from_as_shot_coeffs(&(self->dev->image_storage),
                                                           correction_ratios, &x, &y);
   }
   else if(d->illuminant_type == DT_ILLUMINANT_FROM_WB)
   {
-    _illuminant_xy_from_wb_or_D50(self, &pipe->wb, &x, &y);
+    _illuminant_xy_from_wb_or_D50(self, &wb, &x, &y);
     from_pipe_wb = TRUE;
   }
 
@@ -2263,14 +2273,18 @@ static void _get_pipe_illuminant(const dt_iop_module_t *self,
     dt_aligned_pixel_t XYZ;
     illuminant_xy_to_XYZ(x, y, XYZ);
 
-    // Convert illuminant from XYZ to Bradford modified LMS
+    // Convert illuminant from XYZ to adaptation LMS
     convert_any_XYZ_to_LMS(XYZ, illuminant, d->adaptation);
     illuminant[3] = 0.f;
+    *p = d->adaptation == DT_ADAPTATION_FULL_BRADFORD
+      ? powf(0.818155f / illuminant[2], 0.0834f)
+      : d->p;
   }
   else
   {
     // for a failed camera lookup, commit_params() set it from the saved p->x/p->y
     copy_pixel(illuminant, d->illuminant);
+    *p = d->p;
   }
 }
 
@@ -2362,7 +2376,8 @@ void process(dt_iop_module_t *self,
   }
 
   dt_aligned_pixel_t illuminant;
-  _get_pipe_illuminant(self, pipe, data, illuminant);
+  float p = data->p;
+  _get_pipe_illuminant(self, pipe, data, illuminant, &p);
 
   // force loop unswitching in a controlled way
   switch(data->adaptation)
@@ -2372,7 +2387,7 @@ void process(dt_iop_module_t *self,
       _loop_switch(in, out, roi_out->width, roi_out->height, ch,
                    XYZ_to_RGB, RGB_to_XYZ, data->MIX,
                    illuminant, data->saturation, data->lightness, data->grey,
-                   data->p, data->gamut, data->clip, data->apply_grey,
+                   p, data->gamut, data->clip, data->apply_grey,
                    DT_ADAPTATION_FULL_BRADFORD, data->version);
       break;
     }
@@ -2381,7 +2396,7 @@ void process(dt_iop_module_t *self,
       _loop_switch(in, out, roi_out->width, roi_out->height, ch,
                    XYZ_to_RGB, RGB_to_XYZ, data->MIX,
                    illuminant, data->saturation, data->lightness, data->grey,
-                   data->p, data->gamut, data->clip, data->apply_grey,
+                   p, data->gamut, data->clip, data->apply_grey,
                    DT_ADAPTATION_LINEAR_BRADFORD, data->version);
       break;
     }
@@ -2390,7 +2405,7 @@ void process(dt_iop_module_t *self,
       _loop_switch(in, out, roi_out->width, roi_out->height, ch,
                    XYZ_to_RGB, RGB_to_XYZ, data->MIX,
                    illuminant, data->saturation, data->lightness, data->grey,
-                   data->p, data->gamut, data->clip, data->apply_grey,
+                   p, data->gamut, data->clip, data->apply_grey,
                    DT_ADAPTATION_CAT16, data->version);
       break;
     }
@@ -2399,7 +2414,7 @@ void process(dt_iop_module_t *self,
       _loop_switch(in, out, roi_out->width, roi_out->height, ch,
                    XYZ_to_RGB, RGB_to_XYZ, data->MIX,
                    illuminant, data->saturation, data->lightness, data->grey,
-                   data->p, data->gamut, data->clip, data->apply_grey,
+                   p, data->gamut, data->clip, data->apply_grey,
                    DT_ADAPTATION_XYZ, data->version);
       break;
     }
@@ -2408,7 +2423,7 @@ void process(dt_iop_module_t *self,
       _loop_switch(in, out, roi_out->width, roi_out->height, ch,
                    XYZ_to_RGB, RGB_to_XYZ, data->MIX,
                    illuminant, data->saturation, data->lightness, data->grey,
-                   data->p, data->gamut, data->clip, data->apply_grey,
+                   p, data->gamut, data->clip, data->apply_grey,
                    DT_ADAPTATION_RGB, data->version);
       break;
     }
@@ -2447,7 +2462,8 @@ int process_cl(dt_iop_module_t *self,
     _declare_cat_on_pipe(self, FALSE);
 
   dt_aligned_pixel_t illuminant;
-  _get_pipe_illuminant(self, pipe, d, illuminant);
+  float p = d->p;
+  _get_pipe_illuminant(self, pipe, d, illuminant, &p);
 
   cl_int err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
 
@@ -2510,7 +2526,7 @@ int process_cl(dt_iop_module_t *self,
           CLARG(input_matrix_cl), CLARG(output_matrix_cl),
           CLARG(MIX_cl), CLARG(illuminant), CLARG(d->saturation),
           CLARG(d->lightness), CLARG(d->grey),
-          CLARG(d->p), CLARG(d->gamut), CLARG(d->clip), CLARG(d->apply_grey),
+          CLARG(p), CLARG(d->gamut), CLARG(d->clip), CLARG(d->apply_grey),
           CLARG(d->version));
 
 error:
@@ -3252,12 +3268,22 @@ void commit_params(dt_iop_module_t *self,
   d->clip = p->clip;
   d->gamut = (p->gamut == 0.f) ? p->gamut : 1.f / p->gamut;
 
+  // out-of-range daylight or blackbody temperatures fall back to the camera
+  // illuminant in illuminant_to_xy(), so recompute at process time like CAMERA
+  d->fallback_to_camera = FALSE;
+  if(p->illuminant == DT_ILLUMINANT_D || p->illuminant == DT_ILLUMINANT_BB)
+  {
+    float tx, ty;
+    d->fallback_to_camera = !illuminant_to_xy(p->illuminant, NULL, NULL, &tx, &ty,
+                                              p->temperature, p->illum_fluo, p->illum_led);
+  }
+
   // find x y coordinates of illuminant for CIE 1931 2° observer
   float x = p->x;
   float y = p->y;
-  // the camera illuminant keeps the saved p->x/p->y here: it is the fallback
-  // for when _get_pipe_illuminant() fails to look it up from pipe->wb
-  if(p->illuminant != DT_ILLUMINANT_CAMERA)
+  // the camera illuminant (or out-of-range D/BB fallback) keeps the saved
+  // p->x/p->y here: fallback for when _get_pipe_illuminant() lookup fails
+  if(p->illuminant != DT_ILLUMINANT_CAMERA && !d->fallback_to_camera)
     _get_corrected_illuminant_xy(self, &pipe->wb, p, &x, &y);
 
   // if illuminant is from camera or user WB coefficients, x and y are set on-the-fly,
