@@ -770,6 +770,47 @@ static void _locked_masks_restore(dt_develop_t *dev_dest,
   g_list_free(locked);
 }
 
+// raw multipliers, as white balance stores them, are only valid for the
+// sensor they were set on; on non-raws they are plain RGB gains. Read from
+// the database rather than the image cache: the copied source may have been
+// removed since, and the cache leaves a removed image's entry locked
+static gboolean _input_specific_copy_allowed(const dt_imgid_t imgid,
+                                             const dt_imgid_t dest_imgid)
+{
+  sqlite3_stmt *stmt;
+  // clang-format off
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
+                              "SELECT (src.flags & ?3) != 0, (dest.flags & ?3) != 0,"
+                              "       src.camera_id = dest.camera_id"
+                              " FROM main.images AS src, main.images AS dest"
+                              " WHERE src.id = ?1 AND dest.id = ?2",
+                              -1, &stmt, NULL);
+  // clang-format on
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, dest_imgid);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, DT_IMAGE_RAW | DT_IMAGE_S_RAW);
+
+  gboolean same = FALSE;
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+  {
+    const gboolean raw = sqlite3_column_int(stmt, 0);
+    const gboolean dest_raw = sqlite3_column_int(stmt, 1);
+    const gboolean same_camera = sqlite3_column_int(stmt, 2);
+    same = raw == dest_raw && (!raw || same_camera);
+  }
+  sqlite3_finalize(stmt);
+  return same;
+}
+
+static gboolean _skip_copy(const int flags,
+                           const dt_imgid_t imgid,
+                           const dt_imgid_t dest_imgid)
+{
+  return dt_history_module_skip_copy(flags)
+    || ((flags & IOP_FLAGS_INPUT_SPECIFIC_COPY)
+        && !_input_specific_copy_allowed(imgid, dest_imgid));
+}
+
 static gboolean _history_copy_and_paste_on_image_merge(const dt_imgid_t imgid,
                                                        const dt_imgid_t dest_imgid,
                                                        GList *ops,
@@ -884,7 +925,7 @@ static gboolean _history_copy_and_paste_on_image_merge(const dt_imgid_t imgid,
               && !memcmp(mod_src->params, mod_src->default_params, mod_src->params_size)
               // it's not a enabled by default module with unmodified settings
               && !dt_iop_is_hidden(mod_src))
-         && (copy_full || !dt_history_module_skip_copy(mod_src->flags()))
+         && (copy_full || !_skip_copy(mod_src->flags(), imgid, dest_imgid))
         )
       {
         const gboolean autoinit = FALSE;
@@ -984,7 +1025,7 @@ static gboolean _history_copy_and_paste_on_image_overwrite(const dt_imgid_t imgi
       {
         dt_iop_module_so_t *module = modules->data;
 
-        if(dt_history_module_skip_copy(module->flags()))
+        if(_skip_copy(module->flags(), imgid, dest_imgid))
         {
           if(skip_modules)
             dt_util_str_cat(&skip_modules, ",");
@@ -2191,9 +2232,9 @@ gboolean dt_history_copy(const dt_imgid_t imgid)
   if(!dt_is_valid_imgid(imgid)) return FALSE;
 
   darktable.view_manager->copy_paste.copied_imageid = imgid;
-  // a plain copy of the whole stack still has to skip the modules flagged as
-  // unsafe to copy, see dt_history_module_skip_copy(). Only a duplicate of the
-  // same image, where copy_full is passed explicitly, copies everything.
+  // a plain copy of the whole stack still skips some modules, see
+  // _skip_copy(). Only a duplicate of the same image, where copy_full is
+  // passed explicitly, copies everything.
   darktable.view_manager->copy_paste.full_copy = FALSE;
 
   // in full copy mode, we also copy the module iop order
